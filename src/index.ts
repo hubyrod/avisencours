@@ -1,28 +1,9 @@
-import { openSession } from "./browser.ts";
-import { buildDefaultParams } from "./defaults.ts";
+import { buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
 import { scrapeAll, type Announcement } from "./scraper.ts";
 import { renderMarkdown, type Matched } from "./report.ts";
 import { classify, type Classification } from "./classify.ts";
 import { classifyLLM } from "./classify-llm.ts";
 import { classifyHybrid } from "./classify-hybrid.ts";
-
-const QUERIES = [
-  "mobilité",
-  "déplacement ET étude",
-  "vélo",
-  "cyclable",
-  "piéton",
-  "stationnement",
-  "intermodalité",
-  "pôle d'échange",
-  "transports collectifs",
-  "plan de mobilité",
-  "schéma directeur ET mobilité",
-  "étude de faisabilité ET mobilité",
-  "évaluation socio-économique",
-  "modélisation trafic",
-  "comptage ET flux",
-] as const;
 
 const EXCLUDE_TYPE_AVIS = [/attribution/i, /résultat/i, /annulation/i];
 
@@ -41,39 +22,28 @@ async function loadOrScrape(cachePath: string, useCache: boolean): Promise<Cache
     }
   }
 
-  const maxPages = Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : 5;
-  const session = await openSession();
+  const query = Bun.argv.slice(2).join(" ").trim() || DEFAULT_QUERY;
+  const maxPages = Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : 10;
+  const params = buildDefaultParams(query);
+
+  console.error(`query: ${query.length > 120 ? query.slice(0, 120) + "…" : query}`);
+
+  const items = await scrapeAll(params, {
+    maxPages,
+    pageSize: 100,
+    onPage: (n, batch) => console.error(`  page ${n}: ${batch.length} items`),
+  });
+
   const byId = new Map<string, CachedItem>();
-
-  try {
-    for (const query of QUERIES) {
-      console.error(`\n=== query: "${query}" ===`);
-      const params = buildDefaultParams(query);
-      const items = await scrapeAll(session.page, params, {
-        maxPages,
-        onPage: (n, batch) => console.error(`  page ${n}: ${batch.length} items`),
-      });
-      const kept = items.filter(keep);
-      console.error(`  total: ${items.length} (kept after type filter: ${kept.length})`);
-
-      for (const it of kept) {
-        const key = it.idweb || it.url;
-        if (!key) continue;
-        const existing = byId.get(key);
-        if (existing) {
-          if (!existing.matchedQueries.includes(query)) existing.matchedQueries.push(query);
-        } else {
-          byId.set(key, { ...it, matchedQueries: [query] });
-        }
-      }
-    }
-  } finally {
-    await session.close();
+  for (const it of items.filter(keep)) {
+    const key = it.idweb || it.url;
+    if (!key) continue;
+    if (!byId.has(key)) byId.set(key, { ...it, matchedQueries: [query] });
   }
 
   const arr = [...byId.values()];
   await Bun.write(cachePath, JSON.stringify(arr, null, 2));
-  console.error(`\ncached ${arr.length} unique avis -> ${cachePath}`);
+  console.error(`cached ${arr.length} unique avis -> ${cachePath}`);
   return arr;
 }
 
@@ -112,7 +82,7 @@ async function main() {
     needsKey && !Bun.env.MISTRAL_API_KEY
       ? (console.error(`MISTRAL_API_KEY not set — falling back from ${requested} to regex`), "regex")
       : requested;
-  console.error(`\nclassifier: ${mode}`);
+  console.error(`classifier: ${mode}`);
 
   const classifyOne =
     mode === "regex"

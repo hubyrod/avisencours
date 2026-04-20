@@ -1,45 +1,40 @@
 export type SearchParams = {
   query: string;
   typeMarche?: string[];
-  descripteurCodes?: number[];
   codeDepartement?: string[];
-  typeAvis?: string[];
-  famille?: string[];
   sort?: string;
   deadlineFrom?: string;
-  disjunctiveFacets?: string[];
   start?: number;
+  rows?: number;
 };
 
-const BASE = Bun.env.PORTAL_BASE_URL;
-if (!BASE) {
-  throw new Error("PORTAL_BASE_URL is required — set it in .env (see .env.example)");
+const API_URL = Bun.env.PORTAL_API_URL;
+const DATASET = Bun.env.PORTAL_DATASET;
+if (!API_URL) {
+  throw new Error("PORTAL_API_URL is required — set it in .env (see .env.example)");
+}
+if (!DATASET) {
+  throw new Error("PORTAL_DATASET is required — set it in .env (see .env.example)");
 }
 
 function enc(s: string): string {
   return encodeURIComponent(s).replace(/%28/g, "(").replace(/%29/g, ")");
 }
 
-export function buildSearchUrl(p: SearchParams): string {
-  const parts: string[] = [];
-  const add = (k: string, v = "") => parts.push(v === "" ? `${k}=` : `${k}=${enc(v)}`);
-
-  for (const f of p.disjunctiveFacets ?? []) add(`disjunctive.${f}`);
-  if (p.sort) add("sort", p.sort);
-  add("q", p.query);
-  for (const t of p.typeMarche ?? []) add("refine.type_marche", t);
-  for (const dc of p.descripteurCodes ?? []) add("refine.dc", String(dc));
-  for (const cd of p.codeDepartement ?? []) add("refine.code_departement", cd);
-  for (const ta of p.typeAvis ?? []) add("refine.type_avis", ta);
-  for (const f of p.famille ?? []) add("refine.famille", f);
-  if (p.start && p.start > 0) add("start", String(p.start));
+export function buildApiUrl(p: SearchParams): string {
+  const parts: string[] = [`dataset=${enc(DATASET!)}`];
+  parts.push(`q=${enc(p.query)}`);
+  if (p.rows) parts.push(`rows=${p.rows}`);
+  if (p.start && p.start > 0) parts.push(`start=${p.start}`);
+  if (p.sort) parts.push(`sort=${enc(p.sort)}`);
+  for (const tm of p.typeMarche ?? []) parts.push(`refine.type_marche=${enc(tm)}`);
+  for (const cd of p.codeDepartement ?? []) parts.push(`refine.code_departement=${enc(cd)}`);
   if (p.deadlineFrom) {
     const d = p.deadlineFrom;
     const expr =
       `(NOT #null(datelimitereponse) AND datelimitereponse>="${d}") ` +
       `OR (#null(datelimitereponse) AND datefindiffusion>="${d}")`;
-    add("q.filtre_etat", expr);
+    parts.push(`q.filtre_etat=${enc(expr)}`);
   }
-
-  return `${BASE}?${parts.join("&")}#resultarea`;
+  return `${API_URL}?${parts.join("&")}`;
 }

@@ -13,3 +13,5 @@ test-results/
 .cache/
 avis-en-cours.md
 avis-travaux.md
+*~
+*.un~
