@@ -1,0 +1,19 @@
+{
+  "name": "avis-en-cours",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "scrape": "bun run src/index.ts",
+    "install:browsers": "bunx playwright install chromium",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

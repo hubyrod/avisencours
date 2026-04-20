@@ -1,0 +1,15 @@
+node_modules/
+bun.lockb
+.env
+.env.local
+dist/
+build/
+out/
+output/
+*.log
+.DS_Store
+playwright-report/
+test-results/
+.cache/
+avis-en-cours.md
+avis-travaux.md
