@@ -13,7 +13,7 @@ export type Announcement = {
   raw: string;
 };
 
-type OdsFields = {
+type OdsRecord = {
   idweb?: string;
   url_avis?: string;
   objet?: string;
@@ -30,8 +30,7 @@ type OdsFields = {
   gestion?: string;
 };
 
-type OdsRecord = { fields: OdsFields };
-type OdsResponse = { nhits: number; records: OdsRecord[] };
+type OdsResponse = { total_count: number; results: OdsRecord[] };
 
 export type ScrapeOptions = {
   maxPages?: number;
@@ -57,13 +56,13 @@ export async function scrapeAll(
       throw new Error(`API ${res.status} ${res.statusText}: ${await res.text()}`);
     }
     const data = (await res.json()) as OdsResponse;
-    const items = data.records.map(toAnnouncement);
+    const items = (data.results ?? []).map(toAnnouncement);
     if (items.length === 0) break;
 
     all.push(...items);
     opts.onPage?.(pageNum, items);
 
-    if (start + items.length >= data.nhits) break;
+    if (start + items.length >= data.total_count) break;
     if (items.length < pageSize) break;
     start += pageSize;
     pageNum++;
@@ -72,8 +71,7 @@ export async function scrapeAll(
   return all;
 }
 
-function toAnnouncement(r: OdsRecord): Announcement {
-  const f = r.fields;
+function toAnnouncement(f: OdsRecord): Announcement {
   const idweb = f.idweb ?? "";
 
   let typeAvis = f.nature_libelle ?? "";

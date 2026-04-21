@@ -27,7 +27,7 @@ export function buildDefaultParams(query: string = DEFAULT_QUERY): SearchParams 
   return {
     query,
     typeMarche: ["SERVICES"],
-    sort: "dateparution",
+    sort: "datelimitereponse ASC",
     deadlineFrom: today(),
   };
 }

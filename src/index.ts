@@ -23,7 +23,7 @@ async function loadOrScrape(cachePath: string, useCache: boolean): Promise<Cache
   }
 
   const query = Bun.argv.slice(2).join(" ").trim() || DEFAULT_QUERY;
-  const maxPages = Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : 10;
+  const maxPages = Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : 100;
   const params = buildDefaultParams(query);
 
   console.error(`query: ${query.length > 120 ? query.slice(0, 120) + "…" : query}`);
