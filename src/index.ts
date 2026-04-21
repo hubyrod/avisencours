@@ -112,22 +112,27 @@ async function main() {
     else excluded.push(enriched);
   }
 
-  const generatedAt = new Date().toISOString();
+  const now = new Date();
+  const generatedAt = now.toISOString();
+  const stamp = generatedAt.slice(0, 19).replace(/[T:]/g, "-");
+
+  const relevantPath = `avis-en-cours-${stamp}.md`;
+  const travauxPath = `avis-travaux-${stamp}.md`;
 
   await Bun.write(
-    "avis-en-cours.md",
+    relevantPath,
     renderMarkdown(relevant, {
       title: "Avis en cours — scope principal (études de mobilité)",
       subtitle:
         "Filtres: `type_marche=SERVICES`, statut *en cours*, toutes départements. " +
         "Exclus: contrôle de travaux, services télécom/téléphonie. " +
-        "Les avis de type *travaux* sont dans `avis-travaux.md`.",
+        `Les avis de type *travaux* sont dans \`${travauxPath}\`.`,
       generatedAt,
     }),
   );
 
   await Bun.write(
-    "avis-travaux.md",
+    travauxPath,
     renderMarkdown(travaux, {
       title: "Avis — travaux (hors scope du cabinet)",
       subtitle:
@@ -145,7 +150,7 @@ async function main() {
       console.error(`  - [${e.idweb}] ${e.reason} — ${e.objet.slice(0, 80)}`);
     }
   }
-  console.error(`\nwrote avis-en-cours.md (${relevant.length}) and avis-travaux.md (${travaux.length})`);
+  console.error(`\nwrote ${relevantPath} (${relevant.length}) and ${travauxPath} (${travaux.length})`);
 }
 
 main().catch((err) => {

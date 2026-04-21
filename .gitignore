@@ -11,7 +11,7 @@ output/
 playwright-report/
 test-results/
 .cache/
-avis-en-cours.md
-avis-travaux.md
+avis-en-cours-*.md
+avis-travaux-*.md
 *~
 *.un~

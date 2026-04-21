@@ -104,6 +104,25 @@ function formatUser(a: Announcement): string {
   ].join("\n");
 }
 
+const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 4;
+
+async function postWithRetry(body: string, key: string, attempt = 1): Promise<MistralResponse> {
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body,
+  });
+  if (res.ok) return (await res.json()) as MistralResponse;
+
+  if (RETRYABLE.has(res.status) && attempt < MAX_ATTEMPTS) {
+    const backoff = 500 * 2 ** (attempt - 1) + Math.random() * 400;
+    await new Promise((r) => setTimeout(r, backoff));
+    return postWithRetry(body, key, attempt + 1);
+  }
+  throw new Error(`Mistral ${res.status}: ${await res.text()}`);
+}
+
 export async function classifyLLM(a: Announcement): Promise<Classification> {
   const key = Bun.env.MISTRAL_API_KEY;
   if (!key) throw new Error("MISTRAL_API_KEY not set");
@@ -115,25 +134,14 @@ export async function classifyLLM(a: Announcement): Promise<Classification> {
     { role: "user", content: formatUser(a) },
   ];
 
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0,
-      response_format: { type: "json_object" },
-    }),
+  const body = JSON.stringify({
+    model,
+    messages,
+    temperature: 0,
+    response_format: { type: "json_object" },
   });
 
-  if (!res.ok) {
-    throw new Error(`Mistral ${res.status}: ${await res.text()}`);
-  }
-
-  const data = (await res.json()) as MistralResponse;
+  const data = await postWithRetry(body, key);
   const content = data.choices[0]?.message.content ?? "{}";
 
   const parsed = JSON.parse(content) as { category?: string; reason?: string };
