@@ -1,0 +1,97 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+
+      # Cache bun's global download cache, NOT node_modules: bun never prunes
+      # node_modules entries that left the lockfile, so a restored node_modules
+      # can ship packages the lockfile no longer has.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-cache-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-cache-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+  deploy:
+    needs: [check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # clever deploy pushes git history to the Clever remote.
+          fetch-depth: 0
+
+      - name: Install Clever Tools
+        # Pinned: `clever link` became non-idempotent in 4.10.0 and started
+        # erroring when the alias was already linked server-side. We resolve
+        # the app from the committed .clever.json (alias "server") and never
+        # call `clever link` in CI, but the pin protects against future
+        # surprises from this CLI's release cadence.
+        run: npm install -g clever-tools@4.10.0
+
+      - name: Login to Clever Cloud
+        run: clever login --token ${{ secrets.CLEVER_TOKEN }} --secret ${{ secrets.CLEVER_SECRET }}
+
+      - name: Deploy
+        # --force: the Clever remote may hold commits from manual `clever deploy`
+        # runs; CI's main is the source of truth. The grep fallback covers the
+        # CLI's habit of exiting non-zero after a successful deployment.
+        run: |
+          clever deploy --alias server --force 2>&1 | tee /tmp/deploy.log || {
+            if grep -q "Successfully deployed" /tmp/deploy.log; then
+              echo "::warning::clever deploy exited non-zero but deployment succeeded"
+            else
+              exit 1
+            fi
+          }
+
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -sf --max-time 5 https://app-b9cefa6c-54f0-434f-a2d2-73b58728c4d1.cleverapps.io/sante; then
+              exit 0
+            fi
+            sleep $((2 ** i))
+          done
+          echo "::error::/sante not healthy after deploy"
+          exit 1

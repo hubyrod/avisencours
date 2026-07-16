@@ -19,7 +19,12 @@ CLASSIFIER=regex USE_CACHE=1 bun run src/index.ts  # force classifier: regex | l
 bun run run:daily                        # server-side daily job: fetch → Postgres → digest email (needs POSTGRESQL_ADDON_URI; always fetches fresh, no cache)
 bun run start                            # dashboard server on :8080 (needs POSTGRESQL_ADDON_URI; set ADMIN_EMAILS to seed an admin)
 bun run typecheck                        # tsc --noEmit
+bun run lint                             # oxlint src
+bun test                                 # unit tests (src/*.test.ts — pure logic only, no DB/network)
+bun run build                            # bundling smoke check (bun build → dist/, gitignored)
 ```
+
+CI (`.github/workflows/ci.yml`) runs those four checks on every push/PR to `main`, then deploys to Clever Cloud (`clever deploy --alias server`, authenticated via `CLEVER_TOKEN`/`CLEVER_SECRET` repo secrets) and curls `/sante` until healthy. Pushing to `main` on GitHub = deploying to production.
 
 `PORTAL_API_URL` and `PORTAL_DATASET` are required for anything that fetches (checked when the API URL is built, in `src/params.ts`). `MISTRAL_API_KEY` is optional; without it the classifier silently falls back to `regex`. Email vars (`MAILPACE_API_TOKEN`, `DIGEST_RECIPIENTS`…) are optional in dev — the daily job logs and skips emails, and login codes are printed to stderr instead of sent (in production working email is mandatory: login happens by emailed code). `OTP_PEPPER` is required in production (production = `DASHBOARD_URL` starts with `https://`). See `.env.example` for the full list.
 
