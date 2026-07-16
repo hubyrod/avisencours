@@ -7,9 +7,12 @@ import {
   sessionSetCookie,
   sessionClearCookie,
   readSessionToken,
+  isEmailDomainAllowed,
+  allowedDomains,
 } from "./auth.ts";
 
 const savedDashboardUrl = Bun.env.DASHBOARD_URL;
+const savedDomains = Bun.env.ALLOWED_EMAIL_DOMAINS;
 
 beforeAll(() => {
   // Force dev mode: plain cookie name, no Secure attribute.
@@ -18,6 +21,24 @@ beforeAll(() => {
 
 afterAll(() => {
   Bun.env.DASHBOARD_URL = savedDashboardUrl;
+  Bun.env.ALLOWED_EMAIL_DOMAINS = savedDomains;
+});
+
+describe("isEmailDomainAllowed", () => {
+  test("domaine autorisé, insensible à la casse et au @ de tête", () => {
+    Bun.env.ALLOWED_EMAIL_DOMAINS = " @ExplainConsultancy.com , autre.fr ";
+    expect(allowedDomains()).toEqual(["explainconsultancy.com", "autre.fr"]);
+    expect(isEmailDomainAllowed("Jean.Dupont@ExplainConsultancy.com")).toBeTrue();
+    expect(isEmailDomainAllowed("x@autre.fr")).toBeTrue();
+    expect(isEmailDomainAllowed("x@gmail.com")).toBeFalse();
+    expect(isEmailDomainAllowed("x@sub.explainconsultancy.com")).toBeFalse();
+    expect(isEmailDomainAllowed("pasdemail")).toBeFalse();
+  });
+
+  test("aucun domaine configuré → tout refusé", () => {
+    delete Bun.env.ALLOWED_EMAIL_DOMAINS;
+    expect(isEmailDomainAllowed("x@explainconsultancy.com")).toBeFalse();
+  });
 });
 
 describe("normalizeEmail", () => {

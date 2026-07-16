@@ -131,6 +131,31 @@ export async function deleteSession(req: Request): Promise<void> {
   await db()`DELETE FROM sessions WHERE token_hash = ${sha256hex(token)}`;
 }
 
+// --- Access rules -----------------------------------------------------------
+
+// Emails on these domains may log in without a pre-created account; the user
+// row is created at first successful code verification (non-admin).
+export function allowedDomains(): string[] {
+  return (Bun.env.ALLOWED_EMAIL_DOMAINS ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase().replace(/^@/, ""))
+    .filter(Boolean);
+}
+
+export function isEmailDomainAllowed(email: string): boolean {
+  const domain = normalizeEmail(email).split("@")[1] ?? "";
+  return domain.length > 0 && allowedDomains().includes(domain);
+}
+
+// JIT provisioning for allowed-domain logins. Never grants admin; never
+// demotes an existing user.
+export async function ensureUser(email: string): Promise<AuthUser | null> {
+  await db()`
+    INSERT INTO users (email) VALUES (${normalizeEmail(email)})
+    ON CONFLICT (email) DO NOTHING`;
+  return findUserByEmail(email);
+}
+
 // --- Login codes (OTP) --------------------------------------------------------
 
 export async function findUserByEmail(email: string): Promise<AuthUser | null> {

@@ -14,6 +14,9 @@ import {
   sessionSetCookie,
   sessionClearCookie,
   findUserByEmail,
+  isEmailDomainAllowed,
+  ensureUser,
+  allowedDomains,
   createLoginCode,
   verifyLoginCode,
   rateLimit,
@@ -217,7 +220,13 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
           <div class="actions"><button class="primary" type="submit">Ajouter</button></div>
         </form>
       </div>
-      <footer>Les utilisateurs se connectent avec un code reçu par email — aucun mot de passe à gérer.</footer>
+      <footer>Les utilisateurs se connectent avec un code reçu par email — aucun mot de passe à gérer.${
+        allowedDomains().length > 0
+          ? ` Les adresses ${allowedDomains()
+              .map((d) => `@${esc(d)}`)
+              .join(", ")} peuvent se connecter sans compte préalable (créé à la première connexion).`
+          : ""
+      }</footer>
     </main>`,
     ),
   );
@@ -352,12 +361,12 @@ async function handleRequestCode(req: Request): Promise<Response> {
   if (!ipOk || !emailOk) return html(loginStep1(MSG_RATE_LIMITED), 429);
 
   const user = await findUserByEmail(norm);
-  if (user) {
+  if (user || isEmailDomainAllowed(norm)) {
     const code = await createLoginCode(norm);
     if (code) {
       // Fire-and-forget: awaiting the send would leak account existence via timing.
-      sendLoginCode(user.email, code).catch((err) =>
-        console.error(`login code email failed for ${user.email}: ${err}`),
+      sendLoginCode(norm, code).catch((err) =>
+        console.error(`login code email failed for ${norm}: ${err}`),
       );
     }
   }
@@ -375,7 +384,9 @@ async function handleVerifyCode(req: Request): Promise<Response> {
   const ok = norm && code ? await verifyLoginCode(norm, code) : false;
   if (!ok) return html(loginStep2(norm, MSG_BAD_CODE), 401);
 
-  const user = await findUserByEmail(norm);
+  // Allowed-domain emails are provisioned at first successful login.
+  let user = await findUserByEmail(norm);
+  if (!user && isEmailDomainAllowed(norm)) user = await ensureUser(norm);
   if (!user) return html(loginStep2(norm, MSG_BAD_CODE), 401);
 
   const token = await createSession(user.id);
