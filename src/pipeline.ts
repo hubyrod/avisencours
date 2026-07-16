@@ -79,6 +79,7 @@ async function mapConcurrent<T, R>(
   fn: (t: T) => Promise<R>,
   concurrency: number,
 ): Promise<R[]> {
+  // oxlint-disable-next-line no-new-array -- length-init; slots are filled by index below
   const results = new Array<R>(items.length);
   let next = 0;
   const workers = Array.from(

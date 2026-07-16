@@ -14,6 +14,7 @@ function normalize(s: string): string {
     .replace(/[œŒ]/g, "oe")
     .replace(/[æÆ]/g, "ae")
     .replace(/[\u2018\u2019\u2032]/g, "'")
+    // oxlint-disable-next-line no-control-regex -- stripping control chars is the point
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
     .toLowerCase();
 }
