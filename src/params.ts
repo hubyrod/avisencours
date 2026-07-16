@@ -8,13 +8,16 @@ export type SearchParams = {
   rows?: number;
 };
 
-const API_URL = Bun.env.PORTAL_API_URL;
-const DATASET = Bun.env.PORTAL_DATASET;
-if (!API_URL) {
-  throw new Error("PORTAL_API_URL is required — set it in .env (see .env.example)");
-}
-if (!DATASET) {
-  throw new Error("PORTAL_DATASET is required — set it in .env (see .env.example)");
+function portalConfig(): { apiUrl: string; dataset: string } {
+  const apiUrl = Bun.env.PORTAL_API_URL;
+  const dataset = Bun.env.PORTAL_DATASET;
+  if (!apiUrl) {
+    throw new Error("PORTAL_API_URL is required — set it in .env (see .env.example)");
+  }
+  if (!dataset) {
+    throw new Error("PORTAL_DATASET is required — set it in .env (see .env.example)");
+  }
+  return { apiUrl, dataset };
 }
 
 function enc(s: string): string {
@@ -41,6 +44,7 @@ function deadlineClause(d: string): string {
 }
 
 export function buildApiUrl(p: SearchParams): string {
+  const { apiUrl, dataset } = portalConfig();
   const parts: string[] = [];
   if (p.rows) parts.push(`limit=${p.rows}`);
   if (p.start && p.start > 0) parts.push(`offset=${p.start}`);
@@ -53,5 +57,5 @@ export function buildApiUrl(p: SearchParams): string {
   if (p.deadlineFrom) clauses.push(deadlineClause(p.deadlineFrom));
   if (clauses.length > 0) parts.push(`where=${enc(clauses.join(" AND "))}`);
 
-  return `${API_URL}/${DATASET}/records?${parts.join("&")}`;
+  return `${apiUrl}/${dataset}/records?${parts.join("&")}`;
 }
