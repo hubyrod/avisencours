@@ -1,0 +1,12 @@
+{
+  "apps": [
+    {
+      "app_id": "app_b9cefa6c-54f0-434f-a2d2-73b58728c4d1",
+      "org_id": "orga_ef1524f4-db94-4089-89e9-355682c0d265",
+      "deploy_url": "https://push-n3-par-clevercloud-customers.services.clever-cloud.com/app_b9cefa6c-54f0-434f-a2d2-73b58728c4d1.git",
+      "git_ssh_url": "git+ssh://git@push-n3-par-clevercloud-customers.services.clever-cloud.com/app_b9cefa6c-54f0-434f-a2d2-73b58728c4d1.git",
+      "name": "server",
+      "alias": "server"
+    }
+  ]
+}

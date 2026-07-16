@@ -7,7 +7,7 @@ Built with Bun + TypeScript. Hits the portal's REST API directly — no browser,
 Two ways to use it:
 
 - **Local CLI** (`bun run src/index.ts`) — writes timestamped markdown reports, as before.
-- **Deployed service** (Clever Cloud) — daily cron run stored in PostgreSQL, a French web dashboard behind Basic Auth (`src/server.ts`), and a daily email digest via Brevo (`src/run.ts`). See [Deployment](#deployment-clever-cloud).
+- **Deployed service** (Clever Cloud) — daily cron run stored in PostgreSQL, a French web dashboard with passwordless email-code login (`src/server.ts` + `src/auth.ts`), and a daily email digest via MailPace (`src/run.ts`). See [Deployment](#deployment-clever-cloud).
 
 ## What it does
 
@@ -86,9 +86,10 @@ src/
   report.ts           Markdown renderer (sorted by deadline)
   index.ts            Local CLI: pipeline → write markdown reports
   db.ts               PostgreSQL (Bun.sql): schema, run tracking, upserts, dashboard queries
+  auth.ts             Passwordless auth: email OTP codes, opaque session cookies, users, rate limits
   run.ts              Daily job: pipeline → upsert DB → email digest (alerts on failure)
-  email.ts            Brevo sender + French digest/alert HTML
-  server.ts           Dashboard (Bun.serve, Basic Auth) + /sante health endpoint
+  email.ts            MailPace sender + French digest/alert/login-code HTML
+  server.ts           Dashboard + login + admin pages (Bun.serve) + /sante health endpoint
 clevercloud/
   cron.json           Daily schedule (04:30 UTC)
   daily-run.sh        Cron entry: env-loading wrapper around src/run.ts
@@ -102,12 +103,13 @@ Per-run outputs (`avis-en-cours-*.md`, `avis-travaux-*.md`) are gitignored.
 One **Node.js app** (Bun is auto-detected from `bun.lock`; `scripts.start` serves the dashboard on port 8080) plus a **PostgreSQL add-on**. The Clever Cloud filesystem is ephemeral — PostgreSQL is the source of truth.
 
 1. Create a Node.js application (1 instance, smallest size, disable autoscaling) and a PostgreSQL add-on (DEV plan), and link them — this injects `POSTGRESQL_ADDON_URI`.
-2. Set the env vars from `.env.example`: portal + Mistral vars, `BASIC_AUTH_USER`/`BASIC_AUTH_PASS` (shared team login), and for emails `BREVO_API_KEY`, `EMAIL_FROM` (verified sender in Brevo), `DIGEST_RECIPIENTS`, `ALERT_RECIPIENT`, `DASHBOARD_URL`.
-3. `git push` to the Clever Cloud remote (or `clever deploy`). Tables are created automatically at startup.
-4. The cron (`clevercloud/cron.json`) fires every day at 04:30 UTC: scrape → classify → store → digest email. On failure, `ALERT_RECIPIENT` gets an alert email and the dashboard banner turns red.
-5. First run can be triggered manually: `clever ssh` then `bun run src/run.ts` (or wait for the next morning).
+2. **Email first**: MailPace token with a DKIM-verified sending domain (the add-on injects no env var — copy the token manually). Login is by emailed code, so a deployed app without working email is unreachable. Smoke-test the token with a curl to `https://app.mailpace.com/api/v1/send` before deploying; a 403 means the domain is not verified.
+3. Set the env vars from `.env.example`: portal + Mistral vars, `MAILPACE_API_TOKEN`, `EMAIL_FROM`, `OTP_PEPPER`, `ADMIN_EMAILS` (your email — seeded as admin at startup), `DIGEST_RECIPIENTS`, `ALERT_RECIPIENT`, `DASHBOARD_URL`.
+4. `clever deploy`. Tables are created automatically at startup; `ADMIN_EMAILS` accounts are upserted as admins.
+5. Log in at `/connexion` with your email code, then add teammates from `/admin`.
+6. The cron (`clevercloud/cron.json`) fires every day at 04:30 UTC: scrape → classify → store → digest email. On failure, `ALERT_RECIPIENT` gets an alert email and the dashboard banner turns red.
 
-Emails are skipped (with a log line) when `BREVO_API_KEY`/`DIGEST_RECIPIENTS` are unset, so the dashboard can be deployed before the email setup. The digest is sent every day even when empty — if it stops arriving, something is wrong.
+The digest is skipped (with a log line) when `MAILPACE_API_TOKEN`/`DIGEST_RECIPIENTS` are unset. It is sent every day even when empty — if it stops arriving, something is wrong.
 
 ## License
 

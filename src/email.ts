@@ -1,7 +1,9 @@
 import type { StoredAnnouncement } from "./db.ts";
 
-const API_URL = "https://api.brevo.com/v3/smtp/email";
+const API_URL = "https://app.mailpace.com/api/v1/send";
 
+// 403 is deliberately NOT retryable: it means the sending domain is not
+// DKIM-verified (or from-domain mismatch) and must surface loudly.
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 4;
 
@@ -11,6 +13,14 @@ export type Email = {
   html: string;
 };
 
+function emailToken(): string | undefined {
+  return Bun.env.MAILPACE_API_TOKEN ?? Bun.env.CC_MTA_AUTH_PASSWORD;
+}
+
+export function hasEmailToken(): boolean {
+  return Boolean(emailToken());
+}
+
 export function digestRecipients(): string[] {
   return (Bun.env.DIGEST_RECIPIENTS ?? "")
     .split(",")
@@ -19,22 +29,26 @@ export function digestRecipients(): string[] {
 }
 
 export async function sendEmail(email: Email): Promise<void> {
-  const key = Bun.env.BREVO_API_KEY;
+  const token = emailToken();
   const from = Bun.env.EMAIL_FROM;
-  if (!key) throw new Error("BREVO_API_KEY not set");
+  if (!token) throw new Error("MAILPACE_API_TOKEN not set");
   if (!from) throw new Error("EMAIL_FROM not set");
 
   const body = JSON.stringify({
-    sender: { email: from, name: "Avis en cours" },
-    to: email.to.map((e) => ({ email: e })),
+    from,
+    to: email.to.join(","),
     subject: email.subject,
-    htmlContent: email.html,
+    htmlbody: email.html,
   });
 
   for (let attempt = 1; ; attempt++) {
     const res = await fetch(API_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "api-key": key },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "MailPace-Server-Token": token,
+      },
       body,
     });
     if (res.ok) return;
@@ -43,8 +57,31 @@ export async function sendEmail(email: Email): Promise<void> {
       await new Promise((r) => setTimeout(r, backoff));
       continue;
     }
-    throw new Error(`Brevo ${res.status}: ${await res.text()}`);
+    throw new Error(`MailPace ${res.status}: ${await res.text()}`);
   }
+}
+
+// Sends the 6-digit login code. Without an email token (local dev), the code
+// is printed to stderr instead so the flow stays testable.
+export async function sendLoginCode(to: string, code: string): Promise<void> {
+  if (!hasEmailToken()) {
+    console.error(`[dev] login code for ${to}: ${code}`);
+    return;
+  }
+  await sendEmail({
+    to: [to],
+    subject: "Votre code de connexion — Avis en cours",
+    html: `
+  <div style="font-family:Helvetica,Arial,sans-serif;max-width:480px;margin:0 auto;color:#222;">
+    <h1 style="font-size:18px;">Code de connexion</h1>
+    <p>Votre code de connexion :</p>
+    <p style="font-size:32px;font-weight:700;letter-spacing:6px;font-variant-numeric:tabular-nums;">${code}</p>
+    <p style="color:#666;">Il expire dans 5 minutes.</p>
+    <p style="color:#999;font-size:12px;margin-top:24px;">
+      Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.
+    </p>
+  </div>`,
+  });
 }
 
 function esc(s: string): string {

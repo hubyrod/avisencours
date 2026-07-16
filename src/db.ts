@@ -47,6 +47,36 @@ export async function migrate(): Promise<void> {
       last_seen_run_id  bigint REFERENCES runs(id)
     )`;
   await sql`CREATE INDEX IF NOT EXISTS announcements_category_deadline ON announcements (category, deadline)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS users (
+      id            bigserial PRIMARY KEY,
+      email         text NOT NULL UNIQUE,
+      name          text,
+      is_admin      boolean NOT NULL DEFAULT false,
+      created_at    timestamptz NOT NULL DEFAULT now(),
+      last_login_at timestamptz
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash   text PRIMARY KEY,
+      user_id      bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at   timestamptz NOT NULL DEFAULT now(),
+      last_used_at timestamptz NOT NULL DEFAULT now(),
+      expires_at   timestamptz NOT NULL
+    )`;
+  await sql`CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS email_verification_codes (
+      id         bigserial PRIMARY KEY,
+      email      text NOT NULL,
+      code_hash  text NOT NULL,
+      purpose    text NOT NULL DEFAULT 'login',
+      attempts   int NOT NULL DEFAULT 0,
+      expires_at timestamptz NOT NULL,
+      used_at    timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`CREATE INDEX IF NOT EXISTS evc_email_idx ON email_verification_codes (email, created_at DESC)`;
 }
 
 // Single arbitrary lock id shared by every runner of this app.

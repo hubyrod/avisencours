@@ -10,11 +10,13 @@ import {
 } from "./db.ts";
 import {
   sendEmail,
+  hasEmailToken,
   digestRecipients,
   renderDigestHtml,
   renderAlertHtml,
   digestSubject,
 } from "./email.ts";
+import { cleanupAuth } from "./auth.ts";
 
 function frDate(d: Date): string {
   return d.toLocaleDateString("fr-FR", {
@@ -28,8 +30,8 @@ function frDate(d: Date): string {
 
 async function sendAlert(error: string): Promise<void> {
   const to = Bun.env.ALERT_RECIPIENT;
-  if (!to || !Bun.env.BREVO_API_KEY) {
-    console.error("no ALERT_RECIPIENT/BREVO_API_KEY — skipping alert email");
+  if (!to || !hasEmailToken()) {
+    console.error("no ALERT_RECIPIENT/MAILPACE_API_TOKEN — skipping alert email");
     return;
   }
   try {
@@ -73,9 +75,11 @@ async function main() {
       `run #${runId} done — relevant: ${relevant.length}, travaux: ${travaux.length}, excluded: ${excluded.length}`,
     );
 
+    await cleanupAuth();
+
     const recipients = digestRecipients();
-    if (recipients.length === 0 || !Bun.env.BREVO_API_KEY) {
-      console.error("no DIGEST_RECIPIENTS/BREVO_API_KEY — skipping digest email");
+    if (recipients.length === 0 || !hasEmailToken()) {
+      console.error("no DIGEST_RECIPIENTS/MAILPACE_API_TOKEN — skipping digest email");
       return;
     }
 
