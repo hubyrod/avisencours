@@ -219,6 +219,10 @@ export type StoredAnnouncement = {
   status_label?: string | null;
   status_color?: string | null;
   status_is_rejet?: boolean | null;
+  status_set_at?: Date | null;
+  status_set_by_id?: number | null;
+  status_set_by_name?: string | null;
+  status_set_by_email?: string | null;
 };
 
 export type StatusRow = {
@@ -267,15 +271,18 @@ export async function getCurrent(
   const rows = await db()`
     SELECT a.*,
       (SELECT count(*)::int FROM comments c WHERE c.idweb = a.idweb) AS comment_count,
-      s.id AS status_id, s.label AS status_label, s.color AS status_color, s.is_rejet AS status_is_rejet
+      s.id AS status_id, s.label AS status_label, s.color AS status_color, s.is_rejet AS status_is_rejet,
+      cur.created_at AS status_set_at, cur.user_id AS status_set_by_id,
+      su.name AS status_set_by_name, su.email AS status_set_by_email
     FROM announcements a
     LEFT JOIN LATERAL (
-      SELECT e.status_id FROM status_events e
+      SELECT e.status_id, e.created_at, e.user_id FROM status_events e
       WHERE e.idweb = a.idweb
       ORDER BY e.created_at DESC, e.id DESC
       LIMIT 1
     ) cur ON true
     LEFT JOIN statuses s ON s.id = COALESCE(cur.status_id, ${defaultId})
+    LEFT JOIN users su ON su.id = cur.user_id
     WHERE a.last_seen_run_id = ${runId}
       AND a.category = ${category}
       AND (a.deadline IS NULL OR a.deadline >= now())
@@ -364,13 +371,33 @@ export async function addStatusEvent(idweb: string, statusId: number, userId: nu
   await db()`INSERT INTO status_events (idweb, status_id, user_id) VALUES (${idweb}, ${statusId}, ${userId})`;
 }
 
-export async function getCurrentStatusId(idweb: string): Promise<number | null> {
+export type CurrentStatusEvent = {
+  status_id: number;
+  created_at: Date;
+  user_id: number | null;
+  author_name: string | null;
+  author_email: string | null;
+};
+
+// Dernier événement de statut d'un avis, avec son auteur — null si aucun
+// changement (l'avis est alors au statut par défaut, implicite).
+export async function getCurrentStatusEvent(idweb: string): Promise<CurrentStatusEvent | null> {
   const rows = await db()`
-    SELECT status_id FROM status_events
-    WHERE idweb = ${idweb}
-    ORDER BY created_at DESC, id DESC
+    SELECT e.status_id, e.created_at, e.user_id, u.name AS author_name, u.email AS author_email
+    FROM status_events e
+    LEFT JOIN users u ON u.id = e.user_id
+    WHERE e.idweb = ${idweb}
+    ORDER BY e.created_at DESC, e.id DESC
     LIMIT 1`;
-  return rows[0] ? Number(rows[0].status_id) : null;
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    status_id: Number(r.status_id),
+    created_at: r.created_at,
+    user_id: r.user_id === null ? null : Number(r.user_id),
+    author_name: r.author_name,
+    author_email: r.author_email,
+  };
 }
 
 export async function getNewInRun(runId: number, category: string): Promise<StoredAnnouncement[]> {

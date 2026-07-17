@@ -15,12 +15,13 @@ import {
   setStatusRejet,
   moveStatus,
   addStatusEvent,
-  getCurrentStatusId,
+  getCurrentStatusEvent,
   type StoredAnnouncement,
   type RunRow,
   type StatusRow,
 } from "./db.ts";
 import { startLive, isLiveReady, commentStream } from "./live.ts";
+import { frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
 import { matchPath } from "./router.ts";
 import {
   type AuthUser,
@@ -64,17 +65,6 @@ function esc(s: string): string {
 // qu'aucune valeur ne puisse fermer la balise script.
 function jsonBlob(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
-}
-
-function frDateTime(d: Date): string {
-  return d.toLocaleString("fr-FR", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "Europe/Paris",
-  });
 }
 
 // Outil de travail : sobre et dense. Vert profond en seule couleur d'accent,
@@ -150,6 +140,7 @@ const BASE_CSS = `
     .statut-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 999px; padding: 4px 12px; font-size: 13px; cursor: pointer; font-family: inherit; color: var(--encre); }
     .statut-btn:hover { border-color: var(--panneau); }
     .statut-btn.actif { border-color: var(--panneau); background: #e9f2ed; font-weight: 600; }
+    .statut-attrib { color: var(--encre-2); font-size: 12.5px; margin: 8px 0 0; }
     .evt-statut { border-top: 1px solid var(--ligne); padding: 8px 0; font-size: 12.5px; color: var(--encre-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .evt-statut .quand { font-family: var(--fonte-mono); font-size: 11.5px; }
     footer { color: var(--encre-2); font-size: 12px; margin-top: 20px; }
@@ -543,13 +534,18 @@ const CLIENT_JS = `
     return div;
   }
 
-  // Surligne le bouton du statut courant (dernier événement, sinon le défaut) —
-  // tous les onglets ouverts suivent en direct.
+  // Surligne le bouton du statut courant (dernier événement, sinon le défaut) et
+  // met à jour la ligne « Défini par … » — tous les onglets ouverts suivent en direct.
   function markStatus(thread) {
     let sid = CFG.defaut;
-    for (const i of thread) if (i.kind === "statut") sid = i.status_id;
+    let last = null;
+    for (const i of thread) if (i.kind === "statut") { sid = i.status_id; last = i; }
     for (const b of document.querySelectorAll(".statut-btn")) {
       b.classList.toggle("actif", sid !== null && b.dataset.sid === String(sid));
+    }
+    const attrib = document.getElementById("statut-attrib");
+    if (attrib && last) {
+      attrib.textContent = "Défini par " + who(last) + " le " + fmt(last.created_at);
     }
   }
 
@@ -613,12 +609,17 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
   if (!a) return html(errorPage("Avis introuvable"), 404);
 
   // Statut courant rendu côté serveur : correct même sans moteur Skip (flux 503).
-  const [statuts, currentStatusId, defaultStatus] = await Promise.all([
+  const [statuts, currentEvent, defaultStatus] = await Promise.all([
     listStatuses(false),
-    getCurrentStatusId(idweb),
+    getCurrentStatusEvent(idweb),
     getDefaultStatus(),
   ]);
-  const activeId = currentStatusId ?? (defaultStatus ? Number(defaultStatus.id) : null);
+  const activeId = currentEvent?.status_id ?? (defaultStatus ? Number(defaultStatus.id) : null);
+  const attribution = esc(
+    statusAttributionLine(
+      currentEvent ? { ...currentEvent, created_at: new Date(currentEvent.created_at) } : null,
+    ),
+  );
   const statusButtons = statuts
     .map(
       (s) => `
@@ -662,6 +663,7 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
         <h2>Statut</h2>
         <p style="margin:2px 0 0;">Où en est-on sur cet avis ? Le changement est visible par toute l'équipe et tracé dans le fil.</p>
         <div class="statut-btns">${statusButtons}</div>
+        <p class="statut-attrib" id="statut-attrib">${attribution}</p>
       </div>`
           : ""
       }
@@ -739,7 +741,7 @@ async function handleSetStatus(
   // Re-clic sur le statut déjà affiché (dernier événement, sinon le défaut) :
   // pas de nouvel événement, le fil resterait sinon pollué de doublons.
   const current =
-    (await getCurrentStatusId(idweb)) ?? Number((await getDefaultStatus())?.id ?? NaN);
+    (await getCurrentStatusEvent(idweb))?.status_id ?? Number((await getDefaultStatus())?.id ?? NaN);
   if (current === statusId) return Response.json({ ok: true });
   await addStatusEvent(idweb, statusId, user.id);
   return Response.json({ ok: true });
@@ -774,8 +776,19 @@ function jChip(deadline: Date | null): string {
 
 function announcementRow(a: StoredAnnouncement, latestRunId: number | null): string {
   const isNew = latestRunId !== null && a.first_seen_run_id === latestRunId;
+  const tooltip = statusTooltip(
+    a.status_set_at
+      ? {
+          user_id: a.status_set_by_id == null ? null : Number(a.status_set_by_id),
+          author_name: a.status_set_by_name ?? null,
+          author_email: a.status_set_by_email ?? null,
+          created_at: new Date(a.status_set_at),
+        }
+      : null,
+  );
+  const statusTitle = tooltip ? ` title="${esc(tooltip)}"` : "";
   const statusBadge = a.status_label
-    ? `<span class="badge-statut"><span class="dot" style="background:${esc(
+    ? `<span class="badge-statut"${statusTitle}><span class="dot" style="background:${esc(
         a.status_color ?? "#626d66",
       )}"></span>${esc(a.status_label)}</span>`
     : "";
