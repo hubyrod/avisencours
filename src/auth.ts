@@ -147,6 +147,36 @@ export function isEmailDomainAllowed(email: string): boolean {
   return domain.length > 0 && allowedDomains().includes(domain);
 }
 
+// Local part of an email address (the admin form only collects this;
+// the domain is fixed by ALLOWED_EMAIL_DOMAINS).
+export function isValidLocalPart(s: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9._%+-]{0,62}[a-z0-9])?$/i.test(s);
+}
+
+export function isEmailish(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+export type NewUserInput = { email?: string; local?: string; domain?: string };
+
+// Resolves the admin "add user" form into a full normalized email, or null
+// when invalid. Domain-locked when allowed domains are configured (the form
+// sends only the local part); otherwise falls back to a free email field.
+export function resolveNewUserEmail(
+  input: NewUserInput,
+  domains: string[] = allowedDomains(),
+): string | null {
+  if (domains.length > 0) {
+    const local = (input.local ?? "").trim();
+    const chosen = domains.length === 1 ? domains[0]! : (input.domain ?? "");
+    if (!isValidLocalPart(local)) return null;
+    if (!domains.includes(chosen)) return null;
+    return normalizeEmail(`${local}@${chosen}`);
+  }
+  const email = normalizeEmail(input.email ?? "");
+  return isEmailish(email) ? email : null;
+}
+
 // JIT provisioning for allowed-domain logins. Never grants admin; never
 // demotes an existing user.
 export async function ensureUser(email: string): Promise<AuthUser | null> {

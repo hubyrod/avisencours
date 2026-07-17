@@ -9,6 +9,8 @@ import {
   readSessionToken,
   isEmailDomainAllowed,
   allowedDomains,
+  isValidLocalPart,
+  resolveNewUserEmail,
 } from "./auth.ts";
 
 const savedDashboardUrl = Bun.env.DASHBOARD_URL;
@@ -38,6 +40,65 @@ describe("isEmailDomainAllowed", () => {
   test("aucun domaine configuré → tout refusé", () => {
     delete Bun.env.ALLOWED_EMAIL_DOMAINS;
     expect(isEmailDomainAllowed("x@explainconsultancy.com")).toBeFalse();
+  });
+});
+
+describe("resolveNewUserEmail (formulaire admin)", () => {
+  const DOMAIN = ["explainconsultancy.com"];
+  const MULTI = ["explainconsultancy.com", "autre.fr"];
+
+  test("domaine unique : compose local@domaine, trim et minuscules", () => {
+    expect(resolveNewUserEmail({ local: "jean.dupont" }, DOMAIN)).toBe(
+      "jean.dupont@explainconsultancy.com",
+    );
+    expect(resolveNewUserEmail({ local: "  Jean.DUPONT " }, DOMAIN)).toBe(
+      "jean.dupont@explainconsultancy.com",
+    );
+  });
+
+  test("domaine unique : le champ domain du formulaire est ignoré", () => {
+    expect(resolveNewUserEmail({ local: "jean", domain: "evil.com" }, DOMAIN)).toBe(
+      "jean@explainconsultancy.com",
+    );
+  });
+
+  test("rejette une adresse complète ou invalide dans le champ local", () => {
+    expect(resolveNewUserEmail({ local: "pirate@evil.com" }, DOMAIN)).toBeNull();
+    expect(resolveNewUserEmail({ local: "jean dupont" }, DOMAIN)).toBeNull();
+    expect(resolveNewUserEmail({ local: "" }, DOMAIN)).toBeNull();
+    expect(resolveNewUserEmail({}, DOMAIN)).toBeNull();
+  });
+
+  test("le champ email libre est ignoré en mode domaine verrouillé", () => {
+    expect(resolveNewUserEmail({ email: "x@gmail.com" }, DOMAIN)).toBeNull();
+  });
+
+  test("plusieurs domaines : le domaine choisi doit être dans la liste", () => {
+    expect(resolveNewUserEmail({ local: "jean", domain: "autre.fr" }, MULTI)).toBe("jean@autre.fr");
+    expect(resolveNewUserEmail({ local: "jean", domain: "evil.com" }, MULTI)).toBeNull();
+    expect(resolveNewUserEmail({ local: "jean" }, MULTI)).toBeNull();
+  });
+
+  test("aucun domaine configuré : champ email libre, validé et normalisé", () => {
+    expect(resolveNewUserEmail({ email: " Foo@Bar.FR " }, [])).toBe("foo@bar.fr");
+    expect(resolveNewUserEmail({ email: "pasunemail" }, [])).toBeNull();
+    expect(resolveNewUserEmail({ local: "jean" }, [])).toBeNull();
+  });
+});
+
+describe("isValidLocalPart", () => {
+  test("parties locales valides", () => {
+    expect(isValidLocalPart("jean.dupont")).toBeTrue();
+    expect(isValidLocalPart("j")).toBeTrue();
+    expect(isValidLocalPart("prenom-nom_2")).toBeTrue();
+  });
+
+  test("rejette vide, @, espaces et ponctuation en bord", () => {
+    expect(isValidLocalPart("")).toBeFalse();
+    expect(isValidLocalPart("jean@autre.fr")).toBeFalse();
+    expect(isValidLocalPart("jean dupont")).toBeFalse();
+    expect(isValidLocalPart(".jean")).toBeFalse();
+    expect(isValidLocalPart("jean.")).toBeFalse();
   });
 });
 

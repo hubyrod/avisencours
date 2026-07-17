@@ -17,6 +17,8 @@ import {
   isEmailDomainAllowed,
   ensureUser,
   allowedDomains,
+  isEmailish,
+  resolveNewUserEmail,
   createLoginCode,
   verifyLoginCode,
   rateLimit,
@@ -175,6 +177,31 @@ function loginStep2(email: string, error?: string): string {
 
 // --- Admin page ------------------------------------------------------------------
 
+// Accounts added here live on the allowed domain(s): the form collects only
+// the local part. Fallback to a full email input when no domain is configured
+// (local dev without ALLOWED_EMAIL_DOMAINS).
+function emailField(): string {
+  const domains = allowedDomains();
+  if (domains.length === 0) {
+    return `
+          <label for="new-email">Email</label>
+          <input type="email" id="new-email" name="email" required>`;
+  }
+  const suffix =
+    domains.length === 1
+      ? `<span style="white-space:nowrap;color:#57534e;">@${esc(domains[0]!)}</span>`
+      : `<select name="domain" style="padding:10px 6px;border:1px solid #d6d3d1;border-radius:6px;">
+           ${domains.map((d) => `<option value="${esc(d)}">@${esc(d)}</option>`).join("")}
+         </select>`;
+  return `
+          <label for="new-local">Email</label>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <input type="text" id="new-local" name="local" required autocomplete="off"
+                   placeholder="prenom.nom" style="flex:1;">
+            ${suffix}
+          </div>`;
+}
+
 async function adminPage(user: AuthUser, error?: string): Promise<Response> {
   const users = await listUsers();
   const rows = users
@@ -210,8 +237,7 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
       <div class="card" style="margin:24px 0;max-width:520px;">
         <h2>Ajouter un utilisateur</h2>
         <form method="post" action="/admin/ajouter">
-          <label for="new-email">Email</label>
-          <input type="email" id="new-email" name="email" required>
+          ${emailField()}
           <label for="new-name">Nom</label>
           <input type="text" id="new-name" name="name">
           <label style="margin-top:14px;">
@@ -342,10 +368,6 @@ async function form(req: Request): Promise<Record<string, string>> {
   return out;
 }
 
-function isEmailish(s: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
-}
-
 async function handleLoginPage(_req: Request, _url: URL, user: AuthUser | null): Promise<Response> {
   if (user) return redirect("/", 302);
   return html(loginStep1());
@@ -400,9 +422,10 @@ async function handleLogout(req: Request): Promise<Response> {
 }
 
 async function handleAdminAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { email = "", name = "", admin = "" } = await form(req);
-  if (!isEmailish(normalizeEmail(email))) return adminPage(user, MSG_BAD_EMAIL);
-  const created = await addUser(email, name, admin === "1");
+  const { email = "", local = "", domain = "", name = "", admin = "" } = await form(req);
+  const fullEmail = resolveNewUserEmail({ email, local, domain });
+  if (!fullEmail) return adminPage(user, MSG_BAD_EMAIL);
+  const created = await addUser(fullEmail, name, admin === "1");
   if (!created) return adminPage(user, "Cet utilisateur existe déjà.");
   return redirect("/admin", 303);
 }
