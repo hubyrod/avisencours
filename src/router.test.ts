@@ -12,6 +12,9 @@ describe("matchPath", () => {
     expect(matchPath("/avis/:idweb", "/avis/26-70006")).toEqual({ idweb: "26-70006" });
     expect(matchPath("/avis/:idweb", "/avis/a%20b")).toEqual({ idweb: "a b" });
     expect(matchPath("/avis/:idweb/commenter", "/avis/26-1/commenter")).toEqual({ idweb: "26-1" });
+    expect(matchPath("/avis/:idweb/commentaires/flux", "/avis/26-1/commentaires/flux")).toEqual({
+      idweb: "26-1",
+    });
   });
 
   test("segment vide ou arité différente → null", () => {

@@ -225,24 +225,8 @@ export async function getAnnouncement(idweb: string): Promise<StoredAnnouncement
   return (rows[0] as StoredAnnouncement) ?? null;
 }
 
-export type CommentRow = {
-  id: number;
-  body: string;
-  created_at: Date;
-  user_id: number | null;
-  author_name: string | null;
-  author_email: string | null;
-};
-
-export async function getComments(idweb: string): Promise<CommentRow[]> {
-  const rows = await db()`
-    SELECT c.id, c.body, c.created_at, c.user_id, u.name AS author_name, u.email AS author_email
-    FROM comments c LEFT JOIN users u ON u.id = c.user_id
-    WHERE c.idweb = ${idweb}
-    ORDER BY c.created_at ASC, c.id ASC`;
-  return rows as CommentRow[];
-}
-
+// La lecture des fils passe par le moteur réactif Skip (src/live.ts) : ici on ne
+// garde que l'écriture, que l'adaptateur Postgres répercute via LISTEN/NOTIFY.
 export async function addComment(idweb: string, userId: number, body: string): Promise<void> {
   await db()`INSERT INTO comments (idweb, user_id, body) VALUES (${idweb}, ${userId}, ${body})`;
 }

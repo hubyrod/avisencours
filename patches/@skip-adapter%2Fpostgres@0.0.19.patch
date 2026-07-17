@@ -1,0 +1,610 @@
+diff --git a/node_modules/@skip-adapter/postgres/.bun-tag-2b3ab9b59fd0a587 b/.bun-tag-2b3ab9b59fd0a587
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@skip-adapter/postgres/.bun-tag-304b71641429d988 b/.bun-tag-304b71641429d988
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 848c4e798b38cc6df682f8e7ba274a1546497bf0..90fa2a67451b336c54a32764ae390bfa62f8ae3d 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -21,8 +21,19 @@ export type { PostgresPKey } from "./util.js";
+  */
+ export declare class PostgresExternalService implements ExternalService {
+     private client;
++    private db_config;
+     private open_instances;
++    private subscriptions;
++    private isShuttingDown;
++    private isReconnecting;
++    private reconnectAttempt;
+     isConnected(): boolean;
++    getClient(): import("pg").Client;
++    getOpenInstances(): Set<string>;
++    private wireClientEvents;
++    private scheduleReconnect;
++    private reconnect;
++    private resubscribe;
+     /**
+      * @param db_config - Configuration of database to which to connect.
+      * @param db_config.host - Host serving database.
+diff --git a/dist/index.js b/dist/index.js
+index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08428f0de8 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -27,6 +27,12 @@ export class PostgresExternalService {
+     isConnected() {
+         return "_connected" in this.client && !!this.client._connected;
+     }
++    getClient() {
++        return this.client;
++    }
++    getOpenInstances() {
++        return new Set(this.open_instances);
++    }
+     /**
+      * @param db_config - Configuration of database to which to connect.
+      * @param db_config.host - Host serving database.
+@@ -37,7 +43,17 @@ export class PostgresExternalService {
+      */
+     constructor(db_config) {
+         this.open_instances = new Set();
+-        this.client = new pg.Client(db_config);
++        this.subscriptions = new Map();
++        this.isShuttingDown = false;
++        this.isReconnecting = false;
++        this.reconnectAttempt = 0;
++        this.db_config = {
++            ...db_config,
++            keepAlive: true,
++            keepAliveInitialDelayMillis: 10000,
++        };
++        this.client = new pg.Client(this.db_config);
++        this.wireClientEvents(this.client);
+         this.client.connect().then(() => {
+             const handler = () => {
+                 void this.shutdown().then(() => process.exit());
+@@ -54,22 +70,136 @@ export class PostgresExternalService {
+             console.error(e);
+         });
+     }
+-    /**
+-     * Subscribe to a resource provided by the external service.
+-     *
+-     * @param instance - Instance identifier of the external resource.
+-     * @param resource - Name of the PostgreSQL table to expose as a resource.
+-     * @param params - Parameters of the external resource.
+-     * @param params.key - (**Required**) Object describing the Postgres column that should be used as the key in the resulting collection
+-     * @param params.key.col - Postgres column whose value is to be used as the collection key
+-     * @param params.key.type - Postgres data type of `col`, which must be a text, integer, or serial type. (i.e. one of `TEXT`, `SERIAL`, `SERIAL2`, `SERIAL4`, `SERIAL8`, `BIGSERIAL`, `SMALLSERIAL`, `INTEGER`, `INT`, `INT2`, `INT4`, `INT8`, `BIGINT`, or `SMALLINT`)
+-     * @param params.syncHistoricData - (**Optional**) Boolean flag, `true` by default.  If false, Skip will ignore pre-existing data and only synchronize updates **after** subscription.
+-     * @param callbacks - Callbacks to react on error/loading/update.
+-     * @param callbacks.error - Error callback.
+-     * @param callbacks.update - Update callback.
+-     * @returns {void}
+-     */
++    /** Attach error/end handlers to a client instance */
++    wireClientEvents(client) {
++        client.on("error", (err) => {
++            console.error("[skip-pg-adapter] Client error — will reconnect:", err.message);
++            this.open_instances.clear();
++            this.scheduleReconnect();
++        });
++        client.on("end", () => {
++            if (!this.isShuttingDown) {
++                console.warn("[skip-pg-adapter] Client connection ended — will reconnect");
++                this.open_instances.clear();
++                this.scheduleReconnect();
++            }
++        });
++    }
++    /** Schedule a reconnection attempt with exponential backoff */
++    scheduleReconnect() {
++        if (this.isShuttingDown || this.isReconnecting)
++            return;
++        this.isReconnecting = true;
++        const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
++        this.reconnectAttempt++;
++        console.log(`[skip-pg-adapter] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})...`);
++        setTimeout(() => {
++            void this.reconnect();
++        }, delay);
++    }
++    /** Reconnect: create a new client, re-sync all data, re-LISTEN */
++    async reconnect() {
++        if (this.isShuttingDown) {
++            this.isReconnecting = false;
++            return;
++        }
++        try {
++            // Create a fresh client
++            const newClient = new pg.Client(this.db_config);
++            this.wireClientEvents(newClient);
++            await newClient.connect();
++            // Swap in the new client (old one is already dead)
++            const oldClient = this.client;
++            this.client = newClient;
++            // Best-effort cleanup of old client
++            try { oldClient.end().catch(() => { }); } catch { /* already dead */ }
++            console.log(`[skip-pg-adapter] Reconnected after ${this.reconnectAttempt} attempt(s). Re-syncing ${this.subscriptions.size} subscription(s)...`);
++            // Re-establish all subscriptions
++            for (const [instance, sub] of this.subscriptions) {
++                try {
++                    await this.resubscribe(instance, sub);
++                }
++                catch (err) {
++                    console.error(`[skip-pg-adapter] Failed to resubscribe instance=${instance}:`, err);
++                }
++            }
++            this.reconnectAttempt = 0;
++            this.isReconnecting = false;
++            console.log("[skip-pg-adapter] All subscriptions re-established");
++        }
++        catch (err) {
++            console.error("[skip-pg-adapter] Reconnection failed:", err);
++            this.isReconnecting = false;
++            this.scheduleReconnect();
++        }
++    }
++    /** Re-establish a single subscription on the current (new) client */
++    async resubscribe(instance, sub) {
++        const table = sub.resource;
++        const key = validateKeyParam(sub.params);
++        // Re-sync all data (catches anything missed during outage)
++        if (sub.params.syncHistoricData ?? true) {
++            const init = await this.client.query(format("SELECT * FROM %I;", table));
++            const entries = new Map();
++            for (const row of init.rows) {
++                const k = row[key.col];
++                if (entries.has(k))
++                    entries.get(k).push(row);
++                else
++                    entries.set(k, [row]);
++            }
++            await sub.callbacks.update(Array.from(entries), true);
++        }
++        else {
++            await sub.callbacks.update([], true);
++        }
++        // Re-create trigger + LISTEN (triggers persist in DB but LISTEN is per-connection)
++        await this.client.query(format(`
++CREATE OR REPLACE FUNCTION %I() RETURNS TRIGGER AS $f$
++BEGIN
++  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
++    PERFORM pg_notify(%L, NEW.%I::text);
++  ELSE
++    PERFORM pg_notify(%L, OLD.%I::text);
++  END IF;
++  RETURN NULL;
++END $f$ LANGUAGE PLPGSQL;`, instance, instance, key.col, instance, key.col));
++        await this.client.query(format(`LISTEN %I;`, instance));
++        await this.client.query(format(`
++CREATE OR REPLACE TRIGGER %I
++AFTER INSERT OR UPDATE OR DELETE ON %I
++FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
++        this.open_instances.add(instance);
++        // Re-attach notification handler on the new client
++        this.client.on("notification", (msg) => {
++            if (msg.channel == instance &&
++                msg.payload !== undefined &&
++                this.open_instances.has(instance)) {
++                const query = key.select(table, msg.payload);
++                const k = key.type == "TEXT" ? msg.payload : Number(msg.payload);
++                let ok = false;
++                const run = async () => {
++                    const changes = await this.client.query(query);
++                    ok = true;
++                    await sub.callbacks.update([[k, changes.rows]], false);
++                };
++                run().catch((e) => {
++                    if (ok) {
++                        sub.callbacks.error(`Uncaught error triggered by Postgres adapter update (key ${k}, table ${table}):`);
++                        console.error(`Uncaught error triggered by Postgres adapter update (key ${k}, table ${table}):`, e);
++                    }
++                    else {
++                        sub.callbacks.error(`Error executing Postgres query "${query}":`);
++                        console.error(`Error executing Postgres query "${query}":`, e);
++                    }
++                });
++            }
++        });
++        console.log(`[skip-pg-adapter] resubscribe OK: instance=${instance} table=${table} key=${key.col}`);
++    }
+     async subscribe(instance, resource, params, callbacks) {
++        // Store subscription metadata for reconnection
++        this.subscriptions.set(instance, { resource, params, callbacks });
+         const table = resource;
+         const key = validateKeyParam(params);
+         const error = (message) => (error) => {
+@@ -96,8 +226,8 @@ export class PostgresExternalService {
+         const setupPgNotify = async () => {
+             // Reuse existing trigger/function if possible
+             if (!this.open_instances.has(instance)) {
+-                this.open_instances.add(instance);
+-                await this.client.query(format(`
++                try {
++                    await this.client.query(format(`
+ CREATE OR REPLACE FUNCTION %I() RETURNS TRIGGER AS $f$
+ BEGIN
+   IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+@@ -107,11 +237,18 @@ BEGIN
+   END IF;
+   RETURN NULL;
+ END $f$ LANGUAGE PLPGSQL;`, instance, instance, key.col, instance, key.col));
+-                await this.client.query(format(`LISTEN %I;`, instance));
+-                await this.client.query(format(`
++                    await this.client.query(format(`LISTEN %I;`, instance));
++                    await this.client.query(format(`
+ CREATE OR REPLACE TRIGGER %I
+ AFTER INSERT OR UPDATE OR DELETE ON %I
+ FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
++                    // Mark as set up ONLY after all queries succeed
++                    this.open_instances.add(instance);
++                    console.log(`[skip-pg-adapter] setupPgNotify OK: instance=${instance} table=${table} key=${key.col}`);
++                }
++                catch (err) {
++                    console.error(`[skip-pg-adapter] setupPgNotify FAILED for instance=${instance} table=${table}:`, err);
++                }
+             }
+         };
+         await initData();
+@@ -140,6 +277,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
+         await setupPgNotify();
+     }
+     unsubscribe(instance) {
++        this.subscriptions.delete(instance);
+         if (this.open_instances.has(instance))
+             this.client
+                 .query(format("DROP FUNCTION IF EXISTS %I CASCADE;", instance))
+@@ -148,6 +286,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
+             });
+     }
+     async shutdown() {
++        this.isShuttingDown = true;
+         if (this.open_instances.size > 0) {
+             const query = "DROP FUNCTION IF EXISTS " +
+                 Array.from(this.open_instances)
+diff --git a/src/index.ts b/src/index.ts
+index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57e7e04da8 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -17,6 +17,19 @@ export type { PostgresPKey } from "./util.js";
+ pg.types.setTypeParser(pg.types.builtins.TIMESTAMP, (x: string) => x);
+ pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, (x: string) => x);
+ 
++/** Metadata stored per subscription so we can re-establish after reconnection */
++interface SubscriptionRecord {
++  resource: string;
++  params: {
++    key: { col: string; type: PostgresPKey };
++    syncHistoricData?: boolean;
++  };
++  callbacks: {
++    update: (updates: Entry<Json, Json>[], isInit: boolean) => Promise<void>;
++    error: (error: Json) => void;
++  };
++}
++
+ /**
+  * An `ExternalService` wrapping a PostgreSQL database.
+  *
+@@ -31,12 +44,25 @@ pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, (x: string) => x);
+  */
+ export class PostgresExternalService implements ExternalService {
+   private client: pg.Client;
++  private db_config: pg.ClientConfig;
+   private open_instances: Set<string> = new Set<string>();
++  private subscriptions: Map<string, SubscriptionRecord> = new Map();
++  private isShuttingDown = false;
++  private isReconnecting = false;
++  private reconnectAttempt = 0;
+ 
+   isConnected(): boolean {
+     return "_connected" in this.client && !!this.client._connected;
+   }
+ 
++  getClient(): pg.Client {
++    return this.client;
++  }
++
++  getOpenInstances(): Set<string> {
++    return new Set(this.open_instances);
++  }
++
+   /**
+    * @param db_config - Configuration of database to which to connect.
+    * @param db_config.host - Host serving database.
+@@ -52,7 +78,13 @@ export class PostgresExternalService implements ExternalService {
+     user: string;
+     password: string;
+   }) {
+-    this.client = new pg.Client(db_config);
++    this.db_config = {
++      ...db_config,
++      keepAlive: true,
++      keepAliveInitialDelayMillis: 10_000,
++    };
++    this.client = new pg.Client(this.db_config);
++    this.wireClientEvents(this.client);
+     this.client.connect().then(
+       () => {
+         const handler = () => {
+@@ -75,6 +107,184 @@ export class PostgresExternalService implements ExternalService {
+     );
+   }
+ 
++  /** Attach error/end handlers to a client instance */
++  private wireClientEvents(client: pg.Client): void {
++    client.on("error", (err: Error) => {
++      console.error(
++        "[skip-pg-adapter] Client error — will reconnect:",
++        err.message,
++      );
++      this.open_instances.clear();
++      this.scheduleReconnect();
++    });
++    client.on("end", () => {
++      if (!this.isShuttingDown) {
++        console.warn("[skip-pg-adapter] Client connection ended — will reconnect");
++        this.open_instances.clear();
++        this.scheduleReconnect();
++      }
++    });
++  }
++
++  /** Schedule a reconnection attempt with exponential backoff */
++  private scheduleReconnect(): void {
++    if (this.isShuttingDown || this.isReconnecting) return;
++    this.isReconnecting = true;
++
++    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30_000);
++    this.reconnectAttempt++;
++
++    console.log(
++      `[skip-pg-adapter] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})...`,
++    );
++
++    setTimeout(() => {
++      void this.reconnect();
++    }, delay);
++  }
++
++  /** Reconnect: create a new client, re-sync all data, re-LISTEN */
++  private async reconnect(): Promise<void> {
++    if (this.isShuttingDown) {
++      this.isReconnecting = false;
++      return;
++    }
++
++    try {
++      // Create a fresh client
++      const newClient = new pg.Client(this.db_config);
++      this.wireClientEvents(newClient);
++      await newClient.connect();
++
++      // Swap in the new client (old one is already dead)
++      const oldClient = this.client;
++      this.client = newClient;
++      // Best-effort cleanup of old client
++      try { oldClient.end().catch(() => {}); } catch { /* already dead */ }
++
++      console.log(
++        `[skip-pg-adapter] Reconnected after ${this.reconnectAttempt} attempt(s). Re-syncing ${this.subscriptions.size} subscription(s)...`,
++      );
++
++      // Re-establish all subscriptions
++      for (const [instance, sub] of this.subscriptions) {
++        try {
++          await this.resubscribe(instance, sub);
++        } catch (err) {
++          console.error(
++            `[skip-pg-adapter] Failed to resubscribe instance=${instance}:`,
++            err,
++          );
++        }
++      }
++
++      this.reconnectAttempt = 0;
++      this.isReconnecting = false;
++
++      console.log("[skip-pg-adapter] All subscriptions re-established");
++    } catch (err) {
++      console.error("[skip-pg-adapter] Reconnection failed:", err);
++      this.isReconnecting = false;
++      this.scheduleReconnect();
++    }
++  }
++
++  /** Re-establish a single subscription on the current (new) client */
++  private async resubscribe(
++    instance: string,
++    sub: SubscriptionRecord,
++  ): Promise<void> {
++    const table = sub.resource;
++    const key = validateKeyParam(sub.params);
++
++    // Re-sync all data (catches anything missed during outage)
++    if (sub.params.syncHistoricData ?? true) {
++      const init = await this.client.query(
++        format("SELECT * FROM %I;", table),
++      );
++      const entries: Map<Json, Json[]> = new Map<Json, Json[]>();
++      for (const row of init.rows as { [col: string]: Json }[]) {
++        const k = row[key.col]!;
++        if (entries.has(k)) entries.get(k)!.push(row);
++        else entries.set(k, [row]);
++      }
++      await sub.callbacks.update(Array.from(entries), true);
++    } else {
++      await sub.callbacks.update([], true);
++    }
++
++    // Re-create trigger + LISTEN (triggers persist in DB but LISTEN is per-connection)
++    await this.client.query(
++      format(
++        `
++CREATE OR REPLACE FUNCTION %I() RETURNS TRIGGER AS $f$
++BEGIN
++  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
++    PERFORM pg_notify(%L, NEW.%I::text);
++  ELSE
++    PERFORM pg_notify(%L, OLD.%I::text);
++  END IF;
++  RETURN NULL;
++END $f$ LANGUAGE PLPGSQL;`,
++        instance,
++        instance,
++        key.col,
++        instance,
++        key.col,
++      ),
++    );
++    await this.client.query(format(`LISTEN %I;`, instance));
++    await this.client.query(
++      format(
++        `
++CREATE OR REPLACE TRIGGER %I
++AFTER INSERT OR UPDATE OR DELETE ON %I
++FOR EACH ROW EXECUTE FUNCTION %I();`,
++        instance,
++        table,
++        instance,
++      ),
++    );
++
++    this.open_instances.add(instance);
++
++    // Re-attach notification handler on the new client
++    this.client.on("notification", (msg) => {
++      if (
++        msg.channel == instance &&
++        msg.payload !== undefined &&
++        this.open_instances.has(instance)
++      ) {
++        const query = key.select(table, msg.payload);
++        const k = key.type == "TEXT" ? msg.payload : Number(msg.payload);
++        let ok = false;
++        const run = async () => {
++          const changes = await this.client.query(query);
++          ok = true;
++          await sub.callbacks.update([[k, changes.rows as Json[]]], false);
++        };
++        run().catch((e: unknown) => {
++          if (ok) {
++            sub.callbacks.error(
++              `Uncaught error triggered by Postgres adapter update (key ${k}, table ${table}):`,
++            );
++            console.error(
++              `Uncaught error triggered by Postgres adapter update (key ${k}, table ${table}):`,
++              e,
++            );
++          } else {
++            sub.callbacks.error(`Error executing Postgres query "${query}":`);
++            console.error(`Error executing Postgres query "${query}":`, e);
++          }
++        });
++      }
++    });
++
++    console.log(
++      `[skip-pg-adapter] resubscribe OK: instance=${instance} table=${table} key=${key.col}`,
++    );
++  }
++
+   /**
+    * Subscribe to a resource provided by the external service.
+    *
+@@ -105,6 +315,9 @@ export class PostgresExternalService implements ExternalService {
+       error: (error: Json) => void;
+     },
+   ): Promise<void> {
++    // Store subscription metadata for reconnection
++    this.subscriptions.set(instance, { resource, params, callbacks });
++
+     const table = resource;
+     const key = validateKeyParam(params);
+ 
+@@ -133,10 +346,10 @@ export class PostgresExternalService implements ExternalService {
+     const setupPgNotify = async () => {
+       // Reuse existing trigger/function if possible
+       if (!this.open_instances.has(instance)) {
+-        this.open_instances.add(instance);
+-        await this.client.query(
+-          format(
+-            `
++        try {
++          await this.client.query(
++            format(
++              `
+ CREATE OR REPLACE FUNCTION %I() RETURNS TRIGGER AS $f$
+ BEGIN
+   IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+@@ -146,25 +359,36 @@ BEGIN
+   END IF;
+   RETURN NULL;
+ END $f$ LANGUAGE PLPGSQL;`,
+-            instance,
+-            instance,
+-            key.col,
+-            instance,
+-            key.col,
+-          ),
+-        );
+-        await this.client.query(format(`LISTEN %I;`, instance));
+-        await this.client.query(
+-          format(
+-            `
++              instance,
++              instance,
++              key.col,
++              instance,
++              key.col,
++            ),
++          );
++          await this.client.query(format(`LISTEN %I;`, instance));
++          await this.client.query(
++            format(
++              `
+ CREATE OR REPLACE TRIGGER %I
+ AFTER INSERT OR UPDATE OR DELETE ON %I
+ FOR EACH ROW EXECUTE FUNCTION %I();`,
+-            instance,
+-            table,
+-            instance,
+-          ),
+-        );
++              instance,
++              table,
++              instance,
++            ),
++          );
++          // Mark as set up ONLY after all queries succeed
++          this.open_instances.add(instance);
++          console.log(
++            `[skip-pg-adapter] setupPgNotify OK: instance=${instance} table=${table} key=${key.col}`,
++          );
++        } catch (err) {
++          console.error(
++            `[skip-pg-adapter] setupPgNotify FAILED for instance=${instance} table=${table}:`,
++            err,
++          );
++        }
+       }
+     };
+ 
+@@ -199,6 +423,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`,
+   }
+ 
+   unsubscribe(instance: string): void {
++    this.subscriptions.delete(instance);
+     if (this.open_instances.has(instance))
+       this.client
+         .query(format("DROP FUNCTION IF EXISTS %I CASCADE;", instance))
+@@ -214,6 +439,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`,
+   }
+ 
+   async shutdown(): Promise<void> {
++    this.isShuttingDown = true;
+     if (this.open_instances.size > 0) {
+       const query =
+         "DROP FUNCTION IF EXISTS " +

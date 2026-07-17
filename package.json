@@ -10,7 +10,16 @@
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",
     "test": "bun test",
-    "build": "bun build src/server.ts src/run.ts src/index.ts --target=bun --outdir=dist"
+    "build": "bun build src/server.ts src/run.ts src/index.ts --target=bun --outdir=dist --packages external"
+  },
+  "dependencies": {
+    "@skip-adapter/postgres": "0.0.19",
+    "@skipruntime/core": "0.0.19",
+    "@skipruntime/server": "0.0.19",
+    "@skipruntime/wasm": "0.0.19"
+  },
+  "patchedDependencies": {
+    "@skip-adapter/postgres@0.0.19": "patches/@skip-adapter%2Fpostgres@0.0.19.patch"
   },
   "devDependencies": {
     "@types/bun": "latest",

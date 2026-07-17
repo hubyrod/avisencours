@@ -4,13 +4,12 @@ import {
   getLastSuccessfulRun,
   getCurrent,
   getAnnouncement,
-  getComments,
   addComment,
   deleteComment,
-  type CommentRow,
   type StoredAnnouncement,
   type RunRow,
 } from "./db.ts";
+import { startLive, isLiveReady, commentStream } from "./live.ts";
 import { matchPath } from "./router.ts";
 import {
   type AuthUser,
@@ -48,6 +47,12 @@ function esc(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Sérialise pour un <script type="application/json"> : « </ » est échappé pour
+// qu'aucune valeur ne puisse fermer la balise script.
+function jsonBlob(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function frDateTime(d: Date): string {
@@ -372,32 +377,120 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
 
 // --- Avis detail + comments ------------------------------------------------------
 
-function commentBlock(c: CommentRow & { idweb: string }, viewer: AuthUser): string {
-  const author = c.user_id === null ? "utilisateur supprimé" : (c.author_name ?? c.author_email ?? "?");
-  const canDelete = viewer.isAdmin || (c.user_id !== null && Number(c.user_id) === viewer.id);
-  return `
-  <div class="comment">
-    <div class="comment-head">
-      <strong>${esc(author)}</strong>
-      <span>${esc(frDateTime(new Date(c.created_at)))}</span>
-      ${
-        canDelete
-          ? `<form method="post" action="/commentaires/supprimer" style="margin:0;">
-               <input type="hidden" name="id" value="${c.id}">
-               <input type="hidden" name="idweb" value="${esc(c.idweb)}">
-               <button class="subtle" type="submit">Supprimer</button>
-             </form>`
-          : ""
-      }
-    </div>
-    <div class="comment-body">${esc(c.body)}</div>
-  </div>`;
-}
+// Fil de commentaires rendu côté client : abonnement SSE au flux Skip (événements
+// init/update, données [[idweb, [fil]]]), envoi des formulaires en fetch. DOM
+// construit uniquement via createElement/textContent — jamais innerHTML.
+const CLIENT_JS = `
+(() => {
+  const CFG = JSON.parse(document.getElementById("cfg").textContent);
+  const fil = document.getElementById("fil");
+  const nb = document.getElementById("nb");
+  if (!fil || !window.EventSource) return;
 
-async function avisPage(user: AuthUser, idweb: string, error?: string): Promise<Response> {
+  const note = (msg) => {
+    const p = document.createElement("p");
+    p.style.color = "#78716c";
+    p.textContent = msg;
+    fil.replaceChildren(p);
+  };
+
+  const fmt = (ts) => {
+    const d = new Date(ts.replace(" ", "T"));
+    if (isNaN(d)) return ts;
+    return d.toLocaleString("fr-FR", {
+      day: "numeric", month: "long", year: "numeric",
+      hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris",
+    });
+  };
+
+  function render(thread) {
+    nb.textContent = String(thread.length);
+    if (!thread.length) {
+      note("Aucun commentaire pour l'instant. Lancez la discussion.");
+      return;
+    }
+    fil.replaceChildren();
+    for (const c of thread) {
+      const div = document.createElement("div");
+      div.className = "comment";
+      const head = document.createElement("div");
+      head.className = "comment-head";
+      const who = document.createElement("strong");
+      who.textContent = c.user_id === null
+        ? "utilisateur supprimé"
+        : (c.author_name || c.author_email || "?");
+      const when = document.createElement("span");
+      when.textContent = fmt(c.created_at);
+      head.append(who, when);
+      if (CFG.admin || (c.user_id !== null && Number(c.user_id) === CFG.uid)) {
+        const f = document.createElement("form");
+        f.method = "post";
+        f.action = "/commentaires/supprimer";
+        f.dataset.live = "1";
+        f.style.margin = "0";
+        const hid = (n, v) => {
+          const i = document.createElement("input");
+          i.type = "hidden"; i.name = n; i.value = v;
+          return i;
+        };
+        const b = document.createElement("button");
+        b.className = "subtle"; b.type = "submit"; b.textContent = "Supprimer";
+        f.append(hid("id", c.id), hid("idweb", CFG.idweb), b);
+        head.append(f);
+      }
+      const body = document.createElement("div");
+      body.className = "comment-body";
+      body.textContent = c.body;
+      div.append(head, body);
+      fil.append(div);
+    }
+  }
+
+  let gotInit = false;
+  const apply = (e) => {
+    let entries;
+    try { entries = JSON.parse(e.data); } catch { return; }
+    let seen = false;
+    for (const [k, values] of entries) {
+      if (k === CFG.idweb) { render(values[0] || []); seen = true; }
+    }
+    if (e.type === "init") { gotInit = true; if (!seen) render([]); }
+  };
+  const es = new EventSource(CFG.flux);
+  es.addEventListener("init", apply);
+  es.addEventListener("update", apply);
+  es.onerror = () => { if (!gotInit) note("Commentaires indisponibles pour le moment."); };
+
+  document.addEventListener("submit", async (ev) => {
+    const f = ev.target;
+    if (!(f instanceof HTMLFormElement) || f.dataset.live !== "1") return;
+    ev.preventDefault();
+    const err = document.getElementById("fil-erreur");
+    err.hidden = true;
+    err.textContent = "";
+    const res = await fetch(f.action, {
+      method: "POST",
+      body: new FormData(f),
+      headers: { Accept: "application/json" },
+    }).catch(() => null);
+    if (res && res.ok) {
+      if (f.id === "form-commenter") f.reset();
+    } else {
+      let msg = "Erreur réseau — réessayez.";
+      if (res) {
+        const data = await res.json().catch(() => null);
+        msg = (data && data.error) || "Une erreur est survenue.";
+      }
+      err.textContent = msg;
+      err.hidden = false;
+    }
+  });
+})();
+`;
+
+async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
   const a = await getAnnouncement(idweb);
   if (!a) return html(errorPage("Avis introuvable"), 404);
-  const comments = await getComments(idweb);
 
   const facts: Array<[string, string | null]> = [
     ["Acheteur", a.acheteur],
@@ -425,20 +518,25 @@ async function avisPage(user: AuthUser, idweb: string, error?: string): Promise<
         <p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-weight:600;">Voir l'annonce officielle →</a></p>
       </div>
       <div class="card" style="max-width:none;margin:16px 0;">
-        <h2>Commentaires (${comments.length})</h2>
-        ${
-          comments.length === 0
-            ? `<p style="color:#78716c;">Aucun commentaire pour l'instant. Lancez la discussion.</p>`
-            : comments.map((c) => commentBlock({ ...c, idweb }, user)).join("")
-        }
-        ${error ? `<div class="banner error">${esc(error)}</div>` : ""}
-        <form method="post" action="/avis/${encodeURIComponent(idweb)}/commenter" style="margin-top:16px;">
+        <h2>Commentaires (<span id="nb">…</span>)</h2>
+        <div id="fil"><p style="color:#78716c;">Chargement des commentaires…</p></div>
+        <div id="fil-erreur" class="banner error" aria-live="polite" hidden></div>
+        <form id="form-commenter" data-live="1" method="post"
+              action="/avis/${encodeURIComponent(idweb)}/commenter" style="margin-top:16px;">
           <label for="body">Ajouter un commentaire</label>
           <textarea id="body" name="body" required maxlength="4000"
                     placeholder="Votre analyse, une question, une décision…"></textarea>
           <div class="actions"><button class="primary" type="submit">Publier</button></div>
         </form>
+        <noscript><p style="color:#78716c;">Les commentaires nécessitent JavaScript.</p></noscript>
       </div>
+      <script type="application/json" id="cfg">${jsonBlob({
+        uid: user.id,
+        admin: user.isAdmin,
+        idweb,
+        flux: `/avis/${encodeURIComponent(idweb)}/commentaires/flux`,
+      })}</script>
+      <script>${CLIENT_JS}</script>
     </main>`,
     ),
   );
@@ -452,25 +550,31 @@ async function handleAddComment(
 ): Promise<Response> {
   const idweb = params.idweb ?? "";
   const a = await getAnnouncement(idweb);
-  if (!a) return html(errorPage("Avis introuvable"), 404);
+  if (!a) return Response.json({ error: "Avis introuvable." }, { status: 404 });
 
   if (!rateLimit(`comment:${user.id}`, 20, 600_000)) {
-    return avisPage(user, idweb, MSG_RATE_LIMITED);
+    return Response.json({ error: MSG_RATE_LIMITED }, { status: 429 });
   }
   const { body = "" } = await form(req);
   const trimmed = body.trim();
   if (!trimmed || trimmed.length > 4000) {
-    return avisPage(user, idweb, "Le commentaire est vide ou trop long (4000 caractères max).");
+    return Response.json(
+      { error: "Le commentaire est vide ou trop long (4000 caractères max)." },
+      { status: 400 },
+    );
   }
   await addComment(idweb, user.id, trimmed);
-  return redirect(`/avis/${encodeURIComponent(idweb)}`, 303);
+  return Response.json({ ok: true });
 }
 
 async function handleDeleteComment(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { id = "", idweb = "" } = await form(req);
+  const { id = "" } = await form(req);
   const commentId = Number(id);
-  if (Number.isInteger(commentId)) await deleteComment(commentId, user.id, user.isAdmin);
-  return redirect(idweb ? `/avis/${encodeURIComponent(idweb)}` : "/", 303);
+  if (!Number.isInteger(commentId)) {
+    return Response.json({ error: "Requête invalide." }, { status: 400 });
+  }
+  await deleteComment(commentId, user.id, user.isAdmin);
+  return Response.json({ ok: true });
 }
 
 // --- Dashboard ----------------------------------------------------------------------
@@ -683,6 +787,7 @@ async function health(): Promise<Response> {
     const lastRun = await getLastRun();
     return Response.json({
       status: "ok",
+      live: isLiveReady(),
       lastRun: lastRun
         ? { id: lastRun.id, status: lastRun.status, finishedAt: lastRun.finished_at }
         : null,
@@ -718,6 +823,10 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
   { method: "POST", path: "/profil/deconnexion-partout", access: "user", handler: (req, url, user) => handleLogoutEverywhere(req, url, user!) },
   { method: "GET", path: "/avis/:idweb", access: "user", handler: (_req, _url, user, params) => avisPage(user!, params.idweb ?? "") },
   { method: "POST", path: "/avis/:idweb/commenter", access: "user", handler: (req, url, user, params) => handleAddComment(req, url, user!, params) },
+  { method: "GET", path: "/avis/:idweb/commentaires/flux", access: "user", handler: async (req, _url, user, params) => {
+      if (!rateLimit(`flux:${user!.id}`, 30, 60_000)) return new Response("Trop de connexions", { status: 429 });
+      return commentStream(req, params.idweb ?? "");
+    } },
   { method: "POST", path: "/commentaires/supprimer", access: "user", handler: (req, url, user) => handleDeleteComment(req, url, user!) },
   { method: "GET", path: "/admin", access: "admin", handler: (_req, _url, user) => adminPage(user!) },
   { method: "POST", path: "/admin/ajouter", access: "admin", handler: (req, url, user) => handleAdminAdd(req, url, user!) },
@@ -788,6 +897,12 @@ await migrate()
     // Boot anyway: pages show an error and /sante reports degraded.
     console.error(`startup migration/seed failed: ${err}`);
   });
+
+// Non fatal : sans moteur Skip le flux répond 503 et la page affiche
+// « Commentaires indisponibles », le reste du tableau de bord fonctionne.
+await startLive().catch((err) => {
+  console.error(`live: démarrage Skip impossible — commentaires non réactifs : ${err}`);
+});
 
 const server = Bun.serve({
   port: Number(Bun.env.PORT ?? 8080),
