@@ -79,6 +79,15 @@ export async function migrate(): Promise<void> {
       created_at timestamptz NOT NULL DEFAULT now()
     )`;
   await sql`CREATE INDEX IF NOT EXISTS evc_email_idx ON email_verification_codes (email, created_at DESC)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS comments (
+      id         bigserial PRIMARY KEY,
+      idweb      text NOT NULL REFERENCES announcements(idweb) ON DELETE CASCADE,
+      user_id    bigint REFERENCES users(id) ON DELETE SET NULL,
+      body       text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`CREATE INDEX IF NOT EXISTS comments_idweb_idx ON comments (idweb, created_at)`;
 }
 
 // Single arbitrary lock id shared by every runner of this app.
@@ -173,6 +182,7 @@ export type StoredAnnouncement = {
   category: string;
   reason: string | null;
   first_seen_run_id: number | null;
+  comment_count?: number;
 };
 
 export type RunRow = {
@@ -201,12 +211,49 @@ export async function getLastSuccessfulRun(): Promise<RunRow | null> {
 // (or unknown), sorted by deadline ascending.
 export async function getCurrent(category: string, runId: number): Promise<StoredAnnouncement[]> {
   const rows = await db()`
-    SELECT * FROM announcements
+    SELECT a.*, (SELECT count(*)::int FROM comments c WHERE c.idweb = a.idweb) AS comment_count
+    FROM announcements a
     WHERE last_seen_run_id = ${runId}
       AND category = ${category}
       AND (deadline IS NULL OR deadline >= now())
     ORDER BY deadline ASC NULLS LAST, idweb`;
   return rows as StoredAnnouncement[];
+}
+
+export async function getAnnouncement(idweb: string): Promise<StoredAnnouncement | null> {
+  const rows = await db()`SELECT * FROM announcements WHERE idweb = ${idweb}`;
+  return (rows[0] as StoredAnnouncement) ?? null;
+}
+
+export type CommentRow = {
+  id: number;
+  body: string;
+  created_at: Date;
+  user_id: number | null;
+  author_name: string | null;
+  author_email: string | null;
+};
+
+export async function getComments(idweb: string): Promise<CommentRow[]> {
+  const rows = await db()`
+    SELECT c.id, c.body, c.created_at, c.user_id, u.name AS author_name, u.email AS author_email
+    FROM comments c LEFT JOIN users u ON u.id = c.user_id
+    WHERE c.idweb = ${idweb}
+    ORDER BY c.created_at ASC, c.id ASC`;
+  return rows as CommentRow[];
+}
+
+export async function addComment(idweb: string, userId: number, body: string): Promise<void> {
+  await db()`INSERT INTO comments (idweb, user_id, body) VALUES (${idweb}, ${userId}, ${body})`;
+}
+
+// Authors may delete their own comments; admins may delete any.
+export async function deleteComment(id: number, userId: number, isAdmin: boolean): Promise<void> {
+  if (isAdmin) {
+    await db()`DELETE FROM comments WHERE id = ${id}`;
+  } else {
+    await db()`DELETE FROM comments WHERE id = ${id} AND user_id = ${userId}`;
+  }
 }
 
 export async function getNewInRun(runId: number, category: string): Promise<StoredAnnouncement[]> {

@@ -3,9 +3,15 @@ import {
   getLastRun,
   getLastSuccessfulRun,
   getCurrent,
+  getAnnouncement,
+  getComments,
+  addComment,
+  deleteComment,
+  type CommentRow,
   type StoredAnnouncement,
   type RunRow,
 } from "./db.ts";
+import { matchPath } from "./router.ts";
 import {
   type AuthUser,
   getSession,
@@ -75,7 +81,8 @@ const BASE_CSS = `
     td { padding: 12px 14px; border-bottom: 1px solid #f0efee; vertical-align: top; font-size: 14px; }
     td a { color: #1a5fb4; text-decoration: none; font-weight: 600; }
     td a:hover { text-decoration: underline; }
-    input[type=email], input[type=text] { width: 100%; padding: 10px 12px; border: 1px solid #d6d3d1; border-radius: 6px; font-size: 15px; }
+    input[type=email], input[type=text], textarea { width: 100%; padding: 10px 12px; border: 1px solid #d6d3d1; border-radius: 6px; font-size: 15px; font-family: inherit; }
+    textarea { resize: vertical; min-height: 84px; }
     button.primary { background: #1c3552; color: #fff; border: none; border-radius: 6px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
     button.subtle { background: none; border: none; color: #1a5fb4; cursor: pointer; font-size: 13px; padding: 0; text-decoration: underline; }
     .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); padding: 28px; max-width: 420px; margin: 48px auto; }
@@ -83,6 +90,10 @@ const BASE_CSS = `
     .card p { color: #57534e; font-size: 14px; }
     .card label { display: block; font-size: 13px; color: #57534e; margin: 14px 0 4px; }
     .card .actions { margin-top: 18px; display: flex; align-items: center; gap: 16px; }
+    .comment { border-top: 1px solid #f0efee; padding: 12px 0; }
+    .comment-head { display: flex; align-items: baseline; gap: 12px; font-size: 13px; color: #78716c; }
+    .comment-body { margin-top: 4px; font-size: 14px; white-space: pre-wrap; }
+    .comments-link { color: #1a5fb4; text-decoration: none; font-weight: 400; font-size: 13px; }
     footer { color: #a8a29e; font-size: 12px; margin-top: 24px; }
 `;
 
@@ -316,6 +327,109 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
   );
 }
 
+// --- Avis detail + comments ------------------------------------------------------
+
+function commentBlock(c: CommentRow & { idweb: string }, viewer: AuthUser): string {
+  const author = c.user_id === null ? "utilisateur supprimé" : (c.author_name ?? c.author_email ?? "?");
+  const canDelete = viewer.isAdmin || (c.user_id !== null && Number(c.user_id) === viewer.id);
+  return `
+  <div class="comment">
+    <div class="comment-head">
+      <strong>${esc(author)}</strong>
+      <span>${esc(frDateTime(new Date(c.created_at)))}</span>
+      ${
+        canDelete
+          ? `<form method="post" action="/commentaires/supprimer" style="margin:0;">
+               <input type="hidden" name="id" value="${c.id}">
+               <input type="hidden" name="idweb" value="${esc(c.idweb)}">
+               <button class="subtle" type="submit">Supprimer</button>
+             </form>`
+          : ""
+      }
+    </div>
+    <div class="comment-body">${esc(c.body)}</div>
+  </div>`;
+}
+
+async function avisPage(user: AuthUser, idweb: string, error?: string): Promise<Response> {
+  const a = await getAnnouncement(idweb);
+  if (!a) return html(errorPage("Avis introuvable"), 404);
+  const comments = await getComments(idweb);
+
+  const facts: Array<[string, string | null]> = [
+    ["Acheteur", a.acheteur],
+    ["Département", a.department],
+    ["Date limite", a.deadline_text],
+    ["Publié le", a.published_at],
+    ["Type d'avis", a.type_avis],
+    ["Procédure", a.procedure],
+    ["Classement", a.reason],
+  ];
+  const factRows = facts
+    .filter(([, v]) => v)
+    .map(([k, v]) => `<tr><th style="width:160px;">${k}</th><td>${esc(v!)}</td></tr>`)
+    .join("");
+
+  return html(
+    layout(
+      `${a.objet} — Avis en cours`,
+      whoStrip(user),
+      `<main>
+      <p style="font-size:14px;"><a href="/" style="color:#1a5fb4;">← Retour aux avis</a></p>
+      <div class="card" style="max-width:none;margin:16px 0;">
+        <h2>${esc(a.objet)}</h2>
+        <table style="box-shadow:none;">${factRows}</table>
+        <p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="color:#1a5fb4;font-weight:600;">Voir l'annonce officielle →</a></p>
+      </div>
+      <div class="card" style="max-width:none;margin:16px 0;">
+        <h2>Commentaires (${comments.length})</h2>
+        ${
+          comments.length === 0
+            ? `<p style="color:#78716c;">Aucun commentaire pour l'instant. Lancez la discussion.</p>`
+            : comments.map((c) => commentBlock({ ...c, idweb }, user)).join("")
+        }
+        ${error ? `<div class="banner error">${esc(error)}</div>` : ""}
+        <form method="post" action="/avis/${encodeURIComponent(idweb)}/commenter" style="margin-top:16px;">
+          <label for="body">Ajouter un commentaire</label>
+          <textarea id="body" name="body" required maxlength="4000"
+                    placeholder="Votre analyse, une question, une décision…"></textarea>
+          <div class="actions"><button class="primary" type="submit">Publier</button></div>
+        </form>
+      </div>
+    </main>`,
+    ),
+  );
+}
+
+async function handleAddComment(
+  req: Request,
+  _url: URL,
+  user: AuthUser,
+  params: Record<string, string>,
+): Promise<Response> {
+  const idweb = params.idweb ?? "";
+  const a = await getAnnouncement(idweb);
+  if (!a) return html(errorPage("Avis introuvable"), 404);
+
+  if (!rateLimit(`comment:${user.id}`, 20, 600_000)) {
+    return avisPage(user, idweb, MSG_RATE_LIMITED);
+  }
+  const { body = "" } = await form(req);
+  const trimmed = body.trim();
+  if (!trimmed || trimmed.length > 4000) {
+    return avisPage(user, idweb, "Le commentaire est vide ou trop long (4000 caractères max).");
+  }
+  await addComment(idweb, user.id, trimmed);
+  return redirect(`/avis/${encodeURIComponent(idweb)}`, 303);
+}
+
+async function handleDeleteComment(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { id = "", idweb = "" } = await form(req);
+  const commentId = Number(id);
+  if (Number.isInteger(commentId)) await deleteComment(commentId, user.id, user.isAdmin);
+  return redirect(idweb ? `/avis/${encodeURIComponent(idweb)}` : "/", 303);
+}
+
 // --- Dashboard ----------------------------------------------------------------------
 
 function deadlineClass(deadline: Date | null): string {
@@ -336,7 +450,9 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
       ${isNew ? '<span class="badge">Nouveau</span>' : ""}
       <div class="meta">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department ?? "?")}${
         a.type_avis ? ` — ${esc(a.type_avis)}` : ""
-      }</div>
+      } — <a class="comments-link" href="/avis/${encodeURIComponent(a.idweb)}">${
+        (a.comment_count ?? 0) > 0 ? `Commentaires (${a.comment_count})` : "Commenter"
+      }</a></div>
       ${a.reason ? `<div class="reason">${esc(a.reason)}</div>` : ""}
     </td>
     <td class="pub">${esc(a.published_at ?? "?")}</td>
@@ -521,7 +637,12 @@ async function health(): Promise<Response> {
 // --- Router -----------------------------------------------------------------------
 
 type Access = "public" | "user" | "admin";
-type Handler = (req: Request, url: URL, user: AuthUser | null) => Promise<Response>;
+type Handler = (
+  req: Request,
+  url: URL,
+  user: AuthUser | null,
+  params: Record<string, string>,
+) => Promise<Response>;
 
 const routes: Array<{ method: string; path: string; access: Access; handler: Handler }> = [
   { method: "GET", path: "/sante", access: "public", handler: () => health() },
@@ -534,6 +655,9 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
   { method: "GET", path: "/profil", access: "user", handler: async (_req, _url, user) => profilePage(user!) },
   { method: "POST", path: "/profil", access: "user", handler: (req, url, user) => handleProfileUpdate(req, url, user!) },
   { method: "POST", path: "/profil/deconnexion-partout", access: "user", handler: (req, url, user) => handleLogoutEverywhere(req, url, user!) },
+  { method: "GET", path: "/avis/:idweb", access: "user", handler: (_req, _url, user, params) => avisPage(user!, params.idweb ?? "") },
+  { method: "POST", path: "/avis/:idweb/commenter", access: "user", handler: (req, url, user, params) => handleAddComment(req, url, user!, params) },
+  { method: "POST", path: "/commentaires/supprimer", access: "user", handler: (req, url, user) => handleDeleteComment(req, url, user!) },
   { method: "GET", path: "/admin", access: "admin", handler: (_req, _url, user) => adminPage(user!) },
   { method: "POST", path: "/admin/ajouter", access: "admin", handler: (req, url, user) => handleAdminAdd(req, url, user!) },
   { method: "POST", path: "/admin/supprimer", access: "admin", handler: (req, url, user) => handleAdminDelete(req, url, user!) },
@@ -556,7 +680,14 @@ async function handle(req: Request): Promise<Response> {
     return new Response("Origine non autorisée", { status: 403 });
   }
 
-  const route = routes.find((r) => r.method === req.method && r.path === url.pathname);
+  let params: Record<string, string> = {};
+  const route = routes.find((r) => {
+    if (r.method !== req.method) return false;
+    const m = matchPath(r.path, url.pathname);
+    if (!m) return false;
+    params = m;
+    return true;
+  });
   if (!route) return html(errorPage("Page introuvable"), 404);
 
   let session = null;
@@ -583,7 +714,7 @@ async function handle(req: Request): Promise<Response> {
     }
   }
 
-  const res = await route.handler(req, url, user);
+  const res = await route.handler(req, url, user, params);
   if (session?.refreshCookie && !res.headers.has("Set-Cookie")) {
     res.headers.append("Set-Cookie", session.refreshCookie);
   }
