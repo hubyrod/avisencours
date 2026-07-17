@@ -786,12 +786,15 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
         }
       : null,
   );
-  const statusTitle = tooltip ? ` title="${esc(tooltip)}"` : "";
+  // Le title reprend toujours le libellé : en mobile seul le point coloré est visible.
+  const statusTitle = a.status_label
+    ? ` title="${esc(tooltip ? `${a.status_label} — ${tooltip}` : a.status_label)}"`
+    : "";
   const statusBadge = a.status_label
     ? `<span class="badge-statut"${statusTitle}><span class="dot" style="background:${esc(
         a.status_color ?? "#626d66",
-      )}"></span>${esc(a.status_label)}</span>`
-    : "";
+      )}"></span><span class="lbl">${esc(a.status_label)}</span></span>`
+    : `<span class="jrest none">—</span>`;
   return `
   <tr>
     <td class="deadline">${jChip(a.deadline)}${
@@ -799,15 +802,17 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
     }</td>
     <td>
       <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.objet)}</a>
-      ${isNew ? '<span class="badge">Nouveau</span>' : ""}${statusBadge}
+      ${isNew ? '<span class="badge">Nouveau</span>' : ""}
       <div class="meta">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department ?? "?")}${
         a.type_avis ? ` — ${esc(a.type_avis)}` : ""
+      }${
+        a.published_at ? ` — publié le ${esc(a.published_at)}` : ""
       } — <a class="comments-link" href="/avis/${encodeURIComponent(a.idweb)}">${
         (a.comment_count ?? 0) > 0 ? `Commentaires (${a.comment_count})` : "Commenter"
       }</a></div>
       ${a.reason ? `<div class="reason">${esc(a.reason)}</div>` : ""}
     </td>
-    <td class="pub">${esc(a.published_at ?? "?")}</td>
+    <td class="statut-col">${statusBadge}</td>
   </tr>`;
 }
 
@@ -840,16 +845,16 @@ const DASHBOARD_CSS = `
     .jrest.urgent { color: var(--rouge); }
     .jrest.none { color: var(--encre-2); font-weight: 400; }
     .jdate { font-family: var(--fonte-mono); font-size: 11px; color: var(--encre-2); margin-top: 3px; }
-    .pub { white-space: nowrap; color: var(--encre-2); font-family: var(--fonte-mono); font-size: 12px; }
+    .statut-col { width: 1%; white-space: nowrap; }
     .badge { display: inline-block; background: #e5efe9; color: var(--vert); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 4px; margin-left: 7px; vertical-align: 1px; }
-    .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; margin-left: 7px; vertical-align: 1px; }
+    .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
     .filtres { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; font-size: 13px; color: var(--encre-2); flex-wrap: wrap; }
     .filtres select { padding: 5px 8px; border: 1px solid var(--ligne-forte); border-radius: 6px; font-family: inherit; background: var(--carte); font-size: 13px; color: var(--encre); }
     .filtres label { display: flex; align-items: center; gap: 6px; }
     .filtres button { background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 6px; padding: 4px 12px; font-size: 13px; cursor: pointer; font-family: inherit; color: var(--encre); }
     .filtres button:hover { border-color: var(--panneau); }
     .empty { color: var(--encre-2); padding: 32px; text-align: center; background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; font-size: 13.5px; }
-    @media (max-width: 640px) { thead th:last-child, td.pub { display: none; } .deadline { width: 88px; } .jdate { white-space: normal; } }
+    @media (max-width: 640px) { .deadline { width: 88px; } .jdate { white-space: normal; } .badge-statut { padding: 2px 5px; } .badge-statut .lbl { display: none; } }
 `;
 
 async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Response> {
@@ -905,7 +910,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
             : "Aucun avis en cours dans cette catégorie."
         }</p>`
       : `<table>
-          <thead><tr><th>Échéance</th><th>Objet</th><th>Publié le</th></tr></thead>
+          <thead><tr><th>Échéance</th><th>Objet</th><th>Statut</th></tr></thead>
           <tbody>${items.map((a) => announcementRow(a, latestRunId)).join("")}</tbody>
         </table>`;
 
