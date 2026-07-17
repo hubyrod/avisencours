@@ -5,9 +5,14 @@ import {
   startRun,
   finishRun,
   upsertAnnouncements,
-  getNewInRun,
+  getNewSinceLastDigest,
   getUpcomingDeadlines,
+  markDigestSent,
+  listKeywords,
+  listScopeRules,
+  getSetting,
 } from "./db.ts";
+import { buildQueryFromKeywords, validateDigestWindow, parseDepartements } from "./rules.ts";
 import {
   sendEmail,
   hasEmailToken,
@@ -57,9 +62,31 @@ async function main() {
   console.error(`run #${runId} started`);
 
   try {
+    // Configuration éditable (/configuration) — lue ici, dans le try, pour
+    // qu'un échec de lecture passe par le circuit erreur + email d'alerte.
+    const [keywords, ruleRows, windowSetting, classifierSetting, depSetting] = await Promise.all([
+      listKeywords(),
+      listScopeRules(),
+      getSetting("digest_window_days"),
+      getSetting("classifier_mode"),
+      getSetting("code_departements"),
+    ]);
+    const scopeRules = {
+      keep: ruleRows.filter((r) => r.kind === "keep").map((r) => r.term),
+      exclude: ruleRows.filter((r) => r.kind === "exclude").map((r) => r.term),
+    };
+    const dep = parseDepartements(depSetting ?? "");
+    const digestWindow =
+      windowSetting && validateDigestWindow(windowSetting).ok ? Number(windowSetting) : 14;
+
     const { relevant, travaux, excluded } = await runPipeline({
       maxPages: Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : undefined,
-      classifier: Bun.env.CLASSIFIER,
+      // Table vide = repli sur la liste par défaut (defaults.ts).
+      query: keywords.length > 0 ? buildQueryFromKeywords(keywords.map((k) => k.term)) : undefined,
+      // Un réglage en base l'emporte sur la variable d'environnement.
+      classifier: classifierSetting ?? Bun.env.CLASSIFIER,
+      scopeRules,
+      codeDepartement: dep.ok ? dep.codes : [],
     });
 
     const all = [...relevant, ...travaux, ...excluded];
@@ -77,6 +104,13 @@ async function main() {
 
     await cleanupAuth();
 
+    // Run manuel (« Relancer maintenant ») : pas de digest. Les nouveautés
+    // resteront « nouvelles » pour le prochain digest réellement envoyé.
+    if (Bun.env.SKIP_DIGEST === "1") {
+      console.error("SKIP_DIGEST=1 — skipping digest email (manual run)");
+      return;
+    }
+
     // Recipients = users who opted in on /profil.
     const recipients = uniqueEmails([await getDigestUserEmails()]);
     if (recipients.length === 0 || !hasEmailToken()) {
@@ -84,8 +118,8 @@ async function main() {
       return;
     }
 
-    const newRelevant = await getNewInRun(runId, "relevant");
-    const upcoming = await getUpcomingDeadlines(runId, 14);
+    const newRelevant = await getNewSinceLastDigest(runId, "relevant");
+    const upcoming = await getUpcomingDeadlines(runId, digestWindow);
     const data = {
       newRelevant,
       upcoming,
@@ -99,6 +133,7 @@ async function main() {
       subject: digestSubject(data),
       html: renderDigestHtml(data),
     });
+    await markDigestSent(runId);
     console.error(`digest sent to ${recipients.length} recipient(s)`);
   } catch (err) {
     const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);

@@ -81,6 +81,7 @@ export type AuthUser = {
   email: string;
   name: string | null;
   isAdmin: boolean;
+  canConfigure: boolean;
   receiveDigest: boolean;
 };
 
@@ -104,7 +105,7 @@ export async function getSession(req: Request): Promise<SessionCheck | null> {
   if (!token) return null;
   const hash = sha256hex(token);
   const rows = await db()`
-    SELECT u.id, u.email, u.name, u.is_admin, u.receive_digest, s.last_used_at
+    SELECT u.id, u.email, u.name, u.is_admin, u.can_configure, u.receive_digest, s.last_used_at
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ${hash} AND s.expires_at > now()`;
   const row = rows[0];
@@ -126,6 +127,7 @@ export async function getSession(req: Request): Promise<SessionCheck | null> {
       email: row.email,
       name: row.name,
       isAdmin: row.is_admin === true,
+      canConfigure: row.can_configure === true,
       receiveDigest: row.receive_digest === true,
     },
     refreshCookie,
@@ -197,7 +199,7 @@ export async function ensureUser(email: string): Promise<AuthUser | null> {
 
 export async function findUserByEmail(email: string): Promise<AuthUser | null> {
   const rows = await db()`
-    SELECT id, email, name, is_admin, receive_digest
+    SELECT id, email, name, is_admin, can_configure, receive_digest
     FROM users WHERE email = ${normalizeEmail(email)}`;
   const row = rows[0];
   if (!row) return null;
@@ -206,6 +208,7 @@ export async function findUserByEmail(email: string): Promise<AuthUser | null> {
     email: row.email,
     name: row.name,
     isAdmin: row.is_admin === true,
+    canConfigure: row.can_configure === true,
     receiveDigest: row.receive_digest === true,
   };
 }
@@ -283,13 +286,14 @@ export type UserRow = {
   email: string;
   name: string | null;
   is_admin: boolean;
+  can_configure: boolean;
   created_at: Date;
   last_login_at: Date | null;
 };
 
 export async function listUsers(): Promise<UserRow[]> {
   const rows = await db()`
-    SELECT id, email, name, is_admin, created_at, last_login_at
+    SELECT id, email, name, is_admin, can_configure, created_at, last_login_at
     FROM users ORDER BY email`;
   return rows as UserRow[];
 }
@@ -306,6 +310,11 @@ export async function addUser(email: string, name: string, isAdmin: boolean): Pr
 
 export async function deleteUser(id: number): Promise<void> {
   await db()`DELETE FROM users WHERE id = ${id}`;
+}
+
+// Délégation de la configuration de la veille (accès à /configuration).
+export async function setUserCanConfigure(id: number, can: boolean): Promise<void> {
+  await db()`UPDATE users SET can_configure = ${can} WHERE id = ${id}`;
 }
 
 export async function updateProfile(

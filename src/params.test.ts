@@ -41,4 +41,10 @@ describe("buildApiUrl", () => {
     const url = buildApiUrl({ query: "", typeMarche: ["SERVICES"] });
     expect(url).toContain(`refine=${encodeURIComponent("type_marche:SERVICES")}`);
   });
+
+  test("code_departement devient un refine", () => {
+    const url = buildApiUrl({ query: "", codeDepartement: ["31", "2A"] });
+    expect(url).toContain(`refine=${encodeURIComponent("code_departement:31")}`);
+    expect(url).toContain(`refine=${encodeURIComponent("code_departement:2A")}`);
+  });
 });

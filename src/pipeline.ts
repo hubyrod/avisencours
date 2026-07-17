@@ -3,6 +3,7 @@ import { scrapeAll, type Announcement } from "./scraper.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM } from "./classify-llm.ts";
 import { classifyHybrid } from "./classify-hybrid.ts";
+import { applyScopeRules, type ScopeRules } from "./rules.ts";
 
 const EXCLUDE_TYPE_AVIS = [/attribution/i, /résultat/i, /annulation/i];
 
@@ -24,6 +25,8 @@ export type PipelineOptions = {
   useCache?: boolean;
   cachePath?: string;
   classifier?: string;
+  scopeRules?: ScopeRules;
+  codeDepartement?: string[];
   log?: (msg: string) => void;
 };
 
@@ -41,6 +44,7 @@ async function loadOrScrape(
   maxPages: number,
   cachePath: string,
   useCache: boolean,
+  codeDepartement: string[] | undefined,
   log: (msg: string) => void,
 ): Promise<CachedItem[]> {
   if (useCache) {
@@ -52,6 +56,7 @@ async function loadOrScrape(
   }
 
   const params = buildDefaultParams(query);
+  if (codeDepartement?.length) params.codeDepartement = codeDepartement;
 
   log(`query: ${query.length > 120 ? query.slice(0, 120) + "…" : query}`);
 
@@ -115,12 +120,12 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
   const cachePath = opts.cachePath ?? ".cache/scrape.json";
   const useCache = opts.useCache ?? false;
 
-  const items = await loadOrScrape(query, maxPages, cachePath, useCache, log);
+  const items = await loadOrScrape(query, maxPages, cachePath, useCache, opts.codeDepartement, log);
 
   const mode = resolveMode(opts.classifier ?? "hybrid", log);
   log(`classifier: ${mode}`);
 
-  const classifyOne =
+  const baseClassify =
     mode === "regex"
       ? async (it: Announcement): Promise<Classification> => classify(it)
       : async (it: Announcement): Promise<Classification> => {
@@ -132,8 +137,25 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
           }
         };
 
+  // Règles personnalisées (/configuration) : tranchent avant les classifieurs.
+  const rules = opts.scopeRules;
+  let forcedKeep = 0;
+  let forcedExclude = 0;
+  const classifyOne = async (it: Announcement): Promise<Classification> => {
+    const forced = rules ? applyScopeRules(it, rules) : null;
+    if (forced) {
+      if (forced.category === "relevant") forcedKeep++;
+      else forcedExclude++;
+      return forced;
+    }
+    return baseClassify(it);
+  };
+
   const concurrency = mode === "regex" ? items.length : 5;
   const classifications = await mapConcurrent(items, classifyOne, concurrency);
+  if (forcedKeep || forcedExclude) {
+    log(`règles personnalisées: ${forcedKeep} gardé(s), ${forcedExclude} exclu(s)`);
+  }
 
   const relevant: ClassifiedItem[] = [];
   const travaux: ClassifiedItem[] = [];

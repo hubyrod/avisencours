@@ -16,15 +16,25 @@ import {
   moveStatus,
   addStatusEvent,
   getCurrentStatusEvent,
+  listKeywords,
+  addKeyword,
+  deleteKeyword,
+  listScopeRules,
+  addScopeRule,
+  deleteScopeRule,
+  getSetting,
+  setSetting,
   type StoredAnnouncement,
   type RunRow,
   type StatusRow,
+  type ScopeRuleRow,
 } from "./db.ts";
 import { startLive, isLiveReady, commentStream } from "./live.ts";
 import { frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
 import { matchPath } from "./router.ts";
 import {
   type AuthUser,
+  type UserRow,
   getSession,
   createSession,
   deleteSession,
@@ -46,10 +56,18 @@ import {
   listUsers,
   addUser,
   deleteUser,
+  setUserCanConfigure,
   updateProfile,
   deleteAllSessions,
 } from "./auth.ts";
 import { sendLoginCode } from "./email.ts";
+import {
+  validateKeyword,
+  validateRuleTerm,
+  validateDigestWindow,
+  validateClassifierMode,
+  parseDepartements,
+} from "./rules.ts";
 
 // --- Shared rendering -------------------------------------------------------
 
@@ -176,6 +194,7 @@ function whoStrip(user: AuthUser): string {
   <div class="who">
     <span>Connecté&nbsp;: ${esc(user.name || user.email)}</span>
     <a href="/profil">Mon profil</a>
+    ${user.isAdmin || user.canConfigure ? '<a href="/configuration">Configuration</a>' : ""}
     ${user.isAdmin ? '<a href="/admin">Administration</a>' : ""}
     <form method="post" action="/deconnexion"><button>Se déconnecter</button></form>
   </div>`;
@@ -377,6 +396,16 @@ function statusAdminRow(s: StatusRow): string {
 async function adminPage(user: AuthUser, error?: string): Promise<Response> {
   const [users, statuts] = await Promise.all([listUsers(), listStatuses(true)]);
   const statusRows = statuts.map(statusAdminRow).join("");
+  const configCell = (u: UserRow) => {
+    if (u.is_admin) return "oui (admin)";
+    const mini = (valeur: string, label: string) => `
+      <form method="post" action="/admin/configurer" style="margin:0;display:inline-block;">
+        <input type="hidden" name="id" value="${u.id}">
+        <input type="hidden" name="valeur" value="${valeur}">
+        <button class="subtle" type="submit">${label}</button>
+      </form>`;
+    return u.can_configure ? `oui — ${mini("0", "retirer")}` : `non — ${mini("1", "autoriser")}`;
+  };
   const rows = users
     .map(
       (u) => `
@@ -384,6 +413,7 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
         <td>${esc(u.email)}</td>
         <td>${esc(u.name ?? "—")}</td>
         <td>${u.is_admin ? "oui" : "non"}</td>
+        <td>${configCell(u)}</td>
         <td>${u.last_login_at ? esc(frDateTime(new Date(u.last_login_at))) : "jamais"}</td>
         <td>
           <form method="post" action="/admin/supprimer" style="margin:0;">
@@ -404,7 +434,7 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
       <p class="retour"><a href="/">← Retour aux avis</a></p>
       ${errorLine(error)}
       <table>
-        <thead><tr><th>Email</th><th>Nom</th><th>Admin</th><th>Dernière connexion</th><th></th></tr></thead>
+        <thead><tr><th>Email</th><th>Nom</th><th>Admin</th><th>Config</th><th>Dernière connexion</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div class="card" style="margin:24px 0;max-width:520px;">
@@ -451,6 +481,294 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
     </main>`,
     ),
   );
+}
+
+// --- Configuration de la veille -----------------------------------------------------
+// Accessible aux admins et aux utilisateurs délégués (users.can_configure).
+// Même philosophie que /admin : petites actions POST sans JS, re-rendu avec
+// bannière en cas d'erreur, redirection 303 en cas de succès.
+
+// Au-delà de ce délai, un run resté « running » est considéré planté (le verrou
+// consultatif Postgres reste la vraie protection contre les runs concurrents).
+const RUN_STALE_MS = 15 * 60_000;
+
+function runInFlight(lastRun: RunRow | null): boolean {
+  return (
+    lastRun !== null &&
+    lastRun.status === "running" &&
+    Date.now() - new Date(lastRun.started_at).getTime() < RUN_STALE_MS
+  );
+}
+
+function effectiveClassifierDefault(): string {
+  const env = Bun.env.CLASSIFIER;
+  return env === "regex" || env === "llm" || env === "hybrid" ? env : "hybrid";
+}
+
+const CLASSIFIER_LABELS: Array<[string, string]> = [
+  ["hybrid", "hybride (regex puis LLM)"],
+  ["regex", "regex seul"],
+  ["llm", "LLM seul"],
+];
+
+function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude"): string {
+  const rows = rules
+    .filter((r) => r.kind === kind)
+    .map(
+      (r) => `
+        <li style="display:flex;align-items:center;gap:8px;margin:4px 0;">
+          <span>${esc(r.term)}</span>
+          <form method="post" action="/configuration/regles/supprimer" style="margin:0;">
+            <input type="hidden" name="id" value="${r.id}">
+            <button class="subtle" type="submit">Supprimer</button>
+          </form>
+        </li>`,
+    )
+    .join("");
+  return rows
+    ? `<ul style="list-style:none;padding:0;margin:8px 0;">${rows}</ul>`
+    : `<p style="color:var(--encre-2);font-size:13.5px;">Aucune règle.</p>`;
+}
+
+async function configPage(
+  user: AuthUser,
+  notice?: { kind: "ok" | "error"; text: string },
+): Promise<Response> {
+  const [keywords, rules, fenetre, classifieur, departements, lastRun] = await Promise.all([
+    listKeywords(),
+    listScopeRules(),
+    getSetting("digest_window_days"),
+    getSetting("classifier_mode"),
+    getSetting("code_departements"),
+    getLastRun(),
+  ]);
+
+  const banner = notice
+    ? `<div class="banner ${notice.kind === "ok" ? "ok" : "error"}">${esc(notice.text)}</div>`
+    : "";
+
+  const keywordRows = keywords
+    .map(
+      (k) => `
+      <tr>
+        <td>${esc(k.term)}</td>
+        <td style="text-align:right;">
+          <form method="post" action="/configuration/mots-cles/supprimer" style="margin:0;">
+            <input type="hidden" name="id" value="${k.id}">
+            <button class="subtle" type="submit">Supprimer</button>
+          </form>
+        </td>
+      </tr>`,
+    )
+    .join("");
+
+  const running = runInFlight(lastRun);
+  const runLine = lastRun
+    ? `Dernière mise à jour&nbsp;: ${
+        lastRun.status === "running"
+          ? `démarrée le ${esc(frDateTime(new Date(lastRun.started_at)))}${running ? " — en cours" : " — semble interrompue"}`
+          : `${lastRun.status === "success" ? "réussie" : "échouée"} le ${esc(
+              frDateTime(new Date(lastRun.finished_at ?? lastRun.started_at)),
+            )}${lastRun.status === "success" ? ` (${lastRun.relevant_count ?? 0} avis pertinents)` : ""}`
+      }`
+    : "Aucune mise à jour n'a encore été effectuée.";
+
+  const defaultMode = effectiveClassifierDefault();
+  const modeOptions = CLASSIFIER_LABELS.map(
+    ([value, label]) =>
+      `<option value="${value}" ${classifieur === value ? "selected" : ""}>${esc(label)}</option>`,
+  ).join("");
+
+  return html(
+    layout(
+      "Configuration — Avis en cours",
+      whoStrip(user),
+      `<main>
+      <h2 class="titre-page">Configuration de la veille</h2>
+      <p class="retour"><a href="/">← Retour aux avis</a></p>
+      ${banner}
+      ${running ? '<meta http-equiv="refresh" content="30">' : ""}
+
+      <div class="card" style="margin:16px 0;max-width:640px;">
+        <h2>Mots-clés de recherche</h2>
+        <p style="color:var(--encre-2);font-size:13.5px;">
+          Un avis est récupéré s'il contient au moins un de ces termes.
+          Les expressions de plusieurs mots sont recherchées telles quelles.
+          Les modifications s'appliquent à la prochaine mise à jour.
+        </p>
+        <table>
+          <tbody>${keywordRows}</tbody>
+        </table>
+        <form method="post" action="/configuration/mots-cles/ajouter" style="margin-top:12px;">
+          <label for="kw-terme">Nouveau mot-clé</label>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="kw-terme" name="terme" required maxlength="80"
+                   placeholder="ex. covoiturage" style="flex:1;">
+            <button class="primary" type="submit">Ajouter</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card" style="margin:16px 0;max-width:640px;">
+        <h2>Règles de tri</h2>
+        <p style="color:var(--encre-2);font-size:13.5px;">
+          Appliquées avant le classement automatique, en cherchant le terme dans le texte
+          de l'avis (majuscules et accents ignorés). Une règle « toujours garder »
+          l'emporte sur une règle « toujours exclure ».
+        </p>
+        <h3 style="margin:12px 0 2px;font-size:14px;">Toujours exclure</h3>
+        ${ruleList(rules, "exclude")}
+        <h3 style="margin:12px 0 2px;font-size:14px;">Toujours garder</h3>
+        ${ruleList(rules, "keep")}
+        <form method="post" action="/configuration/regles/ajouter" style="margin-top:12px;">
+          <label for="regle-terme">Nouvelle règle</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <select name="kind" style="padding:10px 6px;border:1px solid var(--ligne-forte);border-radius:7px;font-family:inherit;background:var(--carte);">
+              <option value="exclude">toujours exclure</option>
+              <option value="keep">toujours garder</option>
+            </select>
+            <input type="text" id="regle-terme" name="terme" required maxlength="120"
+                   placeholder="ex. fibre optique" style="flex:1;">
+            <button class="primary" type="submit">Ajouter</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card" style="margin:16px 0;max-width:640px;">
+        <h2>Réglages</h2>
+        <form method="post" action="/configuration/reglages">
+          <label for="reg-fenetre">Fenêtre des échéances dans l'email quotidien (jours)</label>
+          <input type="number" id="reg-fenetre" name="fenetre" min="1" max="60"
+                 value="${esc(fenetre ?? "")}" placeholder="14 (par défaut)">
+          <label for="reg-classifieur" style="margin-top:14px;">Classifieur</label>
+          <select id="reg-classifieur" name="classifieur" style="padding:10px 6px;border:1px solid var(--ligne-forte);border-radius:7px;font-family:inherit;background:var(--carte);">
+            <option value="">par défaut (${esc(
+              CLASSIFIER_LABELS.find(([v]) => v === defaultMode)?.[1] ?? defaultMode,
+            )})</option>
+            ${modeOptions}
+          </select>
+          <label for="reg-departements" style="margin-top:14px;">Codes département (séparés par des virgules)</label>
+          <input type="text" id="reg-departements" name="departements"
+                 value="${esc(departements ?? "")}" placeholder="vide = toute la France">
+          <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
+        </form>
+      </div>
+
+      <div class="card" style="margin:16px 0;max-width:640px;">
+        <h2>Mise à jour</h2>
+        <p>${runLine}</p>
+        ${
+          running
+            ? `<div class="banner ok">Mise à jour en cours… Cette page se rafraîchit automatiquement.</div>
+               <div class="actions"><button class="primary" disabled>Relancer maintenant</button></div>`
+            : `<p style="color:var(--encre-2);font-size:13.5px;">
+                 Lance immédiatement une récupération et un reclassement des avis
+                 (environ 3 minutes). Aucun email n'est envoyé lors d'une mise à jour manuelle.
+               </p>
+               <form method="post" action="/configuration/relancer">
+                 <div class="actions"><button class="primary" type="submit">Relancer maintenant</button></div>
+               </form>`
+        }
+      </div>
+    </main>`,
+    ),
+  );
+}
+
+async function handleConfigHome(_req: Request, url: URL, user: AuthUser): Promise<Response> {
+  const notice = url.searchParams.has("lancee")
+    ? { kind: "ok" as const, text: "Mise à jour lancée — comptez environ 3 minutes." }
+    : undefined;
+  return configPage(user, notice);
+}
+
+async function handleKeywordAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { terme = "" } = await form(req);
+  const v = validateKeyword(terme);
+  if (!v.ok) return configPage(user, { kind: "error", text: v.error });
+  const added = await addKeyword(v.value, user.id);
+  if (!added) return configPage(user, { kind: "error", text: "Ce mot-clé existe déjà." });
+  return redirect("/configuration", 303);
+}
+
+async function handleKeywordDelete(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { id = "" } = await form(req);
+  const kid = Number(id);
+  if (!Number.isInteger(kid)) return configPage(user, { kind: "error", text: "Requête invalide." });
+  const deleted = await deleteKeyword(kid);
+  if (!deleted) {
+    return configPage(user, {
+      kind: "error",
+      text: "Impossible de supprimer le dernier mot-clé : la liste ne peut pas être vide.",
+    });
+  }
+  return redirect("/configuration", 303);
+}
+
+async function handleRuleAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { kind = "", terme = "" } = await form(req);
+  if (kind !== "keep" && kind !== "exclude") {
+    return configPage(user, { kind: "error", text: "Requête invalide." });
+  }
+  const v = validateRuleTerm(terme);
+  if (!v.ok) return configPage(user, { kind: "error", text: v.error });
+  const added = await addScopeRule(kind, v.value, user.id);
+  if (!added) return configPage(user, { kind: "error", text: "Cette règle existe déjà." });
+  return redirect("/configuration", 303);
+}
+
+async function handleRuleDelete(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { id = "" } = await form(req);
+  const rid = Number(id);
+  if (!Number.isInteger(rid)) return configPage(user, { kind: "error", text: "Requête invalide." });
+  await deleteScopeRule(rid);
+  return redirect("/configuration", 303);
+}
+
+async function handleSettingsUpdate(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { fenetre = "", classifieur = "", departements = "" } = await form(req);
+
+  let windowValue: string | null = null;
+  if (fenetre.trim() !== "") {
+    const v = validateDigestWindow(fenetre);
+    if (!v.ok) return configPage(user, { kind: "error", text: v.error });
+    windowValue = v.value;
+  }
+  let modeValue: string | null = null;
+  if (classifieur !== "") {
+    const v = validateClassifierMode(classifieur);
+    if (!v.ok) return configPage(user, { kind: "error", text: v.error });
+    modeValue = v.value;
+  }
+  const dep = parseDepartements(departements);
+  if (!dep.ok) return configPage(user, { kind: "error", text: dep.error });
+
+  await setSetting("digest_window_days", windowValue, user.id);
+  await setSetting("classifier_mode", modeValue, user.id);
+  await setSetting("code_departements", dep.codes.length > 0 ? dep.codes.join(",") : null, user.id);
+  return redirect("/configuration", 303);
+}
+
+async function handleRelance(_req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  if (!rateLimit(`relance:${user.id}`, 2, 600_000)) {
+    return configPage(user, {
+      kind: "error",
+      text: "Trop de relances récentes. Patientez quelques minutes puis réessayez.",
+    });
+  }
+  const lastRun = await getLastRun();
+  if (runInFlight(lastRun)) {
+    return configPage(user, { kind: "error", text: "Une mise à jour est déjà en cours." });
+  }
+  // Processus séparé : run.ts termine par process.exit et ne doit jamais
+  // charger le moteur Skip du serveur. Pas de digest sur un run manuel.
+  Bun.spawn({
+    cmd: ["bun", "src/run.ts"],
+    env: { ...process.env, SKIP_DIGEST: "1" },
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  return redirect("/configuration?lancee=1", 303);
 }
 
 // --- Avis detail + comments ------------------------------------------------------
@@ -1021,6 +1339,15 @@ async function handleAdminDelete(req: Request, _url: URL, user: AuthUser): Promi
   return redirect("/admin", 303);
 }
 
+// Délégation de l'accès à /configuration (colonne « Config » du tableau).
+async function handleAdminConfigure(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { id = "", valeur = "" } = await form(req);
+  const targetId = Number(id);
+  if (!Number.isInteger(targetId)) return adminPage(user, "Requête invalide.");
+  await setUserCanConfigure(targetId, valeur === "1");
+  return redirect("/admin", 303);
+}
+
 // --- Admin : statuts d'avis ---------------------------------------------------------
 
 async function handleAdminStatusAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
@@ -1086,7 +1413,7 @@ async function health(): Promise<Response> {
 
 // --- Router -----------------------------------------------------------------------
 
-type Access = "public" | "user" | "admin";
+type Access = "public" | "user" | "config" | "admin";
 type Handler = (
   req: Request,
   url: URL,
@@ -1113,7 +1440,15 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
     } },
   { method: "POST", path: "/commentaires/supprimer", access: "user", handler: (req, url, user) => handleDeleteComment(req, url, user!) },
   { method: "POST", path: "/avis/:idweb/statut", access: "user", handler: (req, url, user, params) => handleSetStatus(req, url, user!, params) },
+  { method: "GET", path: "/configuration", access: "config", handler: (req, url, user) => handleConfigHome(req, url, user!) },
+  { method: "POST", path: "/configuration/mots-cles/ajouter", access: "config", handler: (req, url, user) => handleKeywordAdd(req, url, user!) },
+  { method: "POST", path: "/configuration/mots-cles/supprimer", access: "config", handler: (req, url, user) => handleKeywordDelete(req, url, user!) },
+  { method: "POST", path: "/configuration/regles/ajouter", access: "config", handler: (req, url, user) => handleRuleAdd(req, url, user!) },
+  { method: "POST", path: "/configuration/regles/supprimer", access: "config", handler: (req, url, user) => handleRuleDelete(req, url, user!) },
+  { method: "POST", path: "/configuration/reglages", access: "config", handler: (req, url, user) => handleSettingsUpdate(req, url, user!) },
+  { method: "POST", path: "/configuration/relancer", access: "config", handler: (req, url, user) => handleRelance(req, url, user!) },
   { method: "GET", path: "/admin", access: "admin", handler: (_req, _url, user) => adminPage(user!) },
+  { method: "POST", path: "/admin/configurer", access: "admin", handler: (req, url, user) => handleAdminConfigure(req, url, user!) },
   { method: "POST", path: "/admin/ajouter", access: "admin", handler: (req, url, user) => handleAdminAdd(req, url, user!) },
   { method: "POST", path: "/admin/supprimer", access: "admin", handler: (req, url, user) => handleAdminDelete(req, url, user!) },
   { method: "POST", path: "/admin/statuts/ajouter", access: "admin", handler: (req, url, user) => handleAdminStatusAdd(req, url, user!) },
@@ -1172,6 +1507,11 @@ async function handle(req: Request): Promise<Response> {
     }
     if (route.access === "admin" && !user.isAdmin) {
       return new Response("Accès réservé à l'administrateur.", { status: 403 });
+    }
+    if (route.access === "config" && !user.isAdmin && !user.canConfigure) {
+      return new Response("Accès réservé aux utilisateurs autorisés à configurer la veille.", {
+        status: 403,
+      });
     }
   }
 

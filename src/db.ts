@@ -1,5 +1,6 @@
 import { SQL } from "bun";
 import type { ClassifiedItem } from "./pipeline.ts";
+import { KEYWORDS } from "./defaults.ts";
 
 let client: SQL | null = null;
 
@@ -58,6 +59,8 @@ export async function migrate(): Promise<void> {
       last_login_at  timestamptz
     )`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS receive_digest boolean NOT NULL DEFAULT false`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_configure boolean NOT NULL DEFAULT false`;
+  await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS digest_sent boolean NOT NULL DEFAULT false`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
@@ -120,6 +123,44 @@ export async function migrate(): Promise<void> {
       ('bounced',                '#7c4a03', 70, false)
     ) AS seed(label, color, position, is_rejet)
     WHERE NOT EXISTS (SELECT 1 FROM statuses)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS search_keywords (
+      id         bigserial PRIMARY KEY,
+      term       text NOT NULL UNIQUE,
+      position   int NOT NULL,
+      created_by bigint REFERENCES users(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS scope_rules (
+      id         bigserial PRIMARY KEY,
+      kind       text NOT NULL CHECK (kind IN ('keep', 'exclude')),
+      term       text NOT NULL,
+      created_by bigint REFERENCES users(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (kind, term)
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS settings (
+      key        text PRIMARY KEY,
+      value      text NOT NULL,
+      updated_by bigint REFERENCES users(id) ON DELETE SET NULL,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  // Mots-clés de départ, uniquement si la table est vide (la liste vit ensuite
+  // dans /configuration). Stockés sans guillemets ; le requêtage les recolle.
+  const hasKeywords = await sql`SELECT 1 FROM search_keywords LIMIT 1`;
+  if (hasKeywords.length === 0) {
+    await sql.begin(async (tx) => {
+      for (let i = 0; i < KEYWORDS.length; i++) {
+        const term = KEYWORDS[i]!.replace(/^"([^"]*)"$/, "$1");
+        await tx`
+          INSERT INTO search_keywords (term, position)
+          VALUES (${term}, ${(i + 1) * 10})
+          ON CONFLICT (term) DO NOTHING`;
+      }
+    });
+  }
 }
 
 // Single arbitrary lock id shared by every runner of this app.
@@ -400,12 +441,21 @@ export async function getCurrentStatusEvent(idweb: string): Promise<CurrentStatu
   };
 }
 
-export async function getNewInRun(runId: number, category: string): Promise<StoredAnnouncement[]> {
+// « Nouveau » pour l'email = apparu depuis le dernier digest réellement envoyé
+// (et non depuis le run précédent : un run manuel — SKIP_DIGEST — ne doit pas
+// faire disparaître ses trouvailles du digest du lendemain).
+export async function getNewSinceLastDigest(runId: number, category: string): Promise<StoredAnnouncement[]> {
   const rows = await db()`
     SELECT * FROM announcements
-    WHERE first_seen_run_id = ${runId} AND category = ${category}
+    WHERE first_seen_run_id > (SELECT COALESCE(max(id), 0) FROM runs WHERE digest_sent)
+      AND first_seen_run_id <= ${runId}
+      AND category = ${category}
     ORDER BY deadline ASC NULLS LAST, idweb`;
   return rows as StoredAnnouncement[];
+}
+
+export async function markDigestSent(runId: number): Promise<void> {
+  await db()`UPDATE runs SET digest_sent = true WHERE id = ${runId}`;
 }
 
 export async function getUpcomingDeadlines(runId: number, days: number): Promise<StoredAnnouncement[]> {
@@ -417,4 +467,85 @@ export async function getUpcomingDeadlines(runId: number, days: number): Promise
       AND deadline < now() + make_interval(days => ${days})
     ORDER BY deadline ASC, idweb`;
   return rows as StoredAnnouncement[];
+}
+
+// --- Configuration de la veille (gérée dans /configuration) -----------------------
+// Même philosophie que les statuts : lignes éditables par petites actions POST,
+// lues par le job quotidien (src/run.ts) au démarrage de chaque run.
+
+export type KeywordRow = { id: number; term: string; position: number };
+export type ScopeRuleRow = { id: number; kind: "keep" | "exclude"; term: string };
+
+export async function listKeywords(): Promise<KeywordRow[]> {
+  const rows = await db()`SELECT id, term, position FROM search_keywords ORDER BY position, id`;
+  return rows.map((r: { id: unknown; term: string; position: number }) => ({
+    id: Number(r.id),
+    term: r.term,
+    position: r.position,
+  }));
+}
+
+export async function addKeyword(term: string, userId: number): Promise<boolean> {
+  const rows = await db()`
+    INSERT INTO search_keywords (term, position, created_by)
+    VALUES (${term}, (SELECT COALESCE(max(position), 0) + 10 FROM search_keywords), ${userId})
+    ON CONFLICT (term) DO NOTHING
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+// Refuse de supprimer le dernier mot-clé : une liste vide reviendrait à
+// récupérer tous les avis ouverts (le filtre ne porterait plus que sur la date).
+export async function deleteKeyword(id: number): Promise<boolean> {
+  const rows = await db()`
+    DELETE FROM search_keywords
+    WHERE id = ${id} AND (SELECT count(*) FROM search_keywords) > 1
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+export async function listScopeRules(): Promise<ScopeRuleRow[]> {
+  const rows = await db()`SELECT id, kind, term FROM scope_rules ORDER BY kind, term, id`;
+  return rows.map((r: { id: unknown; kind: "keep" | "exclude"; term: string }) => ({
+    id: Number(r.id),
+    kind: r.kind,
+    term: r.term,
+  }));
+}
+
+export async function addScopeRule(
+  kind: "keep" | "exclude",
+  term: string,
+  userId: number,
+): Promise<boolean> {
+  const rows = await db()`
+    INSERT INTO scope_rules (kind, term, created_by)
+    VALUES (${kind}, ${term}, ${userId})
+    ON CONFLICT (kind, term) DO NOTHING
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+export async function deleteScopeRule(id: number): Promise<void> {
+  await db()`DELETE FROM scope_rules WHERE id = ${id}`;
+}
+
+export async function getSetting(key: string): Promise<string | null> {
+  const rows = await db()`SELECT value FROM settings WHERE key = ${key}`;
+  return rows[0]?.value ?? null;
+}
+
+// value = null : retour à la valeur par défaut (la ligne est supprimée).
+export async function setSetting(key: string, value: string | null, userId: number): Promise<void> {
+  if (value === null) {
+    await db()`DELETE FROM settings WHERE key = ${key}`;
+  } else {
+    await db()`
+      INSERT INTO settings (key, value, updated_by)
+      VALUES (${key}, ${value}, ${userId})
+      ON CONFLICT (key) DO UPDATE SET
+        value = EXCLUDED.value,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = now()`;
+  }
 }

@@ -7,7 +7,7 @@ export type Classification = {
   reason?: string;
 };
 
-function normalize(s: string): string {
+export function normalize(s: string): string {
   return s
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")

@@ -1,6 +1,6 @@
 import type { SearchParams } from "./params.ts";
 
-const KEYWORDS = [
+export const KEYWORDS = [
   "mobilité",
   "déplacement",
   "vélo",
