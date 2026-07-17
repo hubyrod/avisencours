@@ -11,7 +11,6 @@ import {
 import {
   sendEmail,
   hasEmailToken,
-  digestRecipients,
   uniqueEmails,
   renderDigestHtml,
   renderAlertHtml,
@@ -78,10 +77,10 @@ async function main() {
 
     await cleanupAuth();
 
-    // Users who kept the profile opt-in, plus any extra DIGEST_RECIPIENTS.
-    const recipients = uniqueEmails([await getDigestUserEmails(), digestRecipients()]);
+    // Recipients = users who opted in on /profil.
+    const recipients = uniqueEmails([await getDigestUserEmails()]);
     if (recipients.length === 0 || !hasEmailToken()) {
-      console.error("no digest recipients (users opt-in or DIGEST_RECIPIENTS) or no MAILPACE_API_TOKEN — skipping digest email");
+      console.error("no opted-in digest recipients or no MAILPACE_API_TOKEN — skipping digest email");
       return;
     }
 

@@ -104,12 +104,12 @@ One **Node.js app** (Bun is auto-detected from `bun.lock`; `scripts.start` serve
 
 1. Create a Node.js application (1 instance, smallest size, disable autoscaling) and a PostgreSQL add-on (DEV plan), and link them — this injects `POSTGRESQL_ADDON_URI`.
 2. **Email first**: MailPace token with a DKIM-verified sending domain (the add-on injects no env var — copy the token manually). Login is by emailed code, so a deployed app without working email is unreachable. Smoke-test the token with a curl to `https://app.mailpace.com/api/v1/send` before deploying; a 403 means the domain is not verified.
-3. Set the env vars from `.env.example`: portal + Mistral vars, `MAILPACE_API_TOKEN`, `EMAIL_FROM`, `OTP_PEPPER`, `ADMIN_EMAILS` (your email — seeded as admin at startup), `DIGEST_RECIPIENTS`, `ALERT_RECIPIENT`, `DASHBOARD_URL`.
+3. Set the env vars from `.env.example`: portal + Mistral vars, `MAILPACE_API_TOKEN`, `EMAIL_FROM`, `OTP_PEPPER`, `ADMIN_EMAILS` (your email — seeded as admin at startup), `ALERT_RECIPIENT`, `DASHBOARD_URL`.
 4. `clever deploy`. Tables are created automatically at startup; `ADMIN_EMAILS` accounts are upserted as admins.
 5. Log in at `/connexion` with your email code, then add teammates from `/admin`.
 6. The cron (`clevercloud/cron.json`) fires every day at 04:30 UTC: scrape → classify → store → digest email. On failure, `ALERT_RECIPIENT` gets an alert email and the dashboard banner turns red.
 
-The digest is skipped (with a log line) when `MAILPACE_API_TOKEN`/`DIGEST_RECIPIENTS` are unset. It is sent every day even when empty — if it stops arriving, something is wrong.
+The daily digest goes to users who ticked the opt-in on `/profil`; it is sent every day even when empty — if it stops arriving, something is wrong. It is skipped (with a log line) when `MAILPACE_API_TOKEN` is unset or nobody opted in.
 
 ## License
 

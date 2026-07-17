@@ -323,7 +323,7 @@ export async function deleteAllSessions(userId: number): Promise<void> {
   await db()`DELETE FROM sessions WHERE user_id = ${userId}`;
 }
 
-// Daily digest goes to users who kept the opt-in (plus DIGEST_RECIPIENTS env).
+// Daily digest goes to users who opted in on /profil.
 export async function getDigestUserEmails(): Promise<string[]> {
   const rows = await db()`SELECT email FROM users WHERE receive_digest = true`;
   return rows.map((r: { email: string }) => r.email);

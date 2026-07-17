@@ -21,13 +21,6 @@ export function hasEmailToken(): boolean {
   return Boolean(emailToken());
 }
 
-export function digestRecipients(): string[] {
-  return (Bun.env.DIGEST_RECIPIENTS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
 export function uniqueEmails(lists: string[][]): string[] {
   return [...new Set(lists.flat().map((e) => e.trim().toLowerCase()).filter(Boolean))];
 }
