@@ -140,12 +140,12 @@ export type DigestData = {
   dateStr: string;
 };
 
+// The digest is sent every day to opted-in users, whatever the count —
+// the subject carries the day's news at a glance.
 export function digestSubject(d: DigestData): string {
   const n = d.newRelevant.length;
-  if (n === 0) return `Avis en cours — rien de nouveau (${d.totalRelevant} avis suivis)`;
-  return n === 1
-    ? "Avis en cours — 1 nouvel avis pertinent"
-    : `Avis en cours — ${n} nouveaux avis pertinents`;
+  if (n === 0) return "Avis en cours — pas de nouvel avis";
+  return n === 1 ? "Avis en cours — 1 nouvel avis" : `Avis en cours — ${n} nouveaux avis`;
 }
 
 export function renderDigestHtml(d: DigestData): string {

@@ -44,10 +44,10 @@ describe("uniqueEmails", () => {
 });
 
 describe("digestSubject", () => {
-  test("accord singulier/pluriel", () => {
-    expect(digestSubject(digest(0))).toContain("rien de nouveau");
-    expect(digestSubject(digest(1))).toContain("1 nouvel avis pertinent");
-    expect(digestSubject(digest(3))).toContain("3 nouveaux avis pertinents");
+  test("accord singulier/pluriel, envoyé même sans nouveauté", () => {
+    expect(digestSubject(digest(0))).toBe("Avis en cours — pas de nouvel avis");
+    expect(digestSubject(digest(1))).toBe("Avis en cours — 1 nouvel avis");
+    expect(digestSubject(digest(3))).toBe("Avis en cours — 3 nouveaux avis");
   });
 });
 

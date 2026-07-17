@@ -53,11 +53,11 @@ export async function migrate(): Promise<void> {
       email          text NOT NULL UNIQUE,
       name           text,
       is_admin       boolean NOT NULL DEFAULT false,
-      receive_digest boolean NOT NULL DEFAULT true,
+      receive_digest boolean NOT NULL DEFAULT false,
       created_at     timestamptz NOT NULL DEFAULT now(),
       last_login_at  timestamptz
     )`;
-  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS receive_digest boolean NOT NULL DEFAULT true`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS receive_digest boolean NOT NULL DEFAULT false`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
