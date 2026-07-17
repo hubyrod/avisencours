@@ -12,11 +12,12 @@ import {
   sendEmail,
   hasEmailToken,
   digestRecipients,
+  uniqueEmails,
   renderDigestHtml,
   renderAlertHtml,
   digestSubject,
 } from "./email.ts";
-import { cleanupAuth } from "./auth.ts";
+import { cleanupAuth, getDigestUserEmails } from "./auth.ts";
 
 function frDate(d: Date): string {
   return d.toLocaleDateString("fr-FR", {
@@ -77,9 +78,10 @@ async function main() {
 
     await cleanupAuth();
 
-    const recipients = digestRecipients();
+    // Users who kept the profile opt-in, plus any extra DIGEST_RECIPIENTS.
+    const recipients = uniqueEmails([await getDigestUserEmails(), digestRecipients()]);
     if (recipients.length === 0 || !hasEmailToken()) {
-      console.error("no DIGEST_RECIPIENTS/MAILPACE_API_TOKEN — skipping digest email");
+      console.error("no digest recipients (users opt-in or DIGEST_RECIPIENTS) or no MAILPACE_API_TOKEN — skipping digest email");
       return;
     }
 

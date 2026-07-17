@@ -28,6 +28,10 @@ export function digestRecipients(): string[] {
     .filter(Boolean);
 }
 
+export function uniqueEmails(lists: string[][]): string[] {
+  return [...new Set(lists.flat().map((e) => e.trim().toLowerCase()).filter(Boolean))];
+}
+
 export async function sendEmail(email: Email): Promise<void> {
   const token = emailToken();
   const from = Bun.env.EMAIL_FROM;

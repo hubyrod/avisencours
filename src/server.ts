@@ -29,6 +29,8 @@ import {
   listUsers,
   addUser,
   deleteUser,
+  updateProfile,
+  deleteAllSessions,
 } from "./auth.ts";
 import { sendLoginCode } from "./email.ts";
 
@@ -103,7 +105,8 @@ function layout(title: string, headerRight: string, inner: string): string {
 function whoStrip(user: AuthUser): string {
   return `
   <div class="who">
-    <span>Connecté&nbsp;: ${esc(user.email)}</span>
+    <span>Connecté&nbsp;: ${esc(user.name || user.email)}</span>
+    <a href="/profil">Mon profil</a>
     ${user.isAdmin ? '<a href="/admin">Administration</a>' : ""}
     <form method="post" action="/deconnexion"><button>Se déconnecter</button></form>
   </div>`;
@@ -173,6 +176,61 @@ function loginStep2(email: string, error?: string): string {
       </form>
     </div></main>`,
   );
+}
+
+// --- Profile page ------------------------------------------------------------------
+
+function profilePage(user: AuthUser, notice?: { kind: "ok" | "error"; text: string }): Response {
+  const banner = notice
+    ? `<div class="banner ${notice.kind === "ok" ? "ok" : "error"}">${esc(notice.text)}</div>`
+    : "";
+  return html(
+    layout(
+      "Mon profil — Avis en cours",
+      whoStrip(user),
+      `<main>
+      <h2 style="font-size:18px;">Mon profil</h2>
+      <p style="font-size:14px;color:#57534e;"><a href="/" style="color:#1a5fb4;">← Retour aux avis</a></p>
+      ${banner}
+      <div class="card" style="margin:16px 0;max-width:520px;">
+        <h2>Informations</h2>
+        <p>
+          Adresse email&nbsp;: <strong>${esc(user.email)}</strong><br>
+          Rôle&nbsp;: ${user.isAdmin ? "administrateur" : "utilisateur"}
+        </p>
+        <form method="post" action="/profil">
+          <label for="name">Nom affiché</label>
+          <input type="text" id="name" name="name" maxlength="80" value="${esc(user.name ?? "")}"
+                 placeholder="Prénom Nom">
+          <label style="margin-top:14px;">
+            <input type="checkbox" name="digest" value="1" ${user.receiveDigest ? "checked" : ""}>
+            Recevoir l'email quotidien des nouveaux avis
+          </label>
+          <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
+        </form>
+      </div>
+      <div class="card" style="margin:16px 0;max-width:520px;">
+        <h2>Sécurité</h2>
+        <p>Vous déconnecte de ce navigateur et de tous les autres appareils où une session est ouverte.</p>
+        <form method="post" action="/profil/deconnexion-partout">
+          <div class="actions"><button class="primary" type="submit">Se déconnecter de tous les appareils</button></div>
+        </form>
+      </div>
+    </main>`,
+    ),
+  );
+}
+
+async function handleProfileUpdate(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { name = "", digest = "" } = await form(req);
+  await updateProfile(user.id, name, digest === "1");
+  const updated: AuthUser = { ...user, name: name.trim().slice(0, 80) || null, receiveDigest: digest === "1" };
+  return profilePage(updated, { kind: "ok", text: "Profil mis à jour." });
+}
+
+async function handleLogoutEverywhere(_req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  await deleteAllSessions(user.id);
+  return redirect("/connexion", 303, sessionClearCookie());
 }
 
 // --- Admin page ------------------------------------------------------------------
@@ -473,6 +531,9 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
   { method: "POST", path: "/connexion/verifier", access: "public", handler: (req) => handleVerifyCode(req) },
   { method: "POST", path: "/deconnexion", access: "user", handler: (req) => handleLogout(req) },
   { method: "GET", path: "/", access: "user", handler: (req, url, user) => dashboard(req, url, user!) },
+  { method: "GET", path: "/profil", access: "user", handler: async (_req, _url, user) => profilePage(user!) },
+  { method: "POST", path: "/profil", access: "user", handler: (req, url, user) => handleProfileUpdate(req, url, user!) },
+  { method: "POST", path: "/profil/deconnexion-partout", access: "user", handler: (req, url, user) => handleLogoutEverywhere(req, url, user!) },
   { method: "GET", path: "/admin", access: "admin", handler: (_req, _url, user) => adminPage(user!) },
   { method: "POST", path: "/admin/ajouter", access: "admin", handler: (req, url, user) => handleAdminAdd(req, url, user!) },
   { method: "POST", path: "/admin/supprimer", access: "admin", handler: (req, url, user) => handleAdminDelete(req, url, user!) },

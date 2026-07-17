@@ -49,13 +49,15 @@ export async function migrate(): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS announcements_category_deadline ON announcements (category, deadline)`;
   await sql`
     CREATE TABLE IF NOT EXISTS users (
-      id            bigserial PRIMARY KEY,
-      email         text NOT NULL UNIQUE,
-      name          text,
-      is_admin      boolean NOT NULL DEFAULT false,
-      created_at    timestamptz NOT NULL DEFAULT now(),
-      last_login_at timestamptz
+      id             bigserial PRIMARY KEY,
+      email          text NOT NULL UNIQUE,
+      name           text,
+      is_admin       boolean NOT NULL DEFAULT false,
+      receive_digest boolean NOT NULL DEFAULT true,
+      created_at     timestamptz NOT NULL DEFAULT now(),
+      last_login_at  timestamptz
     )`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS receive_digest boolean NOT NULL DEFAULT true`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,

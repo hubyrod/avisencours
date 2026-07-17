@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { digestSubject, renderDigestHtml, type DigestData } from "./email.ts";
+import { digestSubject, renderDigestHtml, uniqueEmails, type DigestData } from "./email.ts";
 import type { StoredAnnouncement } from "./db.ts";
 
 function stored(n: number, objet = `Avis ${n}`): StoredAnnouncement {
@@ -30,6 +30,18 @@ function digest(newCount: number): DigestData {
     dateStr: "mercredi 16 juillet 2026",
   };
 }
+
+describe("uniqueEmails", () => {
+  test("fusionne, normalise et déduplique les listes de destinataires", () => {
+    expect(
+      uniqueEmails([
+        ["a@x.fr", " B@X.fr "],
+        ["b@x.fr", "", "c@x.fr"],
+      ]),
+    ).toEqual(["a@x.fr", "b@x.fr", "c@x.fr"]);
+    expect(uniqueEmails([[], []])).toEqual([]);
+  });
+});
 
 describe("digestSubject", () => {
   test("accord singulier/pluriel", () => {

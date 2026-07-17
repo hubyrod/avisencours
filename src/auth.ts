@@ -81,6 +81,7 @@ export type AuthUser = {
   email: string;
   name: string | null;
   isAdmin: boolean;
+  receiveDigest: boolean;
 };
 
 export type SessionCheck = {
@@ -103,7 +104,7 @@ export async function getSession(req: Request): Promise<SessionCheck | null> {
   if (!token) return null;
   const hash = sha256hex(token);
   const rows = await db()`
-    SELECT u.id, u.email, u.name, u.is_admin, s.last_used_at
+    SELECT u.id, u.email, u.name, u.is_admin, u.receive_digest, s.last_used_at
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ${hash} AND s.expires_at > now()`;
   const row = rows[0];
@@ -120,7 +121,13 @@ export async function getSession(req: Request): Promise<SessionCheck | null> {
   }
 
   return {
-    user: { id: Number(row.id), email: row.email, name: row.name, isAdmin: row.is_admin === true },
+    user: {
+      id: Number(row.id),
+      email: row.email,
+      name: row.name,
+      isAdmin: row.is_admin === true,
+      receiveDigest: row.receive_digest === true,
+    },
     refreshCookie,
   };
 }
@@ -190,10 +197,17 @@ export async function ensureUser(email: string): Promise<AuthUser | null> {
 
 export async function findUserByEmail(email: string): Promise<AuthUser | null> {
   const rows = await db()`
-    SELECT id, email, name, is_admin FROM users WHERE email = ${normalizeEmail(email)}`;
+    SELECT id, email, name, is_admin, receive_digest
+    FROM users WHERE email = ${normalizeEmail(email)}`;
   const row = rows[0];
   if (!row) return null;
-  return { id: Number(row.id), email: row.email, name: row.name, isAdmin: row.is_admin === true };
+  return {
+    id: Number(row.id),
+    email: row.email,
+    name: row.name,
+    isAdmin: row.is_admin === true,
+    receiveDigest: row.receive_digest === true,
+  };
 }
 
 // Returns the 6-digit code to send, or null when the resend gate is active.
@@ -292,6 +306,27 @@ export async function addUser(email: string, name: string, isAdmin: boolean): Pr
 
 export async function deleteUser(id: number): Promise<void> {
   await db()`DELETE FROM users WHERE id = ${id}`;
+}
+
+export async function updateProfile(
+  userId: number,
+  name: string,
+  receiveDigest: boolean,
+): Promise<void> {
+  await db()`
+    UPDATE users SET name = ${name.trim().slice(0, 80) || null}, receive_digest = ${receiveDigest}
+    WHERE id = ${userId}`;
+}
+
+// « Se déconnecter de tous les appareils »
+export async function deleteAllSessions(userId: number): Promise<void> {
+  await db()`DELETE FROM sessions WHERE user_id = ${userId}`;
+}
+
+// Daily digest goes to users who kept the opt-in (plus DIGEST_RECIPIENTS env).
+export async function getDigestUserEmails(): Promise<string[]> {
+  const rows = await db()`SELECT email FROM users WHERE receive_digest = true`;
+  return rows.map((r: { email: string }) => r.email);
 }
 
 // Grant-only: emails listed in ADMIN_EMAILS become admins; removal never demotes.
