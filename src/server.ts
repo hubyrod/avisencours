@@ -6,8 +6,19 @@ import {
   getAnnouncement,
   addComment,
   deleteComment,
+  listStatuses,
+  getDefaultStatus,
+  getStatus,
+  addStatus,
+  renameStatus,
+  setStatusArchived,
+  setStatusRejet,
+  moveStatus,
+  addStatusEvent,
+  getCurrentStatusId,
   type StoredAnnouncement,
   type RunRow,
+  type StatusRow,
 } from "./db.ts";
 import { startLive, isLiveReady, commentStream } from "./live.ts";
 import { matchPath } from "./router.ts";
@@ -133,6 +144,14 @@ const BASE_CSS = `
     .comment-head span { font-family: var(--fonte-mono); font-size: 11.5px; }
     .comment-body { margin-top: 3px; font-size: 13.5px; white-space: pre-wrap; }
     .comments-link { color: var(--vert); text-decoration: none; font-weight: 400; font-size: 13px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+    .statut-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .statut-btns form { margin: 0; }
+    .statut-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 999px; padding: 4px 12px; font-size: 13px; cursor: pointer; font-family: inherit; color: var(--encre); }
+    .statut-btn:hover { border-color: var(--panneau); }
+    .statut-btn.actif { border-color: var(--panneau); background: #e9f2ed; font-weight: 600; }
+    .evt-statut { border-top: 1px solid var(--ligne); padding: 8px 0; font-size: 12.5px; color: var(--encre-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .evt-statut .quand { font-family: var(--fonte-mono); font-size: 11.5px; }
     footer { color: var(--encre-2); font-size: 12px; margin-top: 20px; }
     @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
     @media (max-width: 640px) {
@@ -319,8 +338,54 @@ function emailField(): string {
           </div>`;
 }
 
+// Couleurs proposées à la création d'un statut (le libellé sert d'intitulé au <option>).
+const STATUS_PALETTE: Array<[string, string]> = [
+  ["#626d66", "gris"],
+  ["#92600c", "ambre"],
+  ["#6b7280", "ardoise"],
+  ["#1d4ed8", "bleu"],
+  ["#0c5c46", "vert"],
+  ["#b3261e", "rouge"],
+  ["#7c4a03", "brun"],
+  ["#7c3aed", "violet"],
+];
+
+function statusAdminRow(s: StatusRow): string {
+  const mini = (action: string, extra: string, label: string) => `
+    <form method="post" action="/admin/statuts/${action}" style="margin:0;display:inline-block;">
+      <input type="hidden" name="id" value="${s.id}">${extra}
+      <button class="subtle" type="submit">${label}</button>
+    </form>`;
+  return `
+      <tr>
+        <td style="white-space:nowrap;">
+          <form method="post" action="/admin/statuts/renommer" style="margin:0;display:flex;align-items:center;gap:8px;">
+            <span class="dot" style="background:${esc(s.color)}"></span>
+            <input type="hidden" name="id" value="${s.id}">
+            <input type="text" name="label" value="${esc(s.label)}" required maxlength="60" style="max-width:220px;">
+            <button class="subtle" type="submit">Renommer</button>
+          </form>
+        </td>
+        <td style="white-space:nowrap;">
+          ${mini("monter", "", "↑")}
+          ${mini("descendre", "", "↓")}
+        </td>
+        <td>${
+          s.is_rejet
+            ? `oui — ${mini("rejet", '<input type="hidden" name="valeur" value="0">', "retirer")}`
+            : `non — ${mini("rejet", '<input type="hidden" name="valeur" value="1">', "marquer")}`
+        }</td>
+        <td>${
+          s.archived
+            ? `oui — ${mini("archiver", '<input type="hidden" name="valeur" value="0">', "restaurer")}`
+            : `non — ${mini("archiver", '<input type="hidden" name="valeur" value="1">', "archiver")}`
+        }</td>
+      </tr>`;
+}
+
 async function adminPage(user: AuthUser, error?: string): Promise<Response> {
-  const users = await listUsers();
+  const [users, statuts] = await Promise.all([listUsers(), listStatuses(true)]);
+  const statusRows = statuts.map(statusAdminRow).join("");
   const rows = users
     .map(
       (u) => `
@@ -363,6 +428,28 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
           <div class="actions"><button class="primary" type="submit">Ajouter</button></div>
         </form>
       </div>
+      <h2 class="titre-page" style="margin-top:32px;">Statuts des avis</h2>
+      <p style="color:var(--encre-2);font-size:13.5px;margin:2px 0 12px;">
+        Liste proposée sur chaque avis. « Abandon » : les avis à ce statut peuvent être masqués
+        sur le tableau de bord. Un statut archivé ne peut plus être choisi mais reste visible
+        dans l'historique — les statuts ne se suppriment pas.
+      </p>
+      <table>
+        <thead><tr><th>Libellé</th><th>Ordre</th><th>Abandon</th><th>Archivé</th></tr></thead>
+        <tbody>${statusRows}</tbody>
+      </table>
+      <div class="card" style="margin:24px 0;max-width:520px;">
+        <h2>Ajouter un statut</h2>
+        <form method="post" action="/admin/statuts/ajouter">
+          <label for="statut-label">Libellé</label>
+          <input type="text" id="statut-label" name="label" required maxlength="60" placeholder="ex. à relancer">
+          <label for="statut-color">Couleur</label>
+          <select id="statut-color" name="color" style="padding:10px 6px;border:1px solid var(--ligne-forte);border-radius:7px;font-family:inherit;background:var(--carte);">
+            ${STATUS_PALETTE.map(([hex, nom]) => `<option value="${hex}">${esc(nom)}</option>`).join("")}
+          </select>
+          <div class="actions"><button class="primary" type="submit">Ajouter</button></div>
+        </form>
+      </div>
       <footer>Les utilisateurs se connectent avec un code reçu par email — aucun mot de passe à gérer.${
         allowedDomains().length > 0
           ? ` Les adresses ${allowedDomains()
@@ -377,9 +464,10 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
 
 // --- Avis detail + comments ------------------------------------------------------
 
-// Fil de commentaires rendu côté client : abonnement SSE au flux Skip (événements
-// init/update, données [[idweb, [fil]]]), envoi des formulaires en fetch. DOM
-// construit uniquement via createElement/textContent — jamais innerHTML.
+// Fil rendu côté client (commentaires + changements de statut interclassés) :
+// abonnement SSE au flux Skip (événements init/update, données [[idweb, [fil]]]),
+// envoi des formulaires en fetch. DOM construit uniquement via
+// createElement/textContent — jamais innerHTML.
 const CLIENT_JS = `
 (() => {
   const CFG = JSON.parse(document.getElementById("cfg").textContent);
@@ -403,46 +491,78 @@ const CLIENT_JS = `
     });
   };
 
+  const who = (c) => c.user_id === null
+    ? "utilisateur supprimé"
+    : (c.author_name || c.author_email || "?");
+
+  function renderComment(c) {
+    const div = document.createElement("div");
+    div.className = "comment";
+    const head = document.createElement("div");
+    head.className = "comment-head";
+    const auteur = document.createElement("strong");
+    auteur.textContent = who(c);
+    const when = document.createElement("span");
+    when.textContent = fmt(c.created_at);
+    head.append(auteur, when);
+    if (CFG.admin || (c.user_id !== null && Number(c.user_id) === CFG.uid)) {
+      const f = document.createElement("form");
+      f.method = "post";
+      f.action = "/commentaires/supprimer";
+      f.dataset.live = "1";
+      f.style.margin = "0";
+      const hid = (n, v) => {
+        const i = document.createElement("input");
+        i.type = "hidden"; i.name = n; i.value = v;
+        return i;
+      };
+      const b = document.createElement("button");
+      b.className = "subtle"; b.type = "submit"; b.textContent = "Supprimer";
+      f.append(hid("id", c.id), hid("idweb", CFG.idweb), b);
+      head.append(f);
+    }
+    const body = document.createElement("div");
+    body.className = "comment-body";
+    body.textContent = c.body;
+    div.append(head, body);
+    return div;
+  }
+
+  function renderStatut(c) {
+    const div = document.createElement("div");
+    div.className = "evt-statut";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.background = c.status_color || "#626d66";
+    const txt = document.createElement("span");
+    txt.textContent = who(c) + " a passé l'avis à « " + (c.status_label || "statut supprimé") + " »";
+    const when = document.createElement("span");
+    when.className = "quand";
+    when.textContent = fmt(c.created_at);
+    div.append(dot, txt, when);
+    return div;
+  }
+
+  // Surligne le bouton du statut courant (dernier événement, sinon le défaut) —
+  // tous les onglets ouverts suivent en direct.
+  function markStatus(thread) {
+    let sid = CFG.defaut;
+    for (const i of thread) if (i.kind === "statut") sid = i.status_id;
+    for (const b of document.querySelectorAll(".statut-btn")) {
+      b.classList.toggle("actif", sid !== null && b.dataset.sid === String(sid));
+    }
+  }
+
   function render(thread) {
-    nb.textContent = String(thread.length);
+    nb.textContent = String(thread.filter((i) => i.kind === "comment").length);
+    markStatus(thread);
     if (!thread.length) {
       note("Aucun commentaire pour l'instant. Lancez la discussion.");
       return;
     }
     fil.replaceChildren();
     for (const c of thread) {
-      const div = document.createElement("div");
-      div.className = "comment";
-      const head = document.createElement("div");
-      head.className = "comment-head";
-      const who = document.createElement("strong");
-      who.textContent = c.user_id === null
-        ? "utilisateur supprimé"
-        : (c.author_name || c.author_email || "?");
-      const when = document.createElement("span");
-      when.textContent = fmt(c.created_at);
-      head.append(who, when);
-      if (CFG.admin || (c.user_id !== null && Number(c.user_id) === CFG.uid)) {
-        const f = document.createElement("form");
-        f.method = "post";
-        f.action = "/commentaires/supprimer";
-        f.dataset.live = "1";
-        f.style.margin = "0";
-        const hid = (n, v) => {
-          const i = document.createElement("input");
-          i.type = "hidden"; i.name = n; i.value = v;
-          return i;
-        };
-        const b = document.createElement("button");
-        b.className = "subtle"; b.type = "submit"; b.textContent = "Supprimer";
-        f.append(hid("id", c.id), hid("idweb", CFG.idweb), b);
-        head.append(f);
-      }
-      const body = document.createElement("div");
-      body.className = "comment-body";
-      body.textContent = c.body;
-      div.append(head, body);
-      fil.append(div);
+      fil.append(c.kind === "statut" ? renderStatut(c) : renderComment(c));
     }
   }
 
@@ -492,6 +612,25 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
   const a = await getAnnouncement(idweb);
   if (!a) return html(errorPage("Avis introuvable"), 404);
 
+  // Statut courant rendu côté serveur : correct même sans moteur Skip (flux 503).
+  const [statuts, currentStatusId, defaultStatus] = await Promise.all([
+    listStatuses(false),
+    getCurrentStatusId(idweb),
+    getDefaultStatus(),
+  ]);
+  const activeId = currentStatusId ?? (defaultStatus ? Number(defaultStatus.id) : null);
+  const statusButtons = statuts
+    .map(
+      (s) => `
+        <form method="post" action="/avis/${encodeURIComponent(idweb)}/statut" data-live="1">
+          <input type="hidden" name="statut" value="${s.id}">
+          <button type="submit" class="statut-btn${Number(s.id) === activeId ? " actif" : ""}" data-sid="${s.id}">
+            <span class="dot" style="background:${esc(s.color)}"></span>${esc(s.label)}
+          </button>
+        </form>`,
+    )
+    .join("");
+
   const facts: Array<[string, string | null]> = [
     ["Acheteur", a.acheteur],
     ["Département", a.department],
@@ -517,6 +656,15 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
         <table class="facts">${factRows}</table>
         <p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-weight:600;">Voir l'annonce officielle →</a></p>
       </div>
+      ${
+        statuts.length > 0
+          ? `<div class="card" style="max-width:none;margin:16px 0;">
+        <h2>Statut</h2>
+        <p style="margin:2px 0 0;">Où en est-on sur cet avis ? Le changement est visible par toute l'équipe et tracé dans le fil.</p>
+        <div class="statut-btns">${statusButtons}</div>
+      </div>`
+          : ""
+      }
       <div class="card" style="max-width:none;margin:16px 0;">
         <h2>Commentaires (<span id="nb">…</span>)</h2>
         <div id="fil"><p style="color:#78716c;">Chargement des commentaires…</p></div>
@@ -535,6 +683,7 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
         admin: user.isAdmin,
         idweb,
         flux: `/avis/${encodeURIComponent(idweb)}/commentaires/flux`,
+        defaut: defaultStatus ? String(defaultStatus.id) : null,
       })}</script>
       <script>${CLIENT_JS}</script>
     </main>`,
@@ -567,6 +716,35 @@ async function handleAddComment(
   return Response.json({ ok: true });
 }
 
+async function handleSetStatus(
+  req: Request,
+  _url: URL,
+  user: AuthUser,
+  params: Record<string, string>,
+): Promise<Response> {
+  const idweb = params.idweb ?? "";
+  const a = await getAnnouncement(idweb);
+  if (!a) return Response.json({ error: "Avis introuvable." }, { status: 404 });
+
+  if (!rateLimit(`statut:${user.id}`, 30, 600_000)) {
+    return Response.json({ error: MSG_RATE_LIMITED }, { status: 429 });
+  }
+  const { statut = "" } = await form(req);
+  const statusId = Number(statut);
+  if (!Number.isInteger(statusId)) return Response.json({ error: "Requête invalide." }, { status: 400 });
+  const s = await getStatus(statusId);
+  if (!s || s.archived) {
+    return Response.json({ error: "Statut inconnu ou archivé." }, { status: 400 });
+  }
+  // Re-clic sur le statut déjà affiché (dernier événement, sinon le défaut) :
+  // pas de nouvel événement, le fil resterait sinon pollué de doublons.
+  const current =
+    (await getCurrentStatusId(idweb)) ?? Number((await getDefaultStatus())?.id ?? NaN);
+  if (current === statusId) return Response.json({ ok: true });
+  await addStatusEvent(idweb, statusId, user.id);
+  return Response.json({ ok: true });
+}
+
 async function handleDeleteComment(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { id = "" } = await form(req);
   const commentId = Number(id);
@@ -596,6 +774,11 @@ function jChip(deadline: Date | null): string {
 
 function announcementRow(a: StoredAnnouncement, latestRunId: number | null): string {
   const isNew = latestRunId !== null && a.first_seen_run_id === latestRunId;
+  const statusBadge = a.status_label
+    ? `<span class="badge-statut"><span class="dot" style="background:${esc(
+        a.status_color ?? "#626d66",
+      )}"></span>${esc(a.status_label)}</span>`
+    : "";
   return `
   <tr>
     <td class="deadline">${jChip(a.deadline)}${
@@ -603,7 +786,7 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
     }</td>
     <td>
       <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.objet)}</a>
-      ${isNew ? '<span class="badge">Nouveau</span>' : ""}
+      ${isNew ? '<span class="badge">Nouveau</span>' : ""}${statusBadge}
       <div class="meta">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department ?? "?")}${
         a.type_avis ? ` — ${esc(a.type_avis)}` : ""
       } — <a class="comments-link" href="/avis/${encodeURIComponent(a.idweb)}">${
@@ -646,6 +829,12 @@ const DASHBOARD_CSS = `
     .jdate { font-family: var(--fonte-mono); font-size: 11px; color: var(--encre-2); margin-top: 3px; }
     .pub { white-space: nowrap; color: var(--encre-2); font-family: var(--fonte-mono); font-size: 12px; }
     .badge { display: inline-block; background: #e5efe9; color: var(--vert); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 4px; margin-left: 7px; vertical-align: 1px; }
+    .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; margin-left: 7px; vertical-align: 1px; }
+    .filtres { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; font-size: 13px; color: var(--encre-2); flex-wrap: wrap; }
+    .filtres select { padding: 5px 8px; border: 1px solid var(--ligne-forte); border-radius: 6px; font-family: inherit; background: var(--carte); font-size: 13px; color: var(--encre); }
+    .filtres label { display: flex; align-items: center; gap: 6px; }
+    .filtres button { background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 6px; padding: 4px 12px; font-size: 13px; cursor: pointer; font-family: inherit; color: var(--encre); }
+    .filtres button:hover { border-color: var(--panneau); }
     .empty { color: var(--encre-2); padding: 32px; text-align: center; background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; font-size: 13.5px; }
     @media (max-width: 640px) { thead th:last-child, td.pub { display: none; } .deadline { width: 88px; } .jdate { white-space: normal; } }
 `;
@@ -653,9 +842,18 @@ const DASHBOARD_CSS = `
 async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Response> {
   const cat = url.searchParams.get("cat") === "travaux" ? "travaux" : "pertinents";
   const dbCategory = cat === "travaux" ? "travaux" : "relevant";
+  const statutParam = Number(url.searchParams.get("statut"));
+  const statusId = Number.isInteger(statutParam) && statutParam > 0 ? statutParam : null;
+  const masquer = url.searchParams.get("masquer") === "1";
 
-  const [lastRun, lastSuccess] = await Promise.all([getLastRun(), getLastSuccessfulRun()]);
-  const items = lastSuccess ? await getCurrent(dbCategory, lastSuccess.id) : [];
+  const [lastRun, lastSuccess, statuts] = await Promise.all([
+    getLastRun(),
+    getLastSuccessfulRun(),
+    listStatuses(false),
+  ]);
+  const items = lastSuccess
+    ? await getCurrent(dbCategory, lastSuccess.id, { statusId, hideRejet: masquer })
+    : [];
   const latestRunId = lastSuccess?.id ?? null;
 
   const tabs = `
@@ -666,9 +864,33 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     <a href="/?cat=travaux" class="${cat === "travaux" ? "active" : ""}">Travaux — hors scope</a>
   </nav>`;
 
+  const filtres =
+    statuts.length === 0
+      ? ""
+      : `
+  <form class="filtres" method="get" action="/">
+    <input type="hidden" name="cat" value="${cat}">
+    <label for="f-statut">Statut</label>
+    <select id="f-statut" name="statut">
+      <option value="">Tous</option>
+      ${statuts
+        .map(
+          (s) =>
+            `<option value="${s.id}"${Number(s.id) === statusId ? " selected" : ""}>${esc(s.label)}</option>`,
+        )
+        .join("")}
+    </select>
+    <label><input type="checkbox" name="masquer" value="1"${masquer ? " checked" : ""}> Masquer les avis abandonnés</label>
+    <button type="submit">Filtrer</button>
+  </form>`;
+
   const table =
     items.length === 0
-      ? `<p class="empty">Aucun avis en cours dans cette catégorie.</p>`
+      ? `<p class="empty">${
+          statusId !== null || masquer
+            ? "Aucun avis ne correspond à ce filtre."
+            : "Aucun avis en cours dans cette catégorie."
+        }</p>`
       : `<table>
           <thead><tr><th>Échéance</th><th>Objet</th><th>Publié le</th></tr></thead>
           <tbody>${items.map((a) => announcementRow(a, latestRunId)).join("")}</tbody>
@@ -679,6 +901,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   <main>
     ${banner(lastRun, lastSuccess)}
     ${tabs}
+    ${filtres}
     ${table}
     <footer>Mise à jour automatique chaque matin. Cliquez sur un avis pour ouvrir l'annonce officielle.</footer>
   </main>`;
@@ -780,6 +1003,49 @@ async function handleAdminDelete(req: Request, _url: URL, user: AuthUser): Promi
   return redirect("/admin", 303);
 }
 
+// --- Admin : statuts d'avis ---------------------------------------------------------
+
+async function handleAdminStatusAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { label = "", color = "" } = await form(req);
+  const trimmed = label.trim().slice(0, 60);
+  if (!trimmed) return adminPage(user, "Le libellé du statut est requis.");
+  if (!/^#[0-9a-f]{6}$/.test(color)) return adminPage(user, "Couleur invalide.");
+  await addStatus(trimmed, color);
+  return redirect("/admin", 303);
+}
+
+// Les autres actions partagent la même forme : un id + éventuellement une valeur.
+async function handleAdminStatusAction(
+  req: Request,
+  user: AuthUser,
+  action: "renommer" | "monter" | "descendre" | "archiver" | "rejet",
+): Promise<Response> {
+  const { id = "", label = "", valeur = "" } = await form(req);
+  const statusId = Number(id);
+  if (!Number.isInteger(statusId)) return adminPage(user, "Requête invalide.");
+  switch (action) {
+    case "renommer": {
+      const trimmed = label.trim().slice(0, 60);
+      if (!trimmed) return adminPage(user, "Le libellé du statut est requis.");
+      await renameStatus(statusId, trimmed);
+      break;
+    }
+    case "monter":
+      await moveStatus(statusId, "up");
+      break;
+    case "descendre":
+      await moveStatus(statusId, "down");
+      break;
+    case "archiver":
+      await setStatusArchived(statusId, valeur === "1");
+      break;
+    case "rejet":
+      await setStatusRejet(statusId, valeur === "1");
+      break;
+  }
+  return redirect("/admin", 303);
+}
+
 // --- Health -----------------------------------------------------------------------
 
 async function health(): Promise<Response> {
@@ -828,9 +1094,16 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
       return commentStream(req, params.idweb ?? "");
     } },
   { method: "POST", path: "/commentaires/supprimer", access: "user", handler: (req, url, user) => handleDeleteComment(req, url, user!) },
+  { method: "POST", path: "/avis/:idweb/statut", access: "user", handler: (req, url, user, params) => handleSetStatus(req, url, user!, params) },
   { method: "GET", path: "/admin", access: "admin", handler: (_req, _url, user) => adminPage(user!) },
   { method: "POST", path: "/admin/ajouter", access: "admin", handler: (req, url, user) => handleAdminAdd(req, url, user!) },
   { method: "POST", path: "/admin/supprimer", access: "admin", handler: (req, url, user) => handleAdminDelete(req, url, user!) },
+  { method: "POST", path: "/admin/statuts/ajouter", access: "admin", handler: (req, url, user) => handleAdminStatusAdd(req, url, user!) },
+  { method: "POST", path: "/admin/statuts/renommer", access: "admin", handler: (req, _url, user) => handleAdminStatusAction(req, user!, "renommer") },
+  { method: "POST", path: "/admin/statuts/monter", access: "admin", handler: (req, _url, user) => handleAdminStatusAction(req, user!, "monter") },
+  { method: "POST", path: "/admin/statuts/descendre", access: "admin", handler: (req, _url, user) => handleAdminStatusAction(req, user!, "descendre") },
+  { method: "POST", path: "/admin/statuts/archiver", access: "admin", handler: (req, _url, user) => handleAdminStatusAction(req, user!, "archiver") },
+  { method: "POST", path: "/admin/statuts/rejet", access: "admin", handler: (req, _url, user) => handleAdminStatusAction(req, user!, "rejet") },
 ];
 
 function crossOrigin(req: Request, url: URL): boolean {

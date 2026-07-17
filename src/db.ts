@@ -88,6 +88,38 @@ export async function migrate(): Promise<void> {
       created_at timestamptz NOT NULL DEFAULT now()
     )`;
   await sql`CREATE INDEX IF NOT EXISTS comments_idweb_idx ON comments (idweb, created_at)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS statuses (
+      id         bigserial PRIMARY KEY,
+      label      text NOT NULL,
+      color      text NOT NULL DEFAULT '#626d66',
+      position   int NOT NULL,
+      archived   boolean NOT NULL DEFAULT false,
+      is_rejet   boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS status_events (
+      id         bigserial PRIMARY KEY,
+      idweb      text NOT NULL REFERENCES announcements(idweb) ON DELETE CASCADE,
+      status_id  bigint NOT NULL REFERENCES statuses(id) ON DELETE RESTRICT,
+      user_id    bigint REFERENCES users(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`CREATE INDEX IF NOT EXISTS status_events_idweb_idx ON status_events (idweb, created_at DESC, id DESC)`;
+  // Liste de départ, uniquement si la table est vide (la liste vit ensuite dans /admin).
+  await sql`
+    INSERT INTO statuses (label, color, position, is_rejet)
+    SELECT * FROM (VALUES
+      ('à évaluer',              '#626d66', 10, false),
+      ('il va falloir répondre', '#92600c', 20, false),
+      ('on laisse tomber',       '#6b7280', 30, true),
+      ('répondu',                '#1d4ed8', 40, false),
+      ('gagné',                  '#0c5c46', 50, false),
+      ('perdu',                  '#b3261e', 60, false),
+      ('bounced',                '#7c4a03', 70, false)
+    ) AS seed(label, color, position, is_rejet)
+    WHERE NOT EXISTS (SELECT 1 FROM statuses)`;
 }
 
 // Single arbitrary lock id shared by every runner of this app.
@@ -183,6 +215,19 @@ export type StoredAnnouncement = {
   reason: string | null;
   first_seen_run_id: number | null;
   comment_count?: number;
+  status_id?: number | null;
+  status_label?: string | null;
+  status_color?: string | null;
+  status_is_rejet?: boolean | null;
+};
+
+export type StatusRow = {
+  id: number;
+  label: string;
+  color: string;
+  position: number;
+  archived: boolean;
+  is_rejet: boolean;
 };
 
 export type RunRow = {
@@ -208,15 +253,35 @@ export async function getLastSuccessfulRun(): Promise<RunRow | null> {
 }
 
 // Announcements still present in the latest successful run, deadline not passed
-// (or unknown), sorted by deadline ascending.
-export async function getCurrent(category: string, runId: number): Promise<StoredAnnouncement[]> {
+// (or unknown), sorted by deadline ascending. Statut courant = dernier événement ;
+// aucun événement = statut par défaut (premier statut actif par position), d'où
+// le COALESCE — le filtre « à évaluer » doit aussi attraper les avis sans événement.
+export async function getCurrent(
+  category: string,
+  runId: number,
+  filter?: { statusId?: number | null; hideRejet?: boolean },
+): Promise<StoredAnnouncement[]> {
+  const statusId = filter?.statusId ?? null;
+  const hideRejet = filter?.hideRejet ?? false;
+  const defaultId = (await getDefaultStatus())?.id ?? null;
   const rows = await db()`
-    SELECT a.*, (SELECT count(*)::int FROM comments c WHERE c.idweb = a.idweb) AS comment_count
+    SELECT a.*,
+      (SELECT count(*)::int FROM comments c WHERE c.idweb = a.idweb) AS comment_count,
+      s.id AS status_id, s.label AS status_label, s.color AS status_color, s.is_rejet AS status_is_rejet
     FROM announcements a
-    WHERE last_seen_run_id = ${runId}
-      AND category = ${category}
-      AND (deadline IS NULL OR deadline >= now())
-    ORDER BY deadline ASC NULLS LAST, idweb`;
+    LEFT JOIN LATERAL (
+      SELECT e.status_id FROM status_events e
+      WHERE e.idweb = a.idweb
+      ORDER BY e.created_at DESC, e.id DESC
+      LIMIT 1
+    ) cur ON true
+    LEFT JOIN statuses s ON s.id = COALESCE(cur.status_id, ${defaultId})
+    WHERE a.last_seen_run_id = ${runId}
+      AND a.category = ${category}
+      AND (a.deadline IS NULL OR a.deadline >= now())
+      AND (${statusId}::bigint IS NULL OR COALESCE(cur.status_id, ${defaultId}) = ${statusId})
+      AND (${hideRejet} = false OR COALESCE(s.is_rejet, false) = false)
+    ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
   return rows as StoredAnnouncement[];
 }
 
@@ -238,6 +303,74 @@ export async function deleteComment(id: number, userId: number, isAdmin: boolean
   } else {
     await db()`DELETE FROM comments WHERE id = ${id} AND user_id = ${userId}`;
   }
+}
+
+// --- Statuts d'avis (liste gérée dans /admin ; historique en événements) ----------
+// Comme pour les commentaires : les écritures restent en SQL simple, la lecture du
+// fil (événements interclassés avec les commentaires) passe par Skip (src/live.ts).
+
+export async function listStatuses(includeArchived = false): Promise<StatusRow[]> {
+  const rows = includeArchived
+    ? await db()`SELECT * FROM statuses ORDER BY position, id`
+    : await db()`SELECT * FROM statuses WHERE archived = false ORDER BY position, id`;
+  return rows as StatusRow[];
+}
+
+export async function getDefaultStatus(): Promise<StatusRow | null> {
+  const rows = await db()`SELECT * FROM statuses WHERE archived = false ORDER BY position, id LIMIT 1`;
+  return (rows[0] as StatusRow) ?? null;
+}
+
+export async function getStatus(id: number): Promise<StatusRow | null> {
+  const rows = await db()`SELECT * FROM statuses WHERE id = ${id}`;
+  return (rows[0] as StatusRow) ?? null;
+}
+
+export async function addStatus(label: string, color: string): Promise<void> {
+  await db()`
+    INSERT INTO statuses (label, color, position)
+    VALUES (${label}, ${color}, (SELECT COALESCE(max(position), 0) + 10 FROM statuses))`;
+}
+
+export async function renameStatus(id: number, label: string): Promise<void> {
+  await db()`UPDATE statuses SET label = ${label} WHERE id = ${id}`;
+}
+
+export async function setStatusArchived(id: number, archived: boolean): Promise<void> {
+  await db()`UPDATE statuses SET archived = ${archived} WHERE id = ${id}`;
+}
+
+export async function setStatusRejet(id: number, isRejet: boolean): Promise<void> {
+  await db()`UPDATE statuses SET is_rejet = ${isRejet} WHERE id = ${id}`;
+}
+
+// Échange de position avec le voisin (l'ordre d'affichage vit dans `position`).
+export async function moveStatus(id: number, dir: "up" | "down"): Promise<void> {
+  await db().begin(async (tx) => {
+    const cur = await tx`SELECT position FROM statuses WHERE id = ${id}`;
+    if (!cur[0]) return;
+    const pos = cur[0].position;
+    const neighbor =
+      dir === "up"
+        ? await tx`SELECT id, position FROM statuses WHERE position < ${pos} ORDER BY position DESC, id DESC LIMIT 1`
+        : await tx`SELECT id, position FROM statuses WHERE position > ${pos} ORDER BY position ASC, id ASC LIMIT 1`;
+    if (!neighbor[0]) return;
+    await tx`UPDATE statuses SET position = ${neighbor[0].position} WHERE id = ${id}`;
+    await tx`UPDATE statuses SET position = ${pos} WHERE id = ${neighbor[0].id}`;
+  });
+}
+
+export async function addStatusEvent(idweb: string, statusId: number, userId: number): Promise<void> {
+  await db()`INSERT INTO status_events (idweb, status_id, user_id) VALUES (${idweb}, ${statusId}, ${userId})`;
+}
+
+export async function getCurrentStatusId(idweb: string): Promise<number | null> {
+  const rows = await db()`
+    SELECT status_id FROM status_events
+    WHERE idweb = ${idweb}
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1`;
+  return rows[0] ? Number(rows[0].status_id) : null;
 }
 
 export async function getNewInRun(runId: number, category: string): Promise<StoredAnnouncement[]> {

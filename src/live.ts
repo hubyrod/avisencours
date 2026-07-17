@@ -19,7 +19,7 @@ const CONTROL_PORT = Number(Bun.env.SKIP_CONTROL_PORT ?? 9081);
 const ENABLED = Bun.env.LIVE_COMMENTS !== "0";
 
 // L'adaptateur pg renvoie int8 et timestamptz sous forme de chaînes.
-type DbComment = {
+export type DbComment = {
   id: string;
   idweb: string;
   user_id: string | null;
@@ -27,50 +27,127 @@ type DbComment = {
   created_at: string;
 };
 
-type DbUser = {
+export type DbUser = {
   id: string;
   email: string;
   name: string | null;
 };
 
-export type CommentView = {
+export type DbStatusEvent = {
   id: string;
+  idweb: string;
+  status_id: string;
   user_id: string | null;
-  body: string;
   created_at: string;
-  author_name: string | null;
-  author_email: string | null;
 };
 
-type ResourceInputs = { threads: EagerCollection<string, CommentView[]> };
+export type DbStatus = {
+  id: string;
+  label: string;
+  color: string;
+};
 
-// Le SELECT de l'adaptateur n'a pas d'ORDER BY : le tri vit ici.
-export function buildThread(
-  rows: readonly DbComment[],
-  userOf: (id: string) => DbUser | undefined,
-): CommentView[] {
-  const sorted = [...rows].sort((a, b) =>
-    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : Number(a.id) - Number(b.id),
-  );
-  return sorted.map((c) => {
-    const u = c.user_id === null ? undefined : userOf(c.user_id);
-    return {
-      id: c.id,
-      user_id: c.user_id,
-      body: c.body,
-      created_at: c.created_at,
-      author_name: u?.name ?? null,
-      author_email: u?.email ?? null,
+// Le fil d'un avis interclasse commentaires et changements de statut. `merge`
+// exige le même type de valeur des deux côtés : tout est chaîne ou null (Json).
+export type ThreadItem =
+  | {
+      kind: "comment";
+      id: string;
+      user_id: string | null;
+      body: string;
+      created_at: string;
+      author_name: string | null;
+      author_email: string | null;
+    }
+  | {
+      kind: "statut";
+      id: string;
+      user_id: string | null;
+      created_at: string;
+      author_name: string | null;
+      author_email: string | null;
+      status_id: string;
+      status_label: string | null;
+      status_color: string | null;
     };
+
+type ResourceInputs = { threads: EagerCollection<string, ThreadItem[]> };
+
+type UserOf = (id: string) => DbUser | undefined;
+
+function author(user_id: string | null, userOf: UserOf) {
+  const u = user_id === null ? undefined : userOf(user_id);
+  return { author_name: u?.name ?? null, author_email: u?.email ?? null };
+}
+
+export function commentToItem(c: DbComment, userOf: UserOf): ThreadItem {
+  return {
+    kind: "comment",
+    id: c.id,
+    user_id: c.user_id,
+    body: c.body,
+    created_at: c.created_at,
+    ...author(c.user_id, userOf),
+  };
+}
+
+export function eventToItem(
+  e: DbStatusEvent,
+  userOf: UserOf,
+  statusOf: (id: string) => DbStatus | undefined,
+): ThreadItem {
+  const s = statusOf(e.status_id);
+  return {
+    kind: "statut",
+    id: e.id,
+    user_id: e.user_id,
+    created_at: e.created_at,
+    ...author(e.user_id, userOf),
+    status_id: e.status_id,
+    status_label: s?.label ?? null,
+    status_color: s?.color ?? null,
+  };
+}
+
+// Le SELECT de l'adaptateur n'a pas d'ORDER BY : le tri vit ici. Les ids viennent
+// de deux séquences distinctes — à date égale on départage d'abord par kind.
+export function sortThread(items: readonly ThreadItem[]): ThreadItem[] {
+  return [...items].sort((a, b) => {
+    if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+    if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1;
+    return Number(a.id) - Number(b.id);
   });
 }
 
-// clé = idweb → valeur unique : le fil complet, trié et enrichi de l'auteur.
-class ThreadBuilder implements Mapper<string, DbComment, string, CommentView[]> {
+// Chaque commentaire devient un ThreadItem enrichi de l'auteur (clé conservée : idweb).
+class CommentItems implements Mapper<string, DbComment, string, ThreadItem> {
   constructor(private users: EagerCollection<string, DbUser>) {}
 
-  mapEntry(idweb: string, rows: Values<DbComment>, _context: Context): Iterable<[string, CommentView[]]> {
-    return [[idweb, buildThread(rows.toArray(), (id) => this.users.getArray(id)[0])]];
+  mapEntry(idweb: string, rows: Values<DbComment>, _context: Context): Iterable<[string, ThreadItem]> {
+    const userOf: UserOf = (id) => this.users.getArray(id)[0];
+    return rows.toArray().map((c) => [idweb, commentToItem(c, userOf)] as [string, ThreadItem]);
+  }
+}
+
+// Chaque événement de statut devient un ThreadItem (jointure users + statuses —
+// statuses est suivie aussi : un renommage dans /admin se propage en direct).
+class StatusEventItems implements Mapper<string, DbStatusEvent, string, ThreadItem> {
+  constructor(
+    private users: EagerCollection<string, DbUser>,
+    private statuses: EagerCollection<string, DbStatus>,
+  ) {}
+
+  mapEntry(idweb: string, rows: Values<DbStatusEvent>, _context: Context): Iterable<[string, ThreadItem]> {
+    const userOf: UserOf = (id) => this.users.getArray(id)[0];
+    const statusOf = (id: string) => this.statuses.getArray(id)[0];
+    return rows.toArray().map((e) => [idweb, eventToItem(e, userOf, statusOf)] as [string, ThreadItem]);
+  }
+}
+
+// clé = idweb → valeur unique : le fil complet (commentaires + statuts), trié.
+class ThreadSorter implements Mapper<string, ThreadItem, string, ThreadItem[]> {
+  mapEntry(idweb: string, items: Values<ThreadItem>, _context: Context): Iterable<[string, ThreadItem[]]> {
+    return [[idweb, sortThread(items.toArray())]];
   }
 }
 
@@ -83,7 +160,7 @@ class ThreadResource implements Resource<ResourceInputs> {
     this.idweb = idweb;
   }
 
-  instantiate(collections: ResourceInputs): EagerCollection<string, CommentView[]> {
+  instantiate(collections: ResourceInputs): EagerCollection<string, ThreadItem[]> {
     return collections.threads.slice(this.idweb, this.idweb);
   }
 }
@@ -118,7 +195,19 @@ function makeService(): SkipService<Record<string, never>, ResourceInputs> {
         identifier: "users",
         params: { key: { col: "id", type: "TEXT" } },
       });
-      return { threads: comments.map(ThreadBuilder, users) };
+      const statusEvents = context.useExternalResource<string, DbStatusEvent>({
+        service: "postgres",
+        identifier: "status_events",
+        params: { key: { col: "idweb", type: "TEXT" } },
+      });
+      const statuses = context.useExternalResource<string, DbStatus>({
+        service: "postgres",
+        identifier: "statuses",
+        params: { key: { col: "id", type: "TEXT" } },
+      });
+      const commentItems = comments.map(CommentItems, users);
+      const eventItems = statusEvents.map(StatusEventItems, users, statuses);
+      return { threads: commentItems.merge(eventItems).map(ThreadSorter) };
     },
   };
 }
@@ -130,7 +219,7 @@ async function cleanupOrphanTriggers(): Promise<void> {
   const rows = (await sql`
     SELECT trigger_name, event_object_table
     FROM information_schema.triggers
-    WHERE event_object_table IN ('comments', 'users') AND trigger_schema = 'public'
+    WHERE event_object_table IN ('comments', 'users', 'status_events', 'statuses') AND trigger_schema = 'public'
   `) as Array<{ trigger_name: string; event_object_table: string }>;
   const seen = new Set<string>();
   for (const { trigger_name, event_object_table } of rows) {
