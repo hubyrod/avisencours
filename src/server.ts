@@ -61,40 +61,79 @@ function frDateTime(d: Date): string {
   });
 }
 
+// Outil de travail : sobre et dense. Vert profond en seule couleur d'accent,
+// chiffres en mono (échéances, dates), aucune ressource externe.
 const BASE_CSS = `
-    :root { color-scheme: light; }
+    :root {
+      color-scheme: light;
+      --papier: #f6f7f5;
+      --carte: #ffffff;
+      --encre: #1e2321;
+      --encre-2: #626d66;
+      --panneau: #0d4a39;
+      --panneau-fonce: #093528;
+      --vert: #0c5c46;
+      --rouge: #b3261e;
+      --ambre: #92600c;
+      --ligne: #e3e6e2;
+      --ligne-forte: #cdd3cd;
+      --fonte: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --fonte-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    }
     * { box-sizing: border-box; }
-    body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; margin: 0; background: #f5f5f4; color: #1c1c1a; }
-    header { background: #1c3552; color: #fff; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-    header h1 { margin: 0; font-size: 18px; font-weight: 600; }
-    .who { display: flex; align-items: center; gap: 12px; font-size: 13px; color: #cdd7e4; }
-    .who a { color: #fff; text-decoration: underline; }
+    body { font-family: var(--fonte); margin: 0; background: var(--papier); color: var(--encre); line-height: 1.5; }
+    header { background: var(--panneau); color: #fff; padding: 9px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+    .sous-titre { font-size: 13px; font-weight: 400; color: #a9c2b7; margin-left: 8px; }
+    .who { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: #c8d8d0; flex-wrap: wrap; }
+    .who a { color: #fff; text-decoration: none; }
+    .who a:hover { text-decoration: underline; text-underline-offset: 3px; }
     .who form { margin: 0; }
-    .who button { background: none; border: 1px solid #56718f; color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 13px; cursor: pointer; }
-    main { max-width: 1100px; margin: 0 auto; padding: 16px 24px 64px; }
-    .banner { padding: 10px 14px; border-radius: 6px; margin: 12px 0; font-size: 14px; }
-    .banner.ok { background: #e6f4ea; color: #1e5631; }
-    .banner.warn { background: #fef7e0; color: #7a5d00; }
-    .banner.error { background: #fce8e6; color: #a50e0e; }
-    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-    th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #78716c; padding: 10px 14px; border-bottom: 2px solid #e7e5e4; }
-    td { padding: 12px 14px; border-bottom: 1px solid #f0efee; vertical-align: top; font-size: 14px; }
-    td a { color: #1a5fb4; text-decoration: none; font-weight: 600; }
+    .who button { background: none; border: 1px solid rgba(255,255,255,.35); color: #fff; border-radius: 6px; padding: 3px 10px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
+    .who button:hover { border-color: #fff; }
+    main { max-width: 1180px; margin: 0 auto; padding: 16px 24px 56px; }
+    a { color: var(--vert); text-underline-offset: 3px; }
+    :focus-visible { outline: 2px solid var(--vert); outline-offset: 2px; }
+    .titre-page { font-size: 17px; margin: 14px 0 2px; }
+    .retour { font-size: 13px; margin: 4px 0 12px; }
+    .banner { padding: 9px 13px; border-radius: 7px; margin: 12px 0; font-size: 13.5px; border: 1px solid transparent; }
+    .banner.ok { background: #e9f2ed; color: #114634; border-color: #cfe0d7; }
+    .banner.error { background: #faeceb; color: #8c1823; border-color: #ecc8c9; }
+    .statut { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; font-size: 13px; color: var(--encre-2); }
+    .statut .pastille { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .statut.ok .pastille { background: var(--vert); }
+    .statut.warn .pastille { background: var(--ambre); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; overflow: hidden; }
+    th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--encre-2); padding: 8px 12px; border-bottom: 1px solid var(--ligne-forte); background: #fafbfa; }
+    td { padding: 10px 12px; border-bottom: 1px solid var(--ligne); vertical-align: top; font-size: 13.5px; }
+    tr:last-child td { border-bottom: none; }
+    td a { color: var(--vert); text-decoration: none; font-weight: 600; }
     td a:hover { text-decoration: underline; }
-    input[type=email], input[type=text], textarea { width: 100%; padding: 10px 12px; border: 1px solid #d6d3d1; border-radius: 6px; font-size: 15px; font-family: inherit; }
+    table.facts { border: none; border-radius: 0; }
+    table.facts th { background: none; border-bottom: 1px solid var(--ligne); text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 600; width: 160px; padding: 8px 12px 8px 0; }
+    table.facts tr:last-child th, table.facts tr:last-child td { border-bottom: none; }
+    input[type=email], input[type=text], textarea { width: 100%; padding: 8px 11px; border: 1px solid var(--ligne-forte); border-radius: 6px; font-size: 14px; font-family: inherit; background: var(--carte); color: var(--encre); }
+    input[type=checkbox] { accent-color: var(--panneau); }
     textarea { resize: vertical; min-height: 84px; }
-    button.primary { background: #1c3552; color: #fff; border: none; border-radius: 6px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
-    button.subtle { background: none; border: none; color: #1a5fb4; cursor: pointer; font-size: 13px; padding: 0; text-decoration: underline; }
-    .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); padding: 28px; max-width: 420px; margin: 48px auto; }
-    .card h2 { margin: 0 0 6px; font-size: 18px; }
-    .card p { color: #57534e; font-size: 14px; }
-    .card label { display: block; font-size: 13px; color: #57534e; margin: 14px 0 4px; }
-    .card .actions { margin-top: 18px; display: flex; align-items: center; gap: 16px; }
-    .comment { border-top: 1px solid #f0efee; padding: 12px 0; }
-    .comment-head { display: flex; align-items: baseline; gap: 12px; font-size: 13px; color: #78716c; }
-    .comment-body { margin-top: 4px; font-size: 14px; white-space: pre-wrap; }
-    .comments-link { color: #1a5fb4; text-decoration: none; font-weight: 400; font-size: 13px; }
-    footer { color: #a8a29e; font-size: 12px; margin-top: 24px; }
+    button.primary { background: var(--panneau); color: #fff; border: none; border-radius: 7px; padding: 8px 16px; font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit; transition: background .12s; }
+    button.primary:hover { background: var(--panneau-fonce); }
+    button.subtle { background: none; border: none; color: var(--vert); cursor: pointer; font-size: 13px; padding: 0; text-decoration: underline; text-underline-offset: 3px; font-family: inherit; }
+    .card { background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; padding: 24px; max-width: 420px; margin: 48px auto; }
+    .card h2 { margin: 0 0 6px; font-size: 15.5px; }
+    .card p { color: var(--encre-2); font-size: 13.5px; }
+    .card label { display: block; font-size: 13px; color: var(--encre-2); margin: 14px 0 4px; }
+    .card .actions { margin-top: 16px; display: flex; align-items: center; gap: 16px; }
+    .comment { border-top: 1px solid var(--ligne); padding: 10px 0; }
+    .comment-head { display: flex; align-items: baseline; gap: 12px; font-size: 13px; color: var(--encre-2); }
+    .comment-head span { font-family: var(--fonte-mono); font-size: 11.5px; }
+    .comment-body { margin-top: 3px; font-size: 13.5px; white-space: pre-wrap; }
+    .comments-link { color: var(--vert); text-decoration: none; font-weight: 400; font-size: 13px; }
+    footer { color: var(--encre-2); font-size: 12px; margin-top: 20px; }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+    @media (max-width: 640px) {
+      header, main { padding-left: 14px; padding-right: 14px; }
+      th, td { padding: 8px 8px; }
+    }
 `;
 
 function layout(title: string, headerRight: string, inner: string): string {
@@ -103,11 +142,15 @@ function layout(title: string, headerRight: string, inner: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d4a39">
   <title>${esc(title)}</title>
   <style>${BASE_CSS}</style>
 </head>
 <body>
-  <header><h1>Avis en cours — marchés publics (études de mobilité)</h1>${headerRight}</header>
+  <header>
+    <h1>Avis en cours<span class="sous-titre">Marchés publics — études de mobilité</span></h1>
+    ${headerRight}
+  </header>
   ${inner}
 </body>
 </html>`;
@@ -200,8 +243,8 @@ function profilePage(user: AuthUser, notice?: { kind: "ok" | "error"; text: stri
       "Mon profil — Avis en cours",
       whoStrip(user),
       `<main>
-      <h2 style="font-size:18px;">Mon profil</h2>
-      <p style="font-size:14px;color:#57534e;"><a href="/" style="color:#1a5fb4;">← Retour aux avis</a></p>
+      <h2 class="titre-page">Mon profil</h2>
+      <p class="retour"><a href="/">← Retour aux avis</a></p>
       ${banner}
       <div class="card" style="margin:16px 0;max-width:520px;">
         <h2>Informations</h2>
@@ -258,8 +301,8 @@ function emailField(): string {
   }
   const suffix =
     domains.length === 1
-      ? `<span style="white-space:nowrap;color:#57534e;">@${esc(domains[0]!)}</span>`
-      : `<select name="domain" style="padding:10px 6px;border:1px solid #d6d3d1;border-radius:6px;">
+      ? `<span style="white-space:nowrap;color:var(--encre-2);">@${esc(domains[0]!)}</span>`
+      : `<select name="domain" style="padding:10px 6px;border:1px solid var(--ligne-forte);border-radius:7px;font-family:inherit;background:var(--carte);">
            ${domains.map((d) => `<option value="${esc(d)}">@${esc(d)}</option>`).join("")}
          </select>`;
   return `
@@ -296,8 +339,8 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
       "Administration — Avis en cours",
       whoStrip(user),
       `<main>
-      <h2 style="font-size:18px;">Administration — utilisateurs</h2>
-      <p style="font-size:14px;color:#57534e;"><a href="/" style="color:#1a5fb4;">← Retour aux avis</a></p>
+      <h2 class="titre-page">Administration — utilisateurs</h2>
+      <p class="retour"><a href="/">← Retour aux avis</a></p>
       ${errorLine(error)}
       <table>
         <thead><tr><th>Email</th><th>Nom</th><th>Admin</th><th>Dernière connexion</th><th></th></tr></thead>
@@ -367,7 +410,7 @@ async function avisPage(user: AuthUser, idweb: string, error?: string): Promise<
   ];
   const factRows = facts
     .filter(([, v]) => v)
-    .map(([k, v]) => `<tr><th style="width:160px;">${k}</th><td>${esc(v!)}</td></tr>`)
+    .map(([k, v]) => `<tr><th>${k}</th><td>${esc(v!)}</td></tr>`)
     .join("");
 
   return html(
@@ -375,11 +418,11 @@ async function avisPage(user: AuthUser, idweb: string, error?: string): Promise<
       `${a.objet} — Avis en cours`,
       whoStrip(user),
       `<main>
-      <p style="font-size:14px;"><a href="/" style="color:#1a5fb4;">← Retour aux avis</a></p>
+      <p class="retour"><a href="/">← Retour aux avis</a></p>
       <div class="card" style="max-width:none;margin:16px 0;">
         <h2>${esc(a.objet)}</h2>
-        <table style="box-shadow:none;">${factRows}</table>
-        <p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="color:#1a5fb4;font-weight:600;">Voir l'annonce officielle →</a></p>
+        <table class="facts">${factRows}</table>
+        <p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-weight:600;">Voir l'annonce officielle →</a></p>
       </div>
       <div class="card" style="max-width:none;margin:16px 0;">
         <h2>Commentaires (${comments.length})</h2>
@@ -432,19 +475,28 @@ async function handleDeleteComment(req: Request, _url: URL, user: AuthUser): Pro
 
 // --- Dashboard ----------------------------------------------------------------------
 
-function deadlineClass(deadline: Date | null): string {
-  if (!deadline) return "";
-  const days = (deadline.getTime() - Date.now()) / 86_400_000;
-  if (days < 7) return "urgent";
-  if (days < 14) return "soon";
-  return "";
+// Calendar days (Europe/Paris) between today and the deadline: J−0 = last day.
+function joursRestants(deadline: Date | null): number | null {
+  if (!deadline) return null;
+  const jour = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Europe/Paris" });
+  const diff = new Date(jour(deadline)).getTime() - new Date(jour(new Date())).getTime();
+  return Math.max(0, Math.round(diff / 86_400_000));
+}
+
+function jChip(deadline: Date | null): string {
+  const j = joursRestants(deadline);
+  if (j === null) return `<span class="jrest none">—</span>`;
+  const urgence = j < 7 ? "urgent" : j < 14 ? "soon" : "";
+  return `<span class="jrest ${urgence}">J−${j}</span>`;
 }
 
 function announcementRow(a: StoredAnnouncement, latestRunId: number | null): string {
   const isNew = latestRunId !== null && a.first_seen_run_id === latestRunId;
   return `
   <tr>
-    <td class="deadline ${deadlineClass(a.deadline)}">${esc(a.deadline_text ?? "—")}</td>
+    <td class="deadline">${jChip(a.deadline)}${
+      a.deadline_text ? `<div class="jdate">${esc(a.deadline_text)}</div>` : ""
+    }</td>
     <td>
       <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.objet)}</a>
       ${isNew ? '<span class="badge">Nouveau</span>' : ""}
@@ -461,31 +513,37 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
 
 function banner(lastRun: RunRow | null, lastSuccess: RunRow | null): string {
   if (!lastRun) {
-    return `<div class="banner warn">Aucune donnée pour l'instant — la première mise à jour n'a pas encore eu lieu.</div>`;
+    return `<div class="statut warn"><span class="pastille"></span>Aucune donnée pour l'instant — la première mise à jour n'a pas encore eu lieu.</div>`;
   }
   if (lastRun.status === "error") {
     const when = lastSuccess?.finished_at ? frDateTime(new Date(lastSuccess.finished_at)) : "jamais";
     return `<div class="banner error">⚠️ La dernière mise à jour a échoué. Données affichées : ${esc(when)}. L'administrateur a été prévenu.</div>`;
   }
   if (lastRun.status === "running") {
-    return `<div class="banner warn">Mise à jour en cours…</div>`;
+    return `<div class="statut warn"><span class="pastille"></span>Mise à jour en cours…</div>`;
   }
   const when = lastRun.finished_at ? frDateTime(new Date(lastRun.finished_at)) : "?";
-  return `<div class="banner ok">Dernière mise à jour : ${esc(when)} — ${lastRun.relevant_count ?? 0} avis pertinents.</div>`;
+  return `<div class="statut ok"><span class="pastille"></span>Dernière mise à jour : ${esc(when)} — ${lastRun.relevant_count ?? 0} avis pertinents.</div>`;
 }
 
 const DASHBOARD_CSS = `
-    nav { margin: 16px 0; display: flex; gap: 8px; }
-    nav a { padding: 8px 14px; border-radius: 6px; text-decoration: none; color: #1c3552; background: #e7e5e4; font-size: 14px; }
-    nav a.active { background: #1c3552; color: #fff; }
-    .meta { color: #78716c; font-size: 13px; margin-top: 2px; }
-    .reason { color: #a16207; font-size: 12px; margin-top: 2px; }
-    .deadline { white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .deadline.urgent { color: #a50e0e; font-weight: 700; }
-    .deadline.soon { color: #b45309; font-weight: 600; }
-    .pub { white-space: nowrap; color: #78716c; }
-    .badge { display: inline-block; background: #1e5631; color: #fff; font-size: 11px; padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: 2px; }
-    .empty { color: #78716c; padding: 32px; text-align: center; background: #fff; border-radius: 8px; }
+    nav { margin: 10px 0 14px; display: flex; gap: 22px; border-bottom: 1px solid var(--ligne-forte); }
+    nav a { padding: 8px 2px 9px; margin-bottom: -1px; text-decoration: none; font-size: 13.5px; font-weight: 500; color: var(--encre-2); border-bottom: 2px solid transparent; }
+    nav a:hover { color: var(--encre); }
+    nav a.active { color: var(--encre); font-weight: 600; border-bottom-color: var(--panneau); }
+    tbody tr:hover td { background: #f7faf8; }
+    .meta { color: var(--encre-2); font-size: 12.5px; margin-top: 2px; }
+    .reason { color: var(--ambre); font-size: 12px; margin-top: 2px; }
+    .deadline { white-space: nowrap; width: 118px; }
+    .jrest { font-family: var(--fonte-mono); font-weight: 600; font-size: 13px; }
+    .jrest.soon { color: var(--ambre); }
+    .jrest.urgent { color: var(--rouge); }
+    .jrest.none { color: var(--encre-2); font-weight: 400; }
+    .jdate { font-family: var(--fonte-mono); font-size: 11px; color: var(--encre-2); margin-top: 3px; }
+    .pub { white-space: nowrap; color: var(--encre-2); font-family: var(--fonte-mono); font-size: 12px; }
+    .badge { display: inline-block; background: #e5efe9; color: var(--vert); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 4px; margin-left: 7px; vertical-align: 1px; }
+    .empty { color: var(--encre-2); padding: 32px; text-align: center; background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; font-size: 13.5px; }
+    @media (max-width: 640px) { thead th:last-child, td.pub { display: none; } .deadline { width: 88px; } .jdate { white-space: normal; } }
 `;
 
 async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Response> {
@@ -508,7 +566,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     items.length === 0
       ? `<p class="empty">Aucun avis en cours dans cette catégorie.</p>`
       : `<table>
-          <thead><tr><th>Date limite</th><th>Objet</th><th>Publié le</th></tr></thead>
+          <thead><tr><th>Échéance</th><th>Objet</th><th>Publié le</th></tr></thead>
           <tbody>${items.map((a) => announcementRow(a, latestRunId)).join("")}</tbody>
         </table>`;
 
@@ -525,11 +583,14 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
 }
 
 function errorPage(msg: string): string {
-  return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Avis en cours — erreur</title></head>
-<body style="font-family:sans-serif;padding:40px;">
-<h1>Service indisponible</h1>
-<p>La page n'a pas pu charger. Réessayez dans quelques minutes ou prévenez l'administrateur.</p>
-<pre style="color:#888;font-size:12px;">${esc(msg)}</pre>
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Avis en cours — erreur</title></head>
+<body style="font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;background:#f6f7f5;color:#1e2321;padding:40px 24px;margin:0;">
+<div style="max-width:520px;margin:48px auto;background:#fff;border:1px solid #e3e6e2;border-radius:8px;padding:24px;">
+<h1 style="font-size:18px;margin:0 0 8px;">Service indisponible</h1>
+<p style="color:#5d6a62;font-size:14px;">La page n'a pas pu charger. Réessayez dans quelques minutes ou prévenez l'administrateur.</p>
+<pre style="color:#5d6a62;font-size:12px;white-space:pre-wrap;">${esc(msg)}</pre>
+<p style="font-size:14px;"><a href="/" style="color:#0e6b51;">← Retour aux avis</a></p>
+</div>
 </body></html>`;
 }
 
