@@ -29,7 +29,7 @@ import {
   type StatusRow,
   type ScopeRuleRow,
 } from "./db.ts";
-import { startLive, isLiveReady, commentStream } from "./live.ts";
+import { startLive, isLiveReady, liveAdapterState, commentStream } from "./live.ts";
 import { frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
 import { matchPath } from "./router.ts";
 import {
@@ -1399,6 +1399,7 @@ async function health(): Promise<Response> {
     return Response.json({
       status: "ok",
       live: isLiveReady(),
+      livePg: liveAdapterState(),
       lastRun: lastRun
         ? { id: lastRun.id, status: lastRun.status, finishedAt: lastRun.finished_at }
         : null,

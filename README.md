@@ -15,6 +15,8 @@ Two ways to use it:
 2. Pages through every matching record (limit 100/req, sorted by deadline ASC), extracts structured fields (id, objet, acheteur, département, date limite, type d'avis, procédure) and caches the lot to `.cache/scrape.json`.
 3. Classifies each avis into `relevant` / `travaux` / `excluded`. Writes two timestamped markdown reports per run (`avis-en-cours-YYYY-MM-DD-HH-MM-SS.md` and the travaux equivalent). Excluded avis are logged to stderr with their reason.
 
+Deployed, the same pipeline runs daily into PostgreSQL behind a French dashboard (passwordless email-code login). Each avis has a detail page with a **live comment thread** and a **collaborative status** (« à évaluer », « répondu », « gagné »… — list editable by admins on `/admin`, every change kept as history in the thread). The dashboard filters by status and can hide rejected avis. `/configuration` (admins, or users delegated the right from `/admin`) edits the pipeline live: search keywords, « toujours garder / toujours exclure » rules, classifier mode, digest window, départements, plus a « Relancer maintenant » button. Threads update in real time through the [Skip](https://skiplabs.io) reactive engine running in-process (WASM) on Postgres LISTEN/NOTIFY; set `LIVE_COMMENTS=0` to disable it (threads then show as unavailable). `/sante` reports `live` (engine up) and `livePg` (its Postgres connection + number of watched tables).
+
 ## Install
 
 ```bash
@@ -56,6 +58,15 @@ CLASSIFIER=regex USE_CACHE=1 bun run src/index.ts
 
 A full run hits the portal API ~30 times (~3 minutes for ~3 000 records over a 14-keyword query) and adds ~€0.01 of Mistral spend per run when the hybrid classifier is on. The classifier retries 408/429/5xx up to four times with exponential backoff so a flaky API doesn't tank the run.
 
+## Checks
+
+```bash
+bun run typecheck && bun run lint && bun test && bun run build   # what CI runs
+TEST_DATABASE_URL=postgresql://<user>@localhost:5432/avis_test bun test live.integration
+```
+
+The unit tests are pure logic (no DB, no network). The second line runs the live-engine integration tests against a throwaway local Postgres (`createdb avis_test`): they boot the Skip engine, subscribe to a thread over SSE, write comments and status changes, kill the engine's Postgres connection with `pg_terminate_backend` and check the thread keeps updating. They are skipped when `TEST_DATABASE_URL` is unset (CI has no DB), so run them locally before touching the Skip packages, their patch, or `src/live.ts`.
+
 ## Classifier modes
 
 - **`regex`** — deterministic rules in `src/classify.ts`. Free, instant, reproducible. Good at hard rules (télécom, contrôle de travaux, assurances…). Bad at nuance.
@@ -85,11 +96,16 @@ src/
   pipeline.ts         Shared core: fetch → dedupe → classify (used by CLI and server)
   report.ts           Markdown renderer (sorted by deadline)
   index.ts            Local CLI: pipeline → write markdown reports
+  rules.ts            « toujours garder / exclure » substring rules applied before the classifier
   db.ts               PostgreSQL (Bun.sql): schema, run tracking, upserts, dashboard queries
   auth.ts             Passwordless auth: email OTP codes, opaque session cookies, users, rate limits
   run.ts              Daily job: pipeline → upsert DB → email digest (alerts on failure)
   email.ts            MailPace sender + French digest/alert/login-code HTML
-  server.ts           Dashboard + login + admin pages (Bun.serve) + /sante health endpoint
+  live.ts             Live threads: Skip reactive graph over Postgres LISTEN/NOTIFY + SSE relay
+  router.ts           Tiny path matcher for routes with :param segments
+  server.ts           Dashboard + login + admin/configuration pages (Bun.serve) + /sante health endpoint
+  *.test.ts           Unit tests; live.integration.test.ts needs TEST_DATABASE_URL (see Checks)
+patches/              Local patch to @skip-adapter/postgres (reconnects after a dropped LISTEN connection)
 clevercloud/
   cron.json           Daily schedule (04:30 UTC)
   daily-run.sh        Cron entry: env-loading wrapper around src/run.ts

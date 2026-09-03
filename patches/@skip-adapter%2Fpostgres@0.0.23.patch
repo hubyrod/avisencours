@@ -1,7 +1,4 @@
-diff --git a/node_modules/@skip-adapter/postgres/.bun-tag-2b3ab9b59fd0a587 b/.bun-tag-2b3ab9b59fd0a587
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@skip-adapter/postgres/.bun-tag-304b71641429d988 b/.bun-tag-304b71641429d988
+diff --git a/node_modules/@skip-adapter/postgres/.bun-tag-ee656fdee2599a32 b/.bun-tag-ee656fdee2599a32
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.d.ts b/dist/index.d.ts
@@ -29,7 +26,7 @@ index 848c4e798b38cc6df682f8e7ba274a1546497bf0..90fa2a67451b336c54a32764ae390bfa
       * @param db_config - Configuration of database to which to connect.
       * @param db_config.host - Host serving database.
 diff --git a/dist/index.js b/dist/index.js
-index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08428f0de8 100644
+index be767d5b4134f9d584905e3d681e9721751c6354..1263e0c291d1256a106775f00269f8456aaeddb6 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -27,6 +27,12 @@ export class PostgresExternalService {
@@ -64,7 +61,7 @@ index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08
          this.client.connect().then(() => {
              const handler = () => {
                  void this.shutdown().then(() => process.exit());
-@@ -54,22 +70,136 @@ export class PostgresExternalService {
+@@ -55,22 +71,136 @@ export class PostgresExternalService {
              console.error(e);
          });
      }
@@ -216,7 +213,7 @@ index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08
          const table = resource;
          const key = validateKeyParam(params);
          const error = (message) => (error) => {
-@@ -96,8 +226,8 @@ export class PostgresExternalService {
+@@ -97,8 +227,8 @@ export class PostgresExternalService {
          const setupPgNotify = async () => {
              // Reuse existing trigger/function if possible
              if (!this.open_instances.has(instance)) {
@@ -227,7 +224,7 @@ index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08
  CREATE OR REPLACE FUNCTION %I() RETURNS TRIGGER AS $f$
  BEGIN
    IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
-@@ -107,11 +237,18 @@ BEGIN
+@@ -108,11 +238,18 @@ BEGIN
    END IF;
    RETURN NULL;
  END $f$ LANGUAGE PLPGSQL;`, instance, instance, key.col, instance, key.col));
@@ -248,7 +245,7 @@ index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08
              }
          };
          await initData();
-@@ -140,6 +277,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
+@@ -141,6 +278,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
          await setupPgNotify();
      }
      unsubscribe(instance) {
@@ -256,7 +253,7 @@ index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08
          if (this.open_instances.has(instance))
              this.client
                  .query(format("DROP FUNCTION IF EXISTS %I CASCADE;", instance))
-@@ -148,6 +286,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
+@@ -149,6 +287,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`, instance, table, instance));
              });
      }
      async shutdown() {
@@ -265,7 +262,7 @@ index 90565a5afc70414c92e41bb212495c1587d8ec63..9556e2bce8e4af69f3d3a84ef7b80f08
              const query = "DROP FUNCTION IF EXISTS " +
                  Array.from(this.open_instances)
 diff --git a/src/index.ts b/src/index.ts
-index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57e7e04da8 100644
+index 01f42175ae3e2cc4bbc6022b92fdc0bbb4ddf1fe..c6f18fa46ddc646a29222f61d16355f236b65b03 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -17,6 +17,19 @@ export type { PostgresPKey } from "./util.js";
@@ -329,7 +326,7 @@ index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57
      this.client.connect().then(
        () => {
          const handler = () => {
-@@ -75,6 +107,184 @@ export class PostgresExternalService implements ExternalService {
+@@ -76,6 +108,184 @@ export class PostgresExternalService implements ExternalService {
      );
    }
  
@@ -514,7 +511,7 @@ index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57
    /**
     * Subscribe to a resource provided by the external service.
     *
-@@ -105,6 +315,9 @@ export class PostgresExternalService implements ExternalService {
+@@ -106,6 +316,9 @@ export class PostgresExternalService implements ExternalService {
        error: (error: Json) => void;
      },
    ): Promise<void> {
@@ -524,7 +521,7 @@ index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57
      const table = resource;
      const key = validateKeyParam(params);
  
-@@ -133,10 +346,10 @@ export class PostgresExternalService implements ExternalService {
+@@ -134,10 +347,10 @@ export class PostgresExternalService implements ExternalService {
      const setupPgNotify = async () => {
        // Reuse existing trigger/function if possible
        if (!this.open_instances.has(instance)) {
@@ -539,7 +536,7 @@ index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57
  CREATE OR REPLACE FUNCTION %I() RETURNS TRIGGER AS $f$
  BEGIN
    IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
-@@ -146,25 +359,36 @@ BEGIN
+@@ -147,25 +360,36 @@ BEGIN
    END IF;
    RETURN NULL;
  END $f$ LANGUAGE PLPGSQL;`,
@@ -592,7 +589,7 @@ index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57
        }
      };
  
-@@ -199,6 +423,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`,
+@@ -200,6 +424,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`,
    }
  
    unsubscribe(instance: string): void {
@@ -600,7 +597,7 @@ index f343b38302446fc2c5f9172f21e31fe68f0390b0..ca3e99ac1428f265cbf401a068d08c57
      if (this.open_instances.has(instance))
        this.client
          .query(format("DROP FUNCTION IF EXISTS %I CASCADE;", instance))
-@@ -214,6 +439,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`,
+@@ -215,6 +440,7 @@ FOR EACH ROW EXECUTE FUNCTION %I();`,
    }
  
    async shutdown(): Promise<void> {

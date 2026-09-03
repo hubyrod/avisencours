@@ -17,6 +17,7 @@ import { db } from "./db.ts";
 const STREAM_PORT = Number(Bun.env.SKIP_STREAMING_PORT ?? 9080);
 const CONTROL_PORT = Number(Bun.env.SKIP_CONTROL_PORT ?? 9081);
 const ENABLED = Bun.env.LIVE_COMMENTS !== "0";
+export const LIVE_APP_NAME = "avis-live";
 
 // L'adaptateur pg renvoie int8 et timestamptz sous forme de chaînes.
 export type DbComment = {
@@ -165,19 +166,34 @@ class ThreadResource implements Resource<ResourceInputs> {
   }
 }
 
+// État de la connexion LISTEN de l'adaptateur (patch local : isConnected /
+// getOpenInstances). `watched` = tables dont le LISTEN est effectif — retombe à 0
+// pendant une reconnexion, remonte table par table. Exposé pour /sante et les tests.
+let adapter: PostgresExternalService | null = null;
+
+export function liveAdapterState(): { connected: boolean; watched: number } {
+  if (!adapter) return { connected: false, watched: 0 };
+  return { connected: adapter.isConnected(), watched: adapter.getOpenInstances().size };
+}
+
 function makeService(): SkipService<Record<string, never>, ResourceInputs> {
   const url = Bun.env.POSTGRESQL_ADDON_URI ?? Bun.env.DATABASE_URL;
   if (!url) throw new Error("POSTGRESQL_ADDON_URI is required");
   const u = new URL(url);
   const sslmode = u.searchParams.get("sslmode");
-  const postgres = new PostgresExternalService({
+  // application_name identifie la connexion LISTEN dans pg_stat_activity (ops +
+  // test d'intégration qui la coupe pour vérifier la reconnexion).
+  const pgConfig = {
     host: u.hostname,
     port: Number(u.port || 5432),
     database: u.pathname.slice(1),
     user: decodeURIComponent(u.username),
     password: decodeURIComponent(u.password),
+    application_name: LIVE_APP_NAME,
     ...(sslmode && sslmode !== "disable" ? { ssl: { rejectUnauthorized: false } } : {}),
-  });
+  };
+  const postgres = new PostgresExternalService(pgConfig);
+  adapter = postgres;
   return {
     externalServices: { postgres },
     resources: { thread: ThreadResource },
