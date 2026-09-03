@@ -234,6 +234,35 @@ describe("chatJSON", () => {
     }
   });
 
+  test("identifiant inconnu (400) : retiré de la chaîne, nouvelle requête", async () => {
+    const bad = status(400, '{"error":{"message":"a/one is not a valid model ID","code":400}}');
+    const { deps, calls } = fakeFetch([bad, completion('{"x":4}', { model: "b/two" })]);
+    const r = await chatJSON({ messages, models: CHAIN, parse }, deps);
+    expect(r.value).toEqual({ x: 4 });
+    expect(r.rotated).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.body.model).toBe("b/two");
+    expect(calls[1]!.body.models).toEqual(["b/two", "c/three"]);
+  });
+
+  test("identifiant inconnu au milieu de la chaîne, puis un autre : deux retraits", async () => {
+    const bad = (id: string) => status(400, `{"error":{"message":"${id} is not a valid model ID","code":400}}`);
+    const { deps, calls } = fakeFetch([bad("b/two"), bad("c/three"), completion('{"x":5}')]);
+    const r = await chatJSON({ messages, models: CHAIN, parse }, deps);
+    expect(r.value).toEqual({ x: 5 });
+    expect(calls).toHaveLength(3);
+    expect(calls[1]!.body.models).toEqual(["a/one", "c/three"]);
+    expect(calls[2]!.body.models).toBeUndefined();
+    expect(calls[2]!.body.model).toBe("a/one");
+  });
+
+  test("seul modèle inconnu : erreur remontée telle quelle", async () => {
+    const bad = status(400, '{"error":{"message":"a/one is not a valid model ID","code":400}}');
+    const { deps, calls } = fakeFetch([bad]);
+    await expect(chatJSON({ messages, models: ["a/one"], parse }, deps)).rejects.toBeInstanceOf(HttpError);
+    expect(calls).toHaveLength(1);
+  });
+
   test("signal externe déjà annulé : aucun appel", async () => {
     const { deps, calls } = fakeFetch([completion('{"x":1}')]);
     const ac = new AbortController();

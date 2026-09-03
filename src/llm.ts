@@ -206,20 +206,42 @@ async function requestOnce<T>(
   };
 }
 
+// OpenRouter valide tous les identifiants de `models` avant de router : un
+// seul identifiant inconnu (faute de frappe, modèle retiré du catalogue)
+// renvoie 400 pour toute la requête au lieu de passer au suivant.
+export function invalidModelId(err: unknown): string | null {
+  if (!(err instanceof HttpError) || err.status !== 400) return null;
+  const m = err.body.match(/"([^"\s]+\/[^"\s]+) is not a valid model ID"/);
+  return m?.[1] ?? null;
+}
+
 export async function chatJSON<T>(opts: ChatOptions<T>, deps: ChatDeps = {}): Promise<ChatResult<T>> {
   const key = openRouterKey();
   if (!key) throw new Error("OPENROUTER_API_KEY not set");
   if (opts.models.length === 0) throw new Error("empty model chain");
 
-  try {
-    return await requestOnce(key, opts.models, opts, deps);
-  } catch (err) {
-    // Repli client : une seule fois, uniquement sur contenu inutilisable
-    // (les erreurs HTTP ont déjà parcouru la chaîne côté OpenRouter).
-    const rest = opts.models.slice(1);
-    if (!(err instanceof LlmContentError) || rest.length === 0) throw err;
-    const second = await requestOnce(key, rest, opts, deps);
-    return { ...second, rotated: true };
+  let models = opts.models;
+  let dropped = false;
+  for (;;) {
+    try {
+      const r = await requestOnce(key, models, opts, deps);
+      return dropped ? { ...r, rotated: true } : r;
+    } catch (err) {
+      // Identifiant refusé par OpenRouter : on le retire de la chaîne et on
+      // réessaie avec le reste (une fois par identifiant, au plus).
+      const bad = invalidModelId(err);
+      if (bad && models.includes(bad) && models.length > 1) {
+        models = models.filter((m) => m !== bad);
+        dropped = true;
+        continue;
+      }
+      // Repli client : une seule fois, uniquement sur contenu inutilisable
+      // (les erreurs HTTP ont déjà parcouru la chaîne côté OpenRouter).
+      const rest = models.slice(1);
+      if (!(err instanceof LlmContentError) || rest.length === 0) throw err;
+      const second = await requestOnce(key, rest, opts, deps);
+      return { ...second, rotated: true };
+    }
   }
 }
 
