@@ -1,8 +1,9 @@
 import { runPipeline } from "./pipeline.ts";
 import { renderMarkdown } from "./report.ts";
+import { llmStatsSummary } from "./llm.ts";
 
 async function main() {
-  const { relevant, travaux, excluded } = await runPipeline({
+  const { relevant, travaux, excluded, llm, warning } = await runPipeline({
     query: Bun.argv.slice(2).join(" ").trim() || undefined,
     maxPages: Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : undefined,
     useCache: Bun.env.USE_CACHE === "1",
@@ -47,6 +48,15 @@ async function main() {
       console.error(`  - [${e.idweb}] ${e.reason} — ${e.objet.slice(0, 80)}`);
     }
   }
+  if (llm) {
+    console.error("\n=== LLM (OpenRouter) ===");
+    console.error(llmStatsSummary(llm));
+    console.error(
+      `tokens: ${llm.promptTokens} in / ${llm.completionTokens} out` +
+        (llm.breakerTripped ? `\ncoupe-circuit: ${llm.breakerReason}` : ""),
+    );
+  }
+  if (warning) console.error(`\n⚠️  ${warning}`);
   console.error(`\nwrote ${relevantPath} (${relevant.length}) and ${travauxPath} (${travaux.length})`);
 }
 

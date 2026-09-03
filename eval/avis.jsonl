@@ -1,0 +1,43 @@
+# Jeu d'évaluation du classifieur LLM — une ligne JSON par avis, `expected` ∈ relevant | travaux | excluded.
+# Vérité terrain fixée à la main (cas issus des tests regex, des exemples du prompt et de cas limites du domaine).
+# À enrichir avec de vrais avis : `bun run eval --export` puis étiqueter. Voir `bun run eval`.
+{"idweb":"eval-01","objet":"Schéma directeur cyclable départemental et études de faisabilité associées","expected":"relevant"}
+{"idweb":"eval-02","objet":"Assistance à Maîtrise d'Ouvrage pour l'élaboration du Plan Local de Mobilité de la Communauté d'agglomération","expected":"relevant"}
+{"idweb":"eval-03","objet":"Étude de circulation et de stationnement du centre-ville — diagnostic, scénarios et plan d'actions","expected":"relevant"}
+{"idweb":"eval-04","objet":"Modélisation multimodale des déplacements à l'échelle de la métropole — construction et calage du modèle de trafic","expected":"relevant"}
+{"idweb":"eval-05","objet":"Élaboration du schéma directeur des mobilités actives (vélo et marche)","expected":"relevant"}
+{"idweb":"eval-06","objet":"Étude d'opportunité et de faisabilité d'un pôle d'échanges multimodal en gare","expected":"relevant","note":"étude, pas réalisation"}
+{"idweb":"eval-07","objet":"Évaluation socio-économique du projet de transport collectif en site propre","expected":"relevant"}
+{"idweb":"eval-08","objet":"Comptages routiers et enquêtes origine-destination sur le territoire de l'agglomération","expected":"relevant"}
+{"idweb":"eval-09","objet":"Élaboration du Plan de Mobilité Simplifié de la Communauté de communes","expected":"relevant"}
+{"idweb":"eval-10","objet":"Étude de restructuration du réseau de transports collectifs urbains","expected":"relevant","note":"restructuration d'un réseau de lignes = étude, pas travaux"}
+{"idweb":"eval-11","objet":"Étude de jalonnement et de signalisation directionnelle des itinéraires cyclables","expected":"relevant"}
+{"idweb":"eval-12","objet":"Assistance à maîtrise d'ouvrage pour l'élaboration du schéma directeur piéton et de la stratégie d'accessibilité","expected":"relevant"}
+{"idweb":"eval-13","objet":"Diagnostic des mobilités et plan d'actions pour un plan de mobilité employeur inter-entreprises","expected":"relevant"}
+{"idweb":"eval-14","objet":"Étude de stationnement : diagnostic de l'offre et de la demande, propositions d'évolution de la politique tarifaire","expected":"relevant"}
+{"idweb":"eval-15","objet":"Mission de maîtrise d'œuvre pour la réalisation de la liaison cyclable de Breuillet à Taupignac","expected":"travaux"}
+{"idweb":"eval-16","objet":"Assistance à maîtrise d'ouvrage relative à la création d'une passerelle piétonne dans le secteur de Moulin Mer","expected":"travaux","note":"AMO liée à un ouvrage physique"}
+{"idweb":"eval-17","objet":"Maîtrise d'œuvre pour la requalification des espaces publics et l'extension de trois zones d'activités","expected":"travaux"}
+{"idweb":"eval-18","objet":"Mission de maîtrise d'œuvre pour l'aménagement d'un carrefour giratoire et de ses voies d'accès","expected":"travaux"}
+{"idweb":"eval-19","objet":"Rénovation du groupe scolaire — mission de maîtrise d'œuvre","expected":"travaux"}
+{"idweb":"eval-20","objet":"Reconnaissance géotechnique et études géologiques préalables à la réalisation d'un parking silo","expected":"travaux"}
+{"idweb":"eval-21","objet":"Assistance à maîtrise d'ouvrage pour la construction d'un pôle d'échanges multimodal (conception, suivi des travaux)","expected":"travaux","note":"AMO pour construire un ouvrage, même si « pôle d'échanges »"}
+{"idweb":"eval-22","objet":"Maîtrise d'œuvre relative à la mise en compatibilité des infrastructures ferroviaires avec le projet de ligne nouvelle","expected":"travaux"}
+{"idweb":"eval-23","objet":"Mission de contrôle des travaux de voirie et de réseaux divers","expected":"excluded"}
+{"idweb":"eval-24","objet":"Contrôle de la qualité de service du réseau de transport urbain — enquêtes clients mystères","expected":"excluded"}
+{"idweb":"eval-25","objet":"Fourniture de services de téléphonie mobile et de données pour la collectivité","expected":"excluded","note":"mobile ≠ mobilité"}
+{"idweb":"eval-26","objet":"Détection et géoréférencement des réseaux enterrés sur la voirie communale","expected":"excluded"}
+{"idweb":"eval-27","objet":"Transports scolaires 2026-2027 — services réguliers d'autocars","expected":"excluded"}
+{"idweb":"eval-28","objet":"Délégation de service public pour l'exploitation du réseau de transport urbain","expected":"excluded"}
+{"idweb":"eval-29","objet":"Gestion opérationnelle du stationnement payant sur voirie et contrôle du paiement","expected":"excluded"}
+{"idweb":"eval-30","objet":"Maintenance de la signalisation lumineuse tricolore et des équipements dynamiques","expected":"excluded"}
+{"idweb":"eval-31","objet":"Location de vélos à assistance électrique et exploitation du service de vélos en libre-service","expected":"excluded","note":"exploitation, pas étude"}
+{"idweb":"eval-32","objet":"Fourniture, installation et maintenance d'infrastructures de recharge pour véhicules électriques","expected":"excluded"}
+{"idweb":"eval-33","objet":"Développement d'une application mobile d'information voyageurs","expected":"excluded","note":"application smartphone"}
+{"idweb":"eval-34","objet":"Assistance à maîtrise d'ouvrage pour la stratégie et le programme d'acquisition de matériels roulants ferroviaires","expected":"excluded","note":"achat de matériel roulant, hors planification"}
+{"idweb":"eval-35","objet":"Prestations de nettoyage des locaux et gestion des salles de réunion","expected":"excluded"}
+{"idweb":"eval-36","objet":"Offre de formation collective « Développer un management participatif »","expected":"excluded"}
+{"idweb":"eval-37","objet":"Prestations d'assurance flotte véhicules et risques annexes","expected":"excluded"}
+{"idweb":"eval-38","objet":"Enlèvement, transport et mise en fourrière de véhicules","expected":"excluded"}
+{"idweb":"eval-39","objet":"Prestations de visites, inspections, auscultations et études d'ouvrages d'art","expected":"excluded","note":"inspection d'ouvrages, pas planification"}
+{"idweb":"eval-40","objet":"Étude de faisabilité d'une voie verte et d'itinéraires cyclables touristiques le long du canal","expected":"relevant"}

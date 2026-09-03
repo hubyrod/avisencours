@@ -6,6 +6,8 @@ import {
   validateRuleTerm,
   validateDigestWindow,
   validateClassifierMode,
+  validateModelChain,
+  parseModelChain,
   parseDepartements,
 } from "./rules.ts";
 import { buildApiUrl } from "./params.ts";
@@ -122,7 +124,35 @@ describe("validateClassifierMode", () => {
     expect(validateClassifierMode("hybrid").ok).toBe(true);
     expect(validateClassifierMode("regex").ok).toBe(true);
     expect(validateClassifierMode("llm").ok).toBe(true);
-    expect(validateClassifierMode("mistral").ok).toBe(false);
+    expect(validateClassifierMode("autre").ok).toBe(false);
+  });
+});
+
+describe("validateModelChain", () => {
+  test("normalise espaces, casse et sauts de ligne", () => {
+    const v = validateModelChain(" Mistralai/Mistral-Nemo ,google/gemini-2.5-flash-lite\n");
+    expect(v).toEqual({ ok: true, value: "mistralai/mistral-nemo,google/gemini-2.5-flash-lite" });
+    expect(parseModelChain(v.ok ? v.value : "")).toEqual(["mistralai/mistral-nemo", "google/gemini-2.5-flash-lite"]);
+  });
+  test("suffixes :floor / :nitro acceptés, :free / :online / :thinking refusés", () => {
+    expect(validateModelChain("mistralai/mistral-nemo:floor").ok).toBe(true);
+    expect(validateModelChain("mistralai/mistral-nemo:nitro").ok).toBe(true);
+    expect(validateModelChain("mistralai/mistral-nemo:free").ok).toBe(false);
+    expect(validateModelChain("x/y:online").ok).toBe(false);
+    expect(validateModelChain("x/y:thinking").ok).toBe(false);
+  });
+  test("slug invalide, vide, doublon, trop long", () => {
+    expect(validateModelChain("mistral-small-latest").ok).toBe(false);
+    expect(validateModelChain("a/b/c").ok).toBe(false);
+    expect(validateModelChain("").ok).toBe(false);
+    expect(validateModelChain(" , ").ok).toBe(false);
+    expect(validateModelChain("a/b,a/b").ok).toBe(false);
+    expect(validateModelChain("a/b,c/d,e/f,g/h,i/j").ok).toBe(true);
+    expect(validateModelChain("a/b,c/d,e/f,g/h,i/j,k/l").ok).toBe(false);
+  });
+  test("parseModelChain tolère null", () => {
+    expect(parseModelChain(null)).toEqual([]);
+    expect(parseModelChain(undefined)).toEqual([]);
   });
 });
 

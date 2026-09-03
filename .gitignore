@@ -15,3 +15,6 @@ avis-en-cours-*.md
 avis-travaux-*.md
 *~
 *.un~
+
+# eval harness scratch (bun run eval --export)
+eval/candidates.jsonl

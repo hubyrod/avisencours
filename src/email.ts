@@ -1,11 +1,12 @@
 import type { StoredAnnouncement } from "./db.ts";
+import { postWithRetry, DEFAULT_RETRYABLE } from "./http.ts";
+import { llmStatsSummary, type LlmStats } from "./llm.ts";
 
 const API_URL = "https://app.mailpace.com/api/v1/send";
 
 // 403 is deliberately NOT retryable: it means the sending domain is not
 // DKIM-verified (or from-domain mismatch) and must surface loudly.
-const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
-const MAX_ATTEMPTS = 4;
+const RETRYABLE = DEFAULT_RETRYABLE;
 
 export type Email = {
   to: string[];
@@ -38,24 +39,19 @@ export async function sendEmail(email: Email): Promise<void> {
     htmlbody: email.html,
   });
 
-  for (let attempt = 1; ; attempt++) {
-    const res = await fetch(API_URL, {
-      method: "POST",
+  await postWithRetry(
+    "MailPace",
+    API_URL,
+    {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
         "MailPace-Server-Token": token,
       },
       body,
-    });
-    if (res.ok) return;
-    if (RETRYABLE.has(res.status) && attempt < MAX_ATTEMPTS) {
-      const backoff = 500 * 2 ** (attempt - 1) + Math.random() * 400;
-      await new Promise((r) => setTimeout(r, backoff));
-      continue;
-    }
-    throw new Error(`MailPace ${res.status}: ${await res.text()}`);
-  }
+    },
+    { retryable: RETRYABLE, attempts: 4 },
+  );
 }
 
 // Sends the 6-digit login code. Without an email token (local dev), the code
@@ -131,6 +127,8 @@ export type DigestData = {
   totalTravaux: number;
   dashboardUrl: string | null;
   dateStr: string;
+  llm?: LlmStats | null;
+  warning?: string | null;
 };
 
 // The digest is sent every day to opted-in users, whatever the count —
@@ -163,9 +161,28 @@ export function renderDigestHtml(d: DigestData): string {
       "Aucune échéance dans les 14 prochains jours.",
     )}
     ${dashboardLink}
+    ${
+      d.warning
+        ? `<p style="color:#c01c28;font-size:13px;margin-top:24px;">⚠️ ${esc(d.warning)}</p>`
+        : ""
+    }
     <p style="color:#999;font-size:12px;margin-top:32px;">
       Email automatique quotidien. Si cet email cesse d'arriver, signalez-le à l'administrateur.
+      ${d.llm ? `<br>Classification LLM : ${esc(llmStatsSummary(d.llm))}.` : ""}
     </p>
+  </div>`;
+}
+
+// Avertissement non bloquant : le run a réussi (avis récupérés et stockés)
+// mais la classification LLM a été interrompue ou n'a pas pu être utilisée.
+export function renderWarningHtml(warning: string, llm: LlmStats | null | undefined, dateStr: string): string {
+  return `
+  <div style="font-family:Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;color:#222;">
+    <h1 style="font-size:20px;color:#b5600a;">⚠️ Classification LLM interrompue — ${esc(dateStr)}</h1>
+    <p>La mise à jour quotidienne a réussi, mais la classification par modèle de langage n'a pas pu aller au bout : les avis restants ont été classés par les règles regex seules.</p>
+    <pre style="background:#f6f6f6;padding:12px;border-radius:4px;font-size:12px;white-space:pre-wrap;">${esc(warning)}</pre>
+    ${llm ? `<p style="color:#666;font-size:13px;">Avant l'interruption : ${esc(llmStatsSummary(llm))}.</p>` : ""}
+    <p style="color:#666;font-size:13px;">Vérifiez la clé et le crédit OpenRouter, puis relancez depuis la page Configuration.</p>
   </div>`;
 }
 

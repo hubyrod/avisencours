@@ -1,9 +1,11 @@
 import { buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
 import { scrapeAll, type Announcement } from "./scraper.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
-import { classifyLLM } from "./classify-llm.ts";
+import { classifyLLM, type LlmContext } from "./classify-llm.ts";
 import { classifyHybrid } from "./classify-hybrid.ts";
 import { applyScopeRules, type ScopeRules } from "./rules.ts";
+import { Breaker, defaultModelChain, llmConfigured, llmStatsSummary, newLlmStats, type LlmStats } from "./llm.ts";
+import { errMessage } from "./http.ts";
 
 const EXCLUDE_TYPE_AVIS = [/attribution/i, /résultat/i, /annulation/i];
 
@@ -15,6 +17,7 @@ export type ClassifiedItem = Announcement & {
   matchedQueries: string[];
   category: Category;
   reason?: string;
+  classifier?: string;
 };
 
 export type ClassifierMode = "regex" | "llm" | "hybrid";
@@ -25,6 +28,9 @@ export type PipelineOptions = {
   useCache?: boolean;
   cachePath?: string;
   classifier?: string;
+  // Chaîne de modèles OpenRouter (ordre de repli). Vide/absent = LLM_MODELS
+  // (env) puis DEFAULT_LLM_MODELS.
+  llmModels?: string[];
   scopeRules?: ScopeRules;
   codeDepartement?: string[];
   log?: (msg: string) => void;
@@ -35,6 +41,11 @@ export type PipelineResult = {
   relevant: ClassifiedItem[];
   travaux: ClassifiedItem[];
   excluded: ClassifiedItem[];
+  // Compteurs LLM du run (absent en mode regex).
+  llm?: LlmStats;
+  // Non bloquant : classifieur LLM demandé mais indisponible, ou coupe-circuit
+  // ouvert en cours de route. À remonter (email d'alerte, page configuration).
+  warning?: string;
 };
 
 type CachedItem = Announcement & { matchedQueries: string[] };
@@ -101,16 +112,20 @@ async function mapConcurrent<T, R>(
   return results;
 }
 
-function resolveMode(requested: string, log: (msg: string) => void): ClassifierMode {
+function resolveMode(
+  requested: string,
+  log: (msg: string) => void,
+): { mode: ClassifierMode; warning?: string } {
   if (requested !== "regex" && requested !== "llm" && requested !== "hybrid") {
     throw new Error(`Invalid CLASSIFIER="${requested}" (expected: regex | llm | hybrid)`);
   }
   const needsKey = requested === "hybrid" || requested === "llm";
-  if (needsKey && !Bun.env.MISTRAL_API_KEY) {
-    log(`MISTRAL_API_KEY not set — falling back from ${requested} to regex`);
-    return "regex";
+  if (needsKey && !llmConfigured()) {
+    const warning = `classifieur « ${requested} » demandé mais OPENROUTER_API_KEY absente — classification regex seule`;
+    log(warning);
+    return { mode: "regex", warning };
   }
-  return requested;
+  return { mode: requested };
 }
 
 export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineResult> {
@@ -122,20 +137,35 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
 
   const items = await loadOrScrape(query, maxPages, cachePath, useCache, opts.codeDepartement, log);
 
-  const mode = resolveMode(opts.classifier ?? "hybrid", log);
+  const resolved = resolveMode(opts.classifier ?? "hybrid", log);
+  const mode = resolved.mode;
+  let warning = resolved.warning;
   log(`classifier: ${mode}`);
 
-  const baseClassify =
+  const ctx: LlmContext | null =
     mode === "regex"
-      ? async (it: Announcement): Promise<Classification> => classify(it)
-      : async (it: Announcement): Promise<Classification> => {
-          try {
-            return mode === "hybrid" ? await classifyHybrid(it) : await classifyLLM(it);
-          } catch (err) {
-            log(`  classify error for ${it.idweb}: ${err}`);
-            return { category: "relevant", reason: "erreur classification — revue manuelle" };
-          }
+      ? null
+      : {
+          models: opts.llmModels?.length ? opts.llmModels : defaultModelChain(),
+          stats: newLlmStats(),
+          breaker: new Breaker(),
         };
+  if (ctx) log(`modèles: ${ctx.models.join(" → ")}`);
+
+  const baseClassify = !ctx
+    ? async (it: Announcement): Promise<Classification> => classify(it)
+    : async (it: Announcement): Promise<Classification> => {
+        // Coupe-circuit ouvert (clé refusée, crédit épuisé, chaîne en panne) :
+        // le reste du run est classé par les règles regex.
+        if (ctx.breaker.tripped) return classify(it);
+        try {
+          return mode === "hybrid" ? await classifyHybrid(it, ctx) : await classifyLLM(it, ctx);
+        } catch (err) {
+          log(`  classify error for ${it.idweb}: ${errMessage(err)}`);
+          if (ctx.breaker.tripped) return classify(it);
+          return { category: "relevant", reason: "erreur classification — revue manuelle", classifier: "erreur" };
+        }
+      };
 
   // Règles personnalisées (/configuration) : tranchent avant les classifieurs.
   const rules = opts.scopeRules;
@@ -146,7 +176,7 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
     if (forced) {
       if (forced.category === "relevant") forcedKeep++;
       else forcedExclude++;
-      return forced;
+      return { ...forced, classifier: "regle" };
     }
     return baseClassify(it);
   };
@@ -157,6 +187,17 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
     log(`règles personnalisées: ${forcedKeep} gardé(s), ${forcedExclude} exclu(s)`);
   }
 
+  if (ctx) {
+    const s = ctx.stats;
+    if (ctx.breaker.tripped) {
+      s.breakerTripped = true;
+      s.breakerReason = ctx.breaker.reason;
+      warning = `coupe-circuit LLM ouvert : ${ctx.breaker.reason} — les avis restants ont été classés par regex`;
+      log(warning);
+    }
+    log(`LLM: ${llmStatsSummary(s)}`);
+  }
+
   const relevant: ClassifiedItem[] = [];
   const travaux: ClassifiedItem[] = [];
   const excluded: ClassifiedItem[] = [];
@@ -164,11 +205,16 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
   for (let i = 0; i < items.length; i++) {
     const it = items[i]!;
     const cls = classifications[i]!;
-    const enriched: ClassifiedItem = { ...it, category: cls.category, reason: cls.reason };
+    const enriched: ClassifiedItem = {
+      ...it,
+      category: cls.category,
+      reason: cls.reason,
+      classifier: cls.classifier,
+    };
     if (cls.category === "relevant") relevant.push(enriched);
     else if (cls.category === "travaux") travaux.push(enriched);
     else excluded.push(enriched);
   }
 
-  return { mode, relevant, travaux, excluded };
+  return { mode, relevant, travaux, excluded, llm: ctx?.stats, warning };
 }

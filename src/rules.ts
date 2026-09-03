@@ -7,7 +7,7 @@ import { normalize, type Classification } from "./classify.ts";
 export type ScopeRules = { keep: string[]; exclude: string[] };
 
 // Règles « toujours garder » / « toujours exclure », appliquées AVANT les
-// classifieurs (un avis forcé « garder » ne coûte donc aucun appel Mistral).
+// classifieurs (un avis forcé « garder » ne coûte donc aucun appel LLM).
 // Correspondance en sous-chaîne sur texte normalisé (sans accents, minuscules).
 // « garder » l'emporte sur « exclure » : les termes d'exclusion sont génériques,
 // les termes à garder sont la soupape spécifique — le spécifique gagne.
@@ -69,6 +69,41 @@ export function validateClassifierMode(raw: string): Validation {
     return { ok: false, error: "Classifieur inconnu (attendu : regex, llm ou hybrid)." };
   }
   return { ok: true, value: mode };
+}
+
+// Chaîne de modèles OpenRouter « editeur/modele[:floor|:nitro], … » dans
+// l'ordre de repli. 5 modèles maximum. Les variantes :free (20 req/min,
+// données collectées), :online (recherche web facturée) et :thinking
+// (raisonnement qui consomme max_tokens avant de répondre) sont refusées.
+export const MAX_MODEL_CHAIN = 5;
+const MODEL_SLUG = /^[a-z0-9_.-]+\/[a-z0-9_.-]+(?::(?:floor|nitro))?$/;
+
+export function validateModelChain(raw: string): Validation {
+  const models = parseModelChain(raw);
+  if (models.length === 0) return { ok: false, error: "Indiquez au moins un modèle." };
+  if (models.length > MAX_MODEL_CHAIN) {
+    return { ok: false, error: `${MAX_MODEL_CHAIN} modèles maximum dans la chaîne de repli.` };
+  }
+  for (const m of models) {
+    if (!MODEL_SLUG.test(m)) {
+      return {
+        ok: false,
+        error: `Identifiant de modèle invalide : « ${m} » (attendu : editeur/modele, ex. mistralai/mistral-nemo).`,
+      };
+    }
+  }
+  if (new Set(models).size !== models.length) {
+    return { ok: false, error: "Un modèle apparaît deux fois dans la chaîne." };
+  }
+  return { ok: true, value: models.join(",") };
+}
+
+// "a/b, c/d" -> ["a/b", "c/d"] ; null / vide -> [].
+export function parseModelChain(raw: string | null | undefined): string[] {
+  return (raw ?? "")
+    .split(/[,\n]/)
+    .map((m) => m.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 // « 31, 2A, 974 » -> ["31", "2A", "974"] ; chaîne vide = toute la France.

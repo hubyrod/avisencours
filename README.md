@@ -2,7 +2,7 @@
 
 Query a public OpenDataSoft (ODS) procurement portal for currently-open SERVICES-type avis relevant to a mobility-planning consultancy, and classify each one as **relevant**, **travaux** (works), or **excluded** (out-of-domain).
 
-Built with Bun + TypeScript. Hits the portal's REST API directly — no browser, no scraping. Optional semantic classification via the Mistral API.
+Built with Bun + TypeScript. Hits the portal's REST API directly — no browser, no scraping. Optional semantic classification through [OpenRouter](https://openrouter.ai) (any model, with a fallback chain and price-sorted providers).
 
 Two ways to use it:
 
@@ -15,7 +15,7 @@ Two ways to use it:
 2. Pages through every matching record (limit 100/req, sorted by deadline ASC), extracts structured fields (id, objet, acheteur, département, date limite, type d'avis, procédure) and caches the lot to `.cache/scrape.json`.
 3. Classifies each avis into `relevant` / `travaux` / `excluded`. Writes two timestamped markdown reports per run (`avis-en-cours-YYYY-MM-DD-HH-MM-SS.md` and the travaux equivalent). Excluded avis are logged to stderr with their reason.
 
-Deployed, the same pipeline runs daily into PostgreSQL behind a French dashboard (passwordless email-code login). Each avis has a detail page with a **live comment thread** and a **collaborative status** (« à évaluer », « répondu », « gagné »… — list editable by admins on `/admin`, every change kept as history in the thread). The dashboard filters by status and can hide rejected avis. `/configuration` (admins, or users delegated the right from `/admin`) edits the pipeline live: search keywords, « toujours garder / toujours exclure » rules, classifier mode, digest window, départements, plus a « Relancer maintenant » button. Threads update in real time through the [Skip](https://skiplabs.io) reactive engine running in-process (WASM) on Postgres LISTEN/NOTIFY; set `LIVE_COMMENTS=0` to disable it (threads then show as unavailable). `/sante` reports `live` (engine up) and `livePg` (its Postgres connection + number of watched tables).
+Deployed, the same pipeline runs daily into PostgreSQL behind a French dashboard (passwordless email-code login). Each avis has a detail page with a **live comment thread** and a **collaborative status** (« à évaluer », « répondu », « gagné »… — list editable by admins on `/admin`, every change kept as history in the thread). The dashboard filters by status and can hide rejected avis. `/configuration` (admins, or users delegated the right from `/admin`) edits the pipeline live: search keywords, « toujours garder / toujours exclure » rules, classifier mode, LLM model chain (with live OpenRouter prices), digest window, départements, plus a « Relancer maintenant » button. Threads update in real time through the [Skip](https://skiplabs.io) reactive engine running in-process (WASM) on Postgres LISTEN/NOTIFY; set `LIVE_COMMENTS=0` to disable it (threads then show as unavailable). `/sante` reports `live` (engine up) and `livePg` (its Postgres connection + number of watched tables).
 
 ## Install
 
@@ -34,8 +34,10 @@ Everything goes in `.env` (auto-loaded by Bun):
 | ------------------- | -------- | ------------------------------------ | --------------------------------------------------------------------------- |
 | `PORTAL_API_URL`    | **yes**  | —                                    | ODS v2.1 datasets base URL, no trailing slash. e.g. `https://<portal>/api/explore/v2.1/catalog/datasets`. |
 | `PORTAL_DATASET`    | **yes**  | —                                    | Dataset id. Run will fail at startup if either is unset.                    |
-| `MISTRAL_API_KEY`   | no       | —                                    | Enables semantic (LLM) and hybrid classifier modes.                         |
-| `MISTRAL_MODEL`     | no       | `mistral-small-latest`               | Any Mistral chat model id.                                                  |
+| `OPENROUTER_API_KEY` | no      | —                                    | Enables semantic (LLM) and hybrid classifier modes.                         |
+| `LLM_MODELS`        | no       | `mistralai/mistral-nemo,…` (see `src/defaults.ts`) | Comma-separated OpenRouter model ids, fallback order (max 5). Overridden by the `/configuration` setting. |
+| `LLM_MAX_PRICE_PER_M` | no     | `1`                                  | Price cap, USD per million tokens, applied to every model of the chain.     |
+| `OPENROUTER_BASE_URL` | no     | `https://openrouter.ai/api/v1`       | Override for tests / a proxy.                                               |
 | `CLASSIFIER`        | no       | `hybrid` if key set, else `regex`    | Override: `regex` \| `llm` \| `hybrid`.                                     |
 | `MAX_PAGES`         | no       | `100`                                | Pagination cap (100 items/page). Stops earlier when results are exhausted.  |
 | `USE_CACHE`         | no       | unset                                | `1` skips the API and re-runs classification on `.cache/scrape.json`.       |
@@ -56,7 +58,7 @@ USE_CACHE=1 bun run src/index.ts
 CLASSIFIER=regex USE_CACHE=1 bun run src/index.ts
 ```
 
-A full run hits the portal API ~30 times (~3 minutes for ~3 000 records over a 14-keyword query) and adds ~€0.01 of Mistral spend per run when the hybrid classifier is on. The classifier retries 408/429/5xx up to four times with exponential backoff so a flaky API doesn't tank the run.
+A full run hits the portal API ~30 times (~3 minutes for ~3 000 records over a 14-keyword query) and adds a fraction of a cent of OpenRouter credit per run with the default chain when the hybrid classifier is on (the exact cost, token counts and which models answered are recorded on each run and shown on `/configuration` and in the digest footer). Each call carries the whole model chain: OpenRouter switches to the next model on outage, rate limit, moderation or context overflow, and the client retries timeouts / 5xx and re-asks the rest of the chain once when a model returns unusable JSON. A dead key, an empty credit or five consecutive chain failures open a circuit breaker: the rest of the run is classified by regex, the run is flagged with a warning, `ALERT_RECIPIENT` gets an email, and the digest is held until the next healthy run.
 
 ## Checks
 
@@ -70,8 +72,8 @@ The unit tests are pure logic (no DB, no network). The second line runs the live
 ## Classifier modes
 
 - **`regex`** — deterministic rules in `src/classify.ts`. Free, instant, reproducible. Good at hard rules (télécom, contrôle de travaux, assurances…). Bad at nuance.
-- **`llm`** — one Mistral call per avis with a few-shot French prompt (`src/classify-llm.ts`). Good at semantic distinctions (e.g. "restructuration des services" vs. physical restructuring). Adds ~€0.01/run and some non-determinism. Occasionally misses hard rules.
-- **`hybrid`** (default when `MISTRAL_API_KEY` is set) — regex first. If the regex confidently labels an avis `excluded` or `travaux`, that stands. Otherwise the LLM makes the final call. Best of both: hard rules are enforced deterministically, borderline cases get semantic judgement. Only the items that pass regex go to the LLM.
+- **`llm`** — one OpenRouter call per avis with a few-shot French prompt (`src/classify-llm.ts`, prompt tuned on mistral-small). Good at semantic distinctions (e.g. "restructuration des services" vs. physical restructuring). Cheap but adds some non-determinism. Occasionally misses hard rules.
+- **`hybrid`** (default when `OPENROUTER_API_KEY` is set) — regex first. If the regex confidently labels an avis `excluded` or `travaux`, that stands. Otherwise the LLM makes the final call. Best of both: hard rules are enforced deterministically, borderline cases get semantic judgement. Only the items that pass regex go to the LLM.
 
 ## Customising the scope
 
@@ -91,7 +93,11 @@ src/
   params.ts           SearchParams type + ODS v2.1 URL builder (where= with search() + date filter)
   scraper.ts          Paginated fetch loop + ODS record → Announcement mapping
   classify.ts         Regex classifier (normalise, hard exclusions, travaux patterns)
-  classify-llm.ts     Mistral classifier (system prompt + few-shot, retry on 5xx)
+  classify-llm.ts     LLM classifier (system prompt + few-shot, per-run context: chain, stats, breaker)
+  llm.ts              OpenRouter client: fallback chain, price-sorted providers, retries, stats, circuit breaker
+  http.ts             postWithRetry shared by llm.ts and email.ts (retries statuses, timeouts and network errors)
+  openrouter-catalog.ts  Public model catalog (prices, JSON support) + key credit, for /configuration
+  eval-llm.ts         `bun run eval`: labelled set × candidate models → accuracy, cost, latency
   classify-hybrid.ts  Regex-then-LLM composition
   pipeline.ts         Shared core: fetch → dedupe → classify (used by CLI and server)
   report.ts           Markdown renderer (sorted by deadline)
@@ -120,7 +126,7 @@ One **Node.js app** (Bun is auto-detected from `bun.lock`; `scripts.start` serve
 
 1. Create a Node.js application (1 instance, smallest size, disable autoscaling) and a PostgreSQL add-on (DEV plan), and link them — this injects `POSTGRESQL_ADDON_URI`.
 2. **Email first**: MailPace token with a DKIM-verified sending domain (the add-on injects no env var — copy the token manually). Login is by emailed code, so a deployed app without working email is unreachable. Smoke-test the token with a curl to `https://app.mailpace.com/api/v1/send` before deploying; a 403 means the domain is not verified.
-3. Set the env vars from `.env.example`: portal + Mistral vars, `MAILPACE_API_TOKEN`, `EMAIL_FROM`, `OTP_PEPPER`, `ADMIN_EMAILS` (your email — seeded as admin at startup), `ALERT_RECIPIENT`, `DASHBOARD_URL`.
+3. Set the env vars from `.env.example`: portal vars, `OPENROUTER_API_KEY` (set it **before** the push: the cron and the « Relancer maintenant » button inherit the app env), `MAILPACE_API_TOKEN`, `EMAIL_FROM`, `OTP_PEPPER`, `ADMIN_EMAILS` (your email — seeded as admin at startup), `ALERT_RECIPIENT`, `DASHBOARD_URL`.
 4. `clever deploy`. Tables are created automatically at startup; `ADMIN_EMAILS` accounts are upserted as admins.
 5. Log in at `/connexion` with your email code, then add teammates from `/admin`.
 6. The cron (`clevercloud/cron.json`) fires every day at 04:30 UTC: scrape → classify → store → digest email. On failure, `ALERT_RECIPIENT` gets an alert email and the dashboard banner turns red.

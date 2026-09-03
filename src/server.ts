@@ -67,7 +67,19 @@ import {
   validateDigestWindow,
   validateClassifierMode,
   parseDepartements,
+  validateModelChain,
+  parseModelChain,
 } from "./rules.ts";
+import { DEFAULT_LLM_MODELS, RECOMMENDED_MODELS } from "./defaults.ts";
+import { llmConfigured, llmStatsSummary, defaultModelChain } from "./llm.ts";
+import {
+  fetchCatalog,
+  fetchKeyCredit,
+  suggestions,
+  priceLabel,
+  creditLabel,
+  type CatalogModel,
+} from "./openrouter-catalog.ts";
 
 // --- Shared rendering -------------------------------------------------------
 
@@ -511,6 +523,22 @@ const CLASSIFIER_LABELS: Array<[string, string]> = [
   ["llm", "LLM seul"],
 ];
 
+// Colonne announcements.classifier -> libellé (voir Classification.classifier).
+function classifierLabel(c: string | null | undefined): string | null {
+  if (!c) return null;
+  if (c === "regex") return "règles regex";
+  if (c === "regle") return "règle personnalisée";
+  if (c === "erreur") return "erreur de classification (revue manuelle)";
+  return `modèle ${c}`;
+}
+
+function llmRunLine(run: RunRow): string {
+  const parts: string[] = [];
+  if (run.llm_stats) parts.push(` — LLM : ${esc(llmStatsSummary(run.llm_stats))}`);
+  if (run.warning) parts.push(`<br><span style="color:var(--ambre);">⚠️ ${esc(run.warning)}</span>`);
+  return parts.join("");
+}
+
 function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude"): string {
   const rows = rules
     .filter((r) => r.kind === kind)
@@ -534,14 +562,18 @@ async function configPage(
   user: AuthUser,
   notice?: { kind: "ok" | "error"; text: string },
 ): Promise<Response> {
-  const [keywords, rules, fenetre, classifieur, departements, lastRun] = await Promise.all([
-    listKeywords(),
-    listScopeRules(),
-    getSetting("digest_window_days"),
-    getSetting("classifier_mode"),
-    getSetting("code_departements"),
-    getLastRun(),
-  ]);
+  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun, catalog, credit] =
+    await Promise.all([
+      listKeywords(),
+      listScopeRules(),
+      getSetting("digest_window_days"),
+      getSetting("classifier_mode"),
+      getSetting("code_departements"),
+      getSetting("llm_models"),
+      getLastRun(),
+      fetchCatalog(),
+      fetchKeyCredit(),
+    ]);
 
   const banner = notice
     ? `<div class="banner ${notice.kind === "ok" ? "ok" : "error"}">${esc(notice.text)}</div>`
@@ -569,9 +601,13 @@ async function configPage(
           ? `démarrée le ${esc(frDateTime(new Date(lastRun.started_at)))}${running ? " — en cours" : " — semble interrompue"}`
           : `${lastRun.status === "success" ? "réussie" : "échouée"} le ${esc(
               frDateTime(new Date(lastRun.finished_at ?? lastRun.started_at)),
-            )}${lastRun.status === "success" ? ` (${lastRun.relevant_count ?? 0} avis pertinents)` : ""}`
+            )}${lastRun.status === "success" ? ` (${lastRun.relevant_count ?? 0} avis pertinents)` : ""}${
+              lastRun.status === "success" ? llmRunLine(lastRun) : ""
+            }`
       }`
     : "Aucune mise à jour n'a encore été effectuée.";
+
+  const llmBlock = renderLlmSettings(modeles, catalog, credit);
 
   const defaultMode = effectiveClassifierDefault();
   const modeOptions = CLASSIFIER_LABELS.map(
@@ -647,6 +683,7 @@ async function configPage(
             )})</option>
             ${modeOptions}
           </select>
+          ${llmBlock}
           <label for="reg-departements" style="margin-top:14px;">Codes département (séparés par des virgules)</label>
           <input type="text" id="reg-departements" name="departements"
                  value="${esc(departements ?? "")}" placeholder="vide = toute la France">
@@ -726,7 +763,7 @@ async function handleRuleDelete(req: Request, _url: URL, user: AuthUser): Promis
 }
 
 async function handleSettingsUpdate(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { fenetre = "", classifieur = "", departements = "" } = await form(req);
+  const { fenetre = "", classifieur = "", departements = "", modeles = "" } = await form(req);
 
   let windowValue: string | null = null;
   if (fenetre.trim() !== "") {
@@ -742,11 +779,89 @@ async function handleSettingsUpdate(req: Request, _url: URL, user: AuthUser): Pr
   }
   const dep = parseDepartements(departements);
   if (!dep.ok) return configPage(user, { kind: "error", text: dep.error });
+  let modelsValue: string | null = null;
+  let catalogNotice: string | null = null;
+  if (modeles.trim() !== "") {
+    const v = validateModelChain(modeles);
+    if (!v.ok) return configPage(user, { kind: "error", text: v.error });
+    // Vérification au catalogue OpenRouter : identifiant connu + mode JSON.
+    // Catalogue injoignable = on accepte la saisie syntaxiquement valide.
+    const catalog = await fetchCatalog();
+    if (catalog) {
+      const problem = checkChainAgainstCatalog(parseModelChain(v.value), catalog);
+      if (problem) return configPage(user, { kind: "error", text: problem });
+    } else {
+      catalogNotice = "Catalogue OpenRouter injoignable : modèles enregistrés sans vérification.";
+    }
+    modelsValue = v.value;
+  }
 
   await setSetting("digest_window_days", windowValue, user.id);
   await setSetting("classifier_mode", modeValue, user.id);
   await setSetting("code_departements", dep.codes.length > 0 ? dep.codes.join(",") : null, user.id);
+  await setSetting("llm_models", modelsValue, user.id);
+  if (catalogNotice) return configPage(user, { kind: "ok", text: `Réglages enregistrés. ${catalogNotice}` });
   return redirect("/configuration", 303);
+}
+
+// Le suffixe :floor / :nitro n'est pas un modèle distinct au catalogue.
+function baseModelId(id: string): string {
+  return id.replace(/:(?:floor|nitro)$/, "");
+}
+
+function checkChainAgainstCatalog(models: string[], catalog: CatalogModel[]): string | null {
+  const byId = new Map(catalog.map((m) => [m.id, m]));
+  for (const id of models) {
+    const m = byId.get(baseModelId(id));
+    if (!m) return `Modèle inconnu sur OpenRouter : « ${id} ».`;
+    if (!m.json) return `Le modèle « ${id} » ne supporte pas le mode JSON (response_format), requis par le classifieur.`;
+  }
+  return null;
+}
+
+// Bloc « Modèles LLM » du formulaire de réglages : champ + suggestions avec
+// prix du jour + crédit restant + avertissement si la clé est absente.
+function renderLlmSettings(
+  modeles: string | null,
+  catalog: CatalogModel[] | null,
+  credit: { usage: number; limit: number | null; remaining: number | null } | null,
+): string {
+  let defaultChain: string[];
+  try {
+    defaultChain = defaultModelChain();
+  } catch {
+    defaultChain = [...DEFAULT_LLM_MODELS];
+  }
+  const current = parseModelChain(modeles);
+  const shown = current.length ? current : defaultChain;
+  const byId = new Map((catalog ?? []).map((m) => [m.id, m]));
+  const chainPrices = shown
+    .map((id) => {
+      const m = byId.get(baseModelId(id));
+      return `<li><code>${esc(id)}</code>${m ? ` — ${esc(priceLabel(m))}` : catalog ? " — <em>inconnu au catalogue</em>" : ""}</li>`;
+    })
+    .join("");
+  const options = catalog
+    ? suggestions(catalog, RECOMMENDED_MODELS, 40)
+        .map((m) => `<option value="${esc(m.id)}">${esc(m.id)} — ${esc(priceLabel(m))}</option>`)
+        .join("")
+    : "";
+  const keyLine = llmConfigured()
+    ? credit
+      ? `<p style="color:var(--encre-2);font-size:13.5px;margin:6px 0 0;">Crédit OpenRouter : ${esc(creditLabel(credit))}.</p>`
+      : ""
+    : `<p style="color:var(--ambre);font-size:13.5px;margin:6px 0 0;">⚠️ LLM indisponible : OPENROUTER_API_KEY absente — les modes « hybride » et « LLM seul » retombent sur les règles regex.</p>`;
+  return `
+          <label for="reg-modeles" style="margin-top:14px;">Modèles LLM (OpenRouter, ordre de repli, séparés par des virgules)</label>
+          <input type="text" id="reg-modeles" name="modeles" list="llm-models-list"
+                 value="${esc(modeles ?? "")}" placeholder="${esc(defaultChain.join(", "))} (par défaut)">
+          <datalist id="llm-models-list">${options}</datalist>
+          <p style="color:var(--encre-2);font-size:13.5px;margin:6px 0 0;">
+            Le premier modèle répond ; les suivants prennent le relais en cas de panne, de limite de débit ou de réponse inexploitable.
+            Chaque modèle est servi par son fournisseur le moins cher.${catalog ? "" : " <em>Catalogue OpenRouter injoignable : prix non affichés.</em>"}
+          </p>
+          <ul style="margin:6px 0 0;padding-left:18px;font-size:13.5px;color:var(--encre-2);">${chainPrices}</ul>
+          ${keyLine}`;
 }
 
 async function handleRelance(_req: Request, _url: URL, user: AuthUser): Promise<Response> {
@@ -958,6 +1073,7 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
     ["Type d'avis", a.type_avis],
     ["Procédure", a.procedure],
     ["Classement", a.reason],
+    ["Classé par", classifierLabel(a.classifier)],
   ];
   const factRows = facts
     .filter(([, v]) => v)

@@ -5,6 +5,9 @@ export type Category = "relevant" | "travaux" | "excluded";
 export type Classification = {
   category: Category;
   reason?: string;
+  // Qui a tranché : "regex", "regle" (règle personnalisée), un identifiant de
+  // modèle OpenRouter, ou "erreur" (défaut « revue manuelle »).
+  classifier?: string;
 };
 
 export function normalize(s: string): string {
@@ -214,6 +217,10 @@ function isAMOForWorks(objetNorm: string): boolean {
 }
 
 export function classify(a: Announcement): Classification {
+  return { ...classifyRegex(a), classifier: "regex" };
+}
+
+function classifyRegex(a: Announcement): Classification {
   const objetNorm = normalize(a.objet);
   const hay = normalize(`${a.objet} ${a.typeAvis} ${a.raw}`);
 

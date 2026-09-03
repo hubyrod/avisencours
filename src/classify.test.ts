@@ -21,6 +21,7 @@ describe("classify", () => {
   test("études de mobilité restent relevant", () => {
     const r = classify(avis("Schéma directeur cyclable départemental et études de faisabilité"));
     expect(r.category).toBe("relevant");
+    expect(r.classifier).toBe("regex");
   });
 
   test("MOE part en travaux", () => {

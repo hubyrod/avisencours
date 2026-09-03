@@ -1,6 +1,7 @@
 import { SQL } from "bun";
 import type { ClassifiedItem } from "./pipeline.ts";
 import { KEYWORDS } from "./defaults.ts";
+import type { LlmStats } from "./llm.ts";
 
 let client: SQL | null = null;
 
@@ -61,6 +62,11 @@ export async function migrate(): Promise<void> {
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS receive_digest boolean NOT NULL DEFAULT false`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_configure boolean NOT NULL DEFAULT false`;
   await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS digest_sent boolean NOT NULL DEFAULT false`;
+  // Classification via OpenRouter : coût/usage du run, avertissement non
+  // bloquant (coupe-circuit, clé absente), et qui a classé chaque avis.
+  await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS llm_stats jsonb`;
+  await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS warning text`;
+  await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS classifier text`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
@@ -179,7 +185,15 @@ export async function startRun(): Promise<number> {
 export async function finishRun(
   id: number,
   outcome:
-    | { status: "success"; totalFetched: number; relevant: number; travaux: number; excluded: number }
+    | {
+        status: "success";
+        totalFetched: number;
+        relevant: number;
+        travaux: number;
+        excluded: number;
+        llmStats?: LlmStats | null;
+        warning?: string | null;
+      }
     | { status: "error"; error: string },
 ): Promise<void> {
   if (outcome.status === "success") {
@@ -188,7 +202,9 @@ export async function finishRun(
         total_fetched = ${outcome.totalFetched},
         relevant_count = ${outcome.relevant},
         travaux_count = ${outcome.travaux},
-        excluded_count = ${outcome.excluded}
+        excluded_count = ${outcome.excluded},
+        llm_stats = ${outcome.llmStats ? JSON.stringify(outcome.llmStats) : null}::jsonb,
+        warning = ${outcome.warning?.slice(0, 2000) ?? null}
       WHERE id = ${id}`;
   } else {
     await db()`
@@ -214,13 +230,13 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
       await tx`
         INSERT INTO announcements (
           idweb, url, objet, acheteur, department, type_avis, procedure,
-          published_at, deadline, deadline_text, category, reason, raw,
+          published_at, deadline, deadline_text, category, reason, classifier, raw,
           first_seen_run_id, last_seen_run_id
         ) VALUES (
           ${it.idweb}, ${it.url}, ${it.objet}, ${it.acheteur}, ${it.department},
           ${it.typeAvis}, ${it.procedure}, ${it.publishedAt},
           ${parseDeadlineText(it.deadline)}, ${it.deadline},
-          ${it.category}, ${it.reason ?? null}, ${it.raw},
+          ${it.category}, ${it.reason ?? null}, ${it.classifier ?? null}, ${it.raw},
           ${runId}, ${runId}
         )
         ON CONFLICT (idweb) DO UPDATE SET
@@ -235,6 +251,7 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
           deadline_text = EXCLUDED.deadline_text,
           category = EXCLUDED.category,
           reason = EXCLUDED.reason,
+          classifier = EXCLUDED.classifier,
           raw = EXCLUDED.raw,
           last_seen_run_id = EXCLUDED.last_seen_run_id`;
     }
@@ -254,6 +271,7 @@ export type StoredAnnouncement = {
   deadline_text: string | null;
   category: string;
   reason: string | null;
+  classifier?: string | null;
   first_seen_run_id: number | null;
   comment_count?: number;
   status_id?: number | null;
@@ -285,6 +303,9 @@ export type RunRow = {
   relevant_count: number | null;
   travaux_count: number | null;
   excluded_count: number | null;
+  digest_sent?: boolean;
+  llm_stats?: LlmStats | null;
+  warning?: string | null;
 };
 
 export async function getLastRun(): Promise<RunRow | null> {

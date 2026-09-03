@@ -1,12 +1,18 @@
 import type { Announcement } from "./scraper.ts";
 import type { Classification } from "./classify.ts";
+import {
+  chatJSON,
+  parseJsonObject,
+  recordCall,
+  LlmContentError,
+  type Msg,
+  type ChatDeps,
+  type LlmStats,
+  type Breaker,
+} from "./llm.ts";
 
-const API_URL = "https://api.mistral.ai/v1/chat/completions";
-
-type Msg = { role: "system" | "user" | "assistant"; content: string };
-
-type MistralChoice = { message: { content: string } };
-type MistralResponse = { choices: MistralChoice[] };
+// Prompt + exemples : indépendants du fournisseur (réglés sur mistral-small ;
+// vérifier avec `bun run eval` avant de changer la tête de chaîne).
 
 const SYSTEM = `Tu classifies des avis de marché public français pour un cabinet de conseil en planification des mobilités.
 
@@ -104,51 +110,43 @@ function formatUser(a: Announcement): string {
   ].join("\n");
 }
 
-const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
-const MAX_ATTEMPTS = 4;
+// Contexte partagé par tous les appels d'un run : chaîne de modèles, compteurs
+// et coupe-circuit (construit une fois dans pipeline.ts).
+export type LlmContext = {
+  models: string[];
+  stats: LlmStats;
+  breaker: Breaker;
+  deps?: ChatDeps;
+};
 
-async function postWithRetry(body: string, key: string, attempt = 1): Promise<MistralResponse> {
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body,
-  });
-  if (res.ok) return (await res.json()) as MistralResponse;
-
-  if (RETRYABLE.has(res.status) && attempt < MAX_ATTEMPTS) {
-    const backoff = 500 * 2 ** (attempt - 1) + Math.random() * 400;
-    await new Promise((r) => setTimeout(r, backoff));
-    return postWithRetry(body, key, attempt + 1);
-  }
-  throw new Error(`Mistral ${res.status}: ${await res.text()}`);
+export function buildMessages(a: Announcement): Msg[] {
+  return [{ role: "system", content: SYSTEM }, ...FEW_SHOT, { role: "user", content: formatUser(a) }];
 }
 
-export async function classifyLLM(a: Announcement): Promise<Classification> {
-  const key = Bun.env.MISTRAL_API_KEY;
-  if (!key) throw new Error("MISTRAL_API_KEY not set");
-  const model = Bun.env.MISTRAL_MODEL ?? "mistral-small-latest";
-
-  const messages: Msg[] = [
-    { role: "system", content: SYSTEM },
-    ...FEW_SHOT,
-    { role: "user", content: formatUser(a) },
-  ];
-
-  const body = JSON.stringify({
-    model,
-    messages,
-    temperature: 0,
-    response_format: { type: "json_object" },
-  });
-
-  const data = await postWithRetry(body, key);
-  const content = data.choices[0]?.message.content ?? "{}";
-
-  const parsed = JSON.parse(content) as { category?: string; reason?: string };
-  const cat = parsed.category;
+// Lève LlmContentError (=> repli client dans chatJSON) si la réponse n'est
+// pas un objet {category, reason} valide.
+export function parseClassification(content: string): { category: Classification["category"]; reason?: string } {
+  const parsed = parseJsonObject(content) as { category?: unknown; reason?: unknown };
+  const cat = parsed?.category;
   if (cat !== "relevant" && cat !== "travaux" && cat !== "excluded") {
-    throw new Error(`Invalid category from LLM: ${JSON.stringify(parsed)}`);
+    throw new LlmContentError(`invalid category from LLM: ${content.slice(0, 200)}`);
   }
+  const reason = typeof parsed.reason === "string" ? parsed.reason.slice(0, 300) : undefined;
+  return { category: cat, reason };
+}
 
-  return { category: cat, reason: parsed.reason };
+export async function classifyLLM(a: Announcement, ctx: LlmContext): Promise<Classification> {
+  try {
+    const r = await chatJSON(
+      { messages: buildMessages(a), models: ctx.models, parse: parseClassification, signal: ctx.breaker.signal },
+      ctx.deps,
+    );
+    recordCall(ctx.stats, r, ctx.models);
+    ctx.breaker.success();
+    return { ...r.value, classifier: r.model };
+  } catch (err) {
+    ctx.stats.errors++;
+    ctx.breaker.failure(err);
+    throw err;
+  }
 }
