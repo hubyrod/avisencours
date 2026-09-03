@@ -159,10 +159,10 @@ async function requestOnce<T>(
     usage: { include: true },
   });
 
-  let res: Response;
+  let text: string;
   let retries: number;
   try {
-    ({ res, retries } = await postWithRetry(
+    ({ text, retries } = await postWithRetry(
       "OpenRouter",
       `${openRouterBaseUrl()}/chat/completions`,
       { headers: openRouterHeaders(key), body },
@@ -184,7 +184,12 @@ async function requestOnce<T>(
     throw err;
   }
 
-  const data = (await res.json()) as OpenRouterResponse;
+  let data: OpenRouterResponse;
+  try {
+    data = JSON.parse(text) as OpenRouterResponse;
+  } catch {
+    throw new LlmContentError(`non-JSON response body: ${text.slice(0, 120)}`);
+  }
   if (data.error) {
     throw new LlmContentError(`OpenRouter error in 200 body: ${data.error.message ?? JSON.stringify(data.error)}`);
   }

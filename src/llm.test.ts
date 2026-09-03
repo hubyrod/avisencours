@@ -157,6 +157,28 @@ describe("chatJSON", () => {
     expect(r.retries).toBe(1);
   });
 
+  test("flux de réponse coupé (délai pendant la lecture du corps) -> réessayé", async () => {
+    const broken = new Response(
+      new ReadableStream({
+        start(c) {
+          c.error(timeoutError());
+        },
+      }),
+      { status: 200 },
+    );
+    const { deps, calls } = fakeFetch([broken, completion('{"x":1}')]);
+    const r = await chatJSON({ messages, models: ["a/one"], parse }, deps);
+    expect(calls).toHaveLength(2);
+    expect(r.retries).toBe(1);
+  });
+
+  test("corps 200 non JSON -> contenu inexploitable (rotation)", async () => {
+    const { deps, calls } = fakeFetch([new Response("<html>gateway</html>", { status: 200 }), completion('{"x":1}', { model: "b/two" })]);
+    const r = await chatJSON({ messages, models: CHAIN, parse }, deps);
+    expect(r.rotated).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+
   test("401 -> LlmAuthError sans réessai", async () => {
     const { deps, calls } = fakeFetch([status(401, "bad key")]);
     await expect(chatJSON({ messages, models: CHAIN, parse }, deps)).rejects.toBeInstanceOf(LlmAuthError);

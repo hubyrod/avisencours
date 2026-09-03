@@ -41,12 +41,15 @@ function combineSignals(timeoutMs: number, external?: AbortSignal): AbortSignal 
   return external ? AbortSignal.any([timeout, external]) : timeout;
 }
 
+// Le corps est lu ici, dans la boucle : le délai (AbortSignal.timeout) couvre
+// aussi le flux de réponse, et une coupure pendant sa lecture est réessayée
+// comme une erreur réseau.
 export async function postWithRetry(
   label: string,
   url: string,
   init: RequestInit,
   opts: RetryOptions = {},
-): Promise<{ res: Response; retries: number }> {
+): Promise<{ res: Response; text: string; retries: number }> {
   const retryable = opts.retryable ?? DEFAULT_RETRYABLE;
   const maxAttempts = opts.attempts ?? 4;
   const timeoutMs = opts.timeoutMs ?? 30_000;
@@ -56,8 +59,10 @@ export async function postWithRetry(
   for (let attempt = 1; ; attempt++) {
     if (opts.signal?.aborted) throw abortError(opts.signal);
     let res: Response;
+    let text: string;
     try {
       res = await fetchImpl(url, { ...init, method: "POST", signal: combineSignals(timeoutMs, opts.signal) });
+      text = await res.text();
     } catch (err) {
       if (opts.signal?.aborted) throw abortError(opts.signal);
       if (attempt < maxAttempts) {
@@ -66,14 +71,14 @@ export async function postWithRetry(
       }
       throw new Error(`${label} unreachable after ${attempt} attempt(s): ${errMessage(err)}`);
     }
-    if (res.ok) return { res, retries: attempt - 1 };
+    if (res.ok) return { res, text, retries: attempt - 1 };
 
     const cap = Math.min(maxAttempts, opts.attemptsFor?.(res.status) ?? maxAttempts);
     if (retryable.has(res.status) && attempt < cap) {
       await sleep(backoffMs(attempt));
       continue;
     }
-    throw new HttpError(label, res.status, await res.text());
+    throw new HttpError(label, res.status, text);
   }
 }
 
