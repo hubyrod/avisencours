@@ -19,14 +19,14 @@ export const KEYWORDS = [
 
 export const DEFAULT_QUERY = KEYWORDS.join(" OR ");
 
-// Chaîne de modèles OpenRouter par défaut, du moins cher au plus sûr :
-// mistral-nemo (~0,02 $/M tokens en entrée), puis le plus proche du modèle
-// historique (mistral-small), puis un autre éditeur pour survivre à une panne
-// Mistral. Surchargée par LLM_MODELS (env) puis par le réglage « llm_models »
-// en base (/configuration). Ordre à confirmer avec `bun run eval`.
+// Chaîne de modèles OpenRouter par défaut. En tête, llama-3.3-70b : 40/40 au
+// banc d'essai (`bun run eval`, 2026-09) pour ~0,10 $/M tokens en entrée, soit
+// moins d'un centime par run. Puis mistral-nemo (38/40, cinq fois moins cher)
+// et un troisième éditeur pour survivre à une panne. Surchargée par
+// LLM_MODELS (env) puis par le réglage « llm_models » en base (/configuration).
 export const DEFAULT_LLM_MODELS: readonly string[] = [
+  "meta-llama/llama-3.3-70b-instruct",
   "mistralai/mistral-nemo",
-  "mistralai/mistral-small-3.2-24b-instruct",
   "google/gemini-2.5-flash-lite",
 ];
 
@@ -35,9 +35,10 @@ export const DEFAULT_LLM_MODELS: readonly string[] = [
 // complète cette liste avec les prix du jour.
 export const RECOMMENDED_MODELS: readonly string[] = [
   ...DEFAULT_LLM_MODELS,
+  "qwen/qwen3-235b-a22b-2507",
+  "mistralai/mistral-small-3.2-24b-instruct",
   "mistralai/mistral-small-24b-instruct-2501",
   "openai/gpt-4.1-nano",
-  "openai/gpt-5-nano",
   "meta-llama/llama-3.1-8b-instruct",
   "qwen/qwen3-30b-a3b-instruct-2507",
 ];

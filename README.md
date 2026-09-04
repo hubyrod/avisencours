@@ -35,7 +35,7 @@ Everything goes in `.env` (auto-loaded by Bun):
 | `PORTAL_API_URL`    | **yes**  | —                                    | ODS v2.1 datasets base URL, no trailing slash. e.g. `https://<portal>/api/explore/v2.1/catalog/datasets`. |
 | `PORTAL_DATASET`    | **yes**  | —                                    | Dataset id. Run will fail at startup if either is unset.                    |
 | `OPENROUTER_API_KEY` | no      | —                                    | Enables semantic (LLM) and hybrid classifier modes.                         |
-| `LLM_MODELS`        | no       | `mistralai/mistral-nemo,…` (see `src/defaults.ts`) | Comma-separated OpenRouter model ids, fallback order (max 5). Overridden by the `/configuration` setting. |
+| `LLM_MODELS`        | no       | `meta-llama/llama-3.3-70b-instruct,…` (see `src/defaults.ts`) | Comma-separated OpenRouter model ids, fallback order (max 5). Overridden by the `/configuration` setting. |
 | `LLM_MAX_PRICE_PER_M` | no     | `1`                                  | Price cap, USD per million tokens, applied to every model of the chain.     |
 | `OPENROUTER_BASE_URL` | no     | `https://openrouter.ai/api/v1`       | Override for tests / a proxy.                                               |
 | `CLASSIFIER`        | no       | `hybrid` if key set, else `regex`    | Override: `regex` \| `llm` \| `hybrid`.                                     |
@@ -58,7 +58,7 @@ USE_CACHE=1 bun run src/index.ts
 CLASSIFIER=regex USE_CACHE=1 bun run src/index.ts
 ```
 
-A full run hits the portal API ~30 times (~3 minutes for ~3 000 records over a 14-keyword query) and adds a fraction of a cent of OpenRouter credit per run with the default chain when the hybrid classifier is on (the exact cost, token counts and which models answered are recorded on each run and shown on `/configuration` and in the digest footer). Each call carries the whole model chain: OpenRouter switches to the next model on outage, rate limit, moderation or context overflow, and the client retries timeouts / 5xx and re-asks the rest of the chain once when a model returns unusable JSON. A dead key, an empty credit or five consecutive chain failures open a circuit breaker: the rest of the run is classified by regex, the run is flagged with a warning, `ALERT_RECIPIENT` gets an email, and the digest is held until the next healthy run.
+A full run hits the portal API ~30 times (~3 minutes for ~3 000 records over a 14-keyword query) and adds about half a cent of OpenRouter credit per run with the default chain (llama-3.3-70b, 40/40 on `bun run eval`) when the hybrid classifier is on (the exact cost, token counts and which models answered are recorded on each run and shown on `/configuration` and in the digest footer). Each call carries the whole model chain: OpenRouter switches to the next model on outage, rate limit, moderation or context overflow, and the client retries timeouts / 5xx and re-asks the rest of the chain once when a model returns unusable JSON. A dead key, an empty credit or five consecutive chain failures open a circuit breaker: the rest of the run is classified by regex, the run is flagged with a warning, `ALERT_RECIPIENT` gets an email, and the digest is held until the next healthy run.
 
 ## Checks
 
