@@ -30,7 +30,7 @@ CI (`.github/workflows/ci.yml`) runs those four checks on every push/PR to `main
 
 `PORTAL_API_URL` and `PORTAL_DATASET` are required for anything that fetches (checked when the API URL is built, in `src/params.ts`). `OPENROUTER_API_KEY` is optional; without it the classifier falls back to `regex` (the config page shows a warning; a run that asked for llm/hybrid records a `warning` and mails `ALERT_RECIPIENT`). Email vars (`MAILPACE_API_TOKEN`…) are optional in dev — the daily job logs and skips emails, and login codes are printed to stderr instead of sent (in production working email is mandatory: login happens by emailed code). `OTP_PEPPER` is required in production (production = `DASHBOARD_URL` starts with `https://`). See `.env.example` for the full list.
 
-A fresh (non-cached) run takes ~3 minutes and ~30 API calls; hybrid/llm modes spend about half a cent of OpenRouter credit with the default chain (cost/tokens/models are recorded per run in `runs.llm_stats`). Prefer `USE_CACHE=1` during development. For local DB testing, a throwaway Postgres database + `POSTGRESQL_ADDON_URI=postgresql://<user>@localhost:5432/<db>` works; tables are auto-created.
+A fresh (non-cached) run takes ~3 minutes and ~30 API calls; hybrid/llm modes send ~2 000 avis (~2.4 M prompt tokens) to the LLM, about 5 cents of OpenRouter credit per run with the default chain (cost/tokens/models are recorded per run in `runs.llm_stats`). Prefer `USE_CACHE=1` during development. For local DB testing, a throwaway Postgres database + `POSTGRESQL_ADDON_URI=postgresql://<user>@localhost:5432/<db>` works; tables are auto-created.
 
 ## Architecture
 

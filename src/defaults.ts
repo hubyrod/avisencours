@@ -21,7 +21,8 @@ export const DEFAULT_QUERY = KEYWORDS.join(" OR ");
 
 // Chaîne de modèles OpenRouter par défaut, ordonnée par prix : le banc d'essai
 // (`bun run eval`, 2026-09) donne mistral-nemo à 39/40 pour 0,019 $/M tokens
-// en entrée — le modèle JSON le moins cher du catalogue. Puis mistral-small-24b
+// en entrée — le modèle JSON le moins cher du catalogue (~5 centimes par
+// run quotidien de ~2 000 appels). Puis mistral-small-24b
 // (39/40, 0,05 $/M) et llama-3.1-8b (37/40, 0,05 $/M, autre éditeur) pour
 // survivre à une panne. llama-3.3-70b (40/40) coûte cinq fois plus cher.
 // Surchargée par LLM_MODELS (env) puis par le réglage « llm_models » en base
