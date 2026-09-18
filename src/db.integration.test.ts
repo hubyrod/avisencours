@@ -92,6 +92,28 @@ if (!TEST_URL) {
       expect(await db.isRunLockHeld()).toBe(false);
     });
 
+    test("battement de cœur et session zombie tenant le verrou", async () => {
+      const now = Date.now();
+      const fresh = {
+        id: 1, started_at: new Date(now - 3_600_000), finished_at: null, status: "running", error: null,
+        total_fetched: null, relevant_count: null, travaux_count: null, excluded_count: null,
+        progress: { steps: [], updatedAt: new Date(now - 60_000).toISOString() },
+      };
+      expect(db.heartbeatStale(fresh, now)).toBe(false);
+      expect(db.heartbeatStale({ ...fresh, progress: { steps: [], updatedAt: new Date(now - 11 * 60_000).toISOString() } }, now)).toBe(true);
+      expect(db.heartbeatStale({ ...fresh, progress: null }, now)).toBe(true); // repli : started_at, il y a 1 h
+      expect(db.heartbeatStale({ ...fresh, progress: null, started_at: new Date(now - 60_000) }, now)).toBe(false);
+
+      // Une troisième connexion joue le processus mort qui garde le verrou.
+      const zombie = new SQL(TEST_URL);
+      await zombie`SELECT pg_advisory_lock(823741)`;
+      expect(await db.isRunLockHeld()).toBe(true);
+      expect(await db.terminateRunLockHolders()).toBe(1);
+      expect(await db.isRunLockHeld()).toBe(false);
+      expect(await db.tryAcquireRunLock()).toBe(true);
+      await zombie.close().catch(() => {});
+    });
+
     test("startRun clôt les lignes « running » abandonnées", async () => {
       await control`INSERT INTO runs (status) VALUES ('running')`;
       const id = await db.startRun();

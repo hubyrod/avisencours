@@ -198,6 +198,34 @@ export async function isRunLockHeld(): Promise<boolean> {
   return Number(rows[0]?.n ?? 0) > 0;
 }
 
+// Un processus tué net (instance arrêtée par un redéploiement) laisse sa
+// session Postgres — et le verrou — en vie jusqu'à ce que le serveur détecte
+// la coupure TCP, parfois plus d'une demi-heure (vu le 18/09/2026 : run 68
+// tué à 17:29, verrou encore visible à 17:52). Le verrou seul ne suffit donc
+// pas : le job bat aussi le cœur dans runs.progress.updatedAt (au moins toutes
+// les deux secondes en activité). Sans battement depuis HEARTBEAT_STALE_MS, la
+// session qui tient le verrou est un zombie : on la termine pour libérer le
+// verrou, sinon le run suivant ne pourrait pas démarrer.
+export const HEARTBEAT_STALE_MS = 10 * 60_000;
+
+export function lastHeartbeat(run: RunRow): number {
+  const beat = run.progress?.updatedAt ? new Date(run.progress.updatedAt).getTime() : NaN;
+  return Number.isFinite(beat) ? beat : new Date(run.started_at).getTime();
+}
+
+export function heartbeatStale(run: RunRow, now: number = Date.now()): boolean {
+  return now - lastHeartbeat(run) > HEARTBEAT_STALE_MS;
+}
+
+export async function terminateRunLockHolders(): Promise<number> {
+  const rows = await db()`
+    SELECT pg_terminate_backend(l.pid) AS ok FROM pg_locks l
+    WHERE l.locktype = 'advisory' AND l.granted
+      AND l.classid = ${Math.floor(RUN_LOCK_ID / 2 ** 32)} AND l.objid = ${RUN_LOCK_ID % 2 ** 32} AND l.objsubid = 1
+      AND l.pid <> pg_backend_pid()`;
+  return (rows as Array<{ ok: boolean }>).filter((r) => r.ok).length;
+}
+
 // Ligne(s) « running » sans processus derrière — mise à jour manuelle tuée par
 // un redéploiement, instance arrêtée… — clôturée(s) en erreur. Sans danger
 // tant que le verrou n'est pas tenu (ou que l'appelant le tient lui-même).

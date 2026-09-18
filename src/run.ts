@@ -12,6 +12,9 @@ import {
   listKeywords,
   listScopeRules,
   getSetting,
+  getLastRun,
+  heartbeatStale,
+  terminateRunLockHolders,
 } from "./db.ts";
 import {
   buildQueryFromKeywords,
@@ -73,8 +76,17 @@ async function main() {
   await migrate();
 
   if (!(await tryAcquireRunLock())) {
-    console.error("another run is already in progress — skipping");
-    return;
+    // Verrou tenu par une session zombie (processus tué, cf. db.ts) ? On la
+    // termine et on réessaie une fois ; sinon un run tourne vraiment.
+    const last = await getLastRun();
+    if (last?.status === "running" && heartbeatStale(last)) {
+      const n = await terminateRunLockHolders();
+      console.error(`run #${last.id}: verrou tenu sans battement — ${n} session(s) zombie terminée(s)`);
+    }
+    if (!(await tryAcquireRunLock())) {
+      console.error("another run is already in progress — skipping");
+      return;
+    }
   }
 
   const runId = await startRun();

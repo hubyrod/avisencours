@@ -177,7 +177,8 @@ if (!TEST_URL) {
         { id: "maximilien", label: "Maximilien", status: "running", done: 8, total: 22, unit: "pages", startedAt: "2026-09-18T10:12:00Z" },
         { id: "classify", label: "Classement", status: "pending", unit: "avis" },
       ],
-      updatedAt: "2026-09-18T10:13:00Z",
+      // Battement récent : sans lui, le verrou tenu passerait pour un zombie.
+      updatedAt: new Date().toISOString(),
     };
     await control`SELECT pg_advisory_lock(823741)`;
     try {

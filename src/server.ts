@@ -9,6 +9,9 @@ import {
   countCurrentBySource,
   isRunLockHeld,
   closeOrphanRuns,
+  heartbeatStale,
+  terminateRunLockHolders,
+  HEARTBEAT_STALE_MS,
   type SourceCount,
   getCurrent,
   getAnnouncement,
@@ -521,7 +524,15 @@ const RUN_STALE_MS = 60 * 60_000;
 async function runInFlight(lastRun: RunRow | null): Promise<boolean> {
   if (lastRun === null || lastRun.status !== "running") return false;
   try {
-    if (await isRunLockHeld()) return true;
+    if (await isRunLockHeld()) {
+      if (!heartbeatStale(lastRun)) return true;
+      // Verrou tenu mais plus aucun battement de cœur : session zombie d'un
+      // processus tué (voir db.ts) — on la termine pour libérer le verrou.
+      const n = await terminateRunLockHolders();
+      console.error(
+        `run #${lastRun.id}: verrou tenu sans battement depuis plus de ${HEARTBEAT_STALE_MS / 60_000} min — ${n} session(s) zombie terminée(s)`,
+      );
+    }
     const closed = await closeOrphanRuns();
     if (closed) console.error(`run #${lastRun.id}: ligne « running » sans verrou — clôturée en erreur`);
     return false;
