@@ -42,14 +42,17 @@ export function matchKeywords(text: string, keywords: readonly string[]): string
   return keywords.filter((k) => keywordRegex(k).test(hay));
 }
 
-const KIOMDA_OBJET = /\b(compteur|capteur|comptage|comptabilis)/;
-const KIOMDA_CIBLE = /\b(velo|cycl|pieton|marche|trafic|routier|mobilite|deplacement|frequentation|circulation|vehicule)/;
+const KIOMDA_OBJET = /\b(compteur|capteur|comptage|comptabilis|boucle|pyroelectr|piezoelectr)/;
+const KIOMDA_CIBLE = /\b(velo|cycl|pieton|marcheur|trafic|routier|mobilite|deplacement|frequentation|circulation|vehicule)/;
 const TRAVAUX_SIMPLE = /\b(travaux|maitrise d'oeuvre|moe\b|construction|realisation d'ouvrage)/;
 
-// Classement des familles hors mobilité — règle pure, sans LLM.
+// Classement des familles hors mobilité — règle pure, sans LLM. Les règles ne
+// lisent que l'intitulé : le descriptif complet d'un avis (Marchés Online en
+// donne 3 000 caractères) cite presque toujours « marché », « travaux » ou
+// « véhicule », ce qui rendrait les motifs muets.
 export function classifyFamille(famille: Famille, a: Announcement): Classification | null {
   if (famille === "mobilité") return null;
-  const hay = normalize(`${a.objet} ${a.raw}`);
+  const hay = normalize(a.objet);
   if (famille === "kiomda") {
     if (KIOMDA_OBJET.test(hay) && KIOMDA_CIBLE.test(hay)) {
       return { category: "relevant", reason: "fourniture de compteurs / capteurs (Kiomda)", classifier: "regex" };

@@ -1,8 +1,9 @@
-import { ACHATPUBLIC_SEARCHES, MPE_SEARCHES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
+import { ACHATPUBLIC_SEARCHES, MARCHESONLINE_SEARCHES, MPE_SEARCHES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
 import { scrapeAll, type Announcement } from "./scraper.ts";
 import { scrapeAchatPublic } from "./achatpublic.ts";
 import { scrapeAfd } from "./afd.ts";
 import { MPE_SITES, scrapeMpe } from "./mpe.ts";
+import { scrapeMarchesOnline } from "./marchesonline.ts";
 import { classifyFamille } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM, type LlmContext } from "./classify-llm.ts";
@@ -42,6 +43,7 @@ export type PipelineOptions = {
   achatPublic?: boolean;
   afd?: boolean;
   mpe?: boolean;
+  marchesOnline?: boolean;
   log?: (msg: string) => void;
 };
 
@@ -152,6 +154,9 @@ async function loadAll(
     if (opts.mpe ?? Bun.env[site.env] !== "0") {
       sources.push({ name: site.name, run: () => scrapeMpe({ site, searches: MPE_SEARCHES, log }) });
     }
+  }
+  if (opts.marchesOnline ?? Bun.env.MARCHESONLINE !== "0") {
+    sources.push({ name: "Marchés Online", run: () => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log }) });
   }
   const secondary = await scrapeSecondary(sources, opts.codeDepartement, log);
   const ids = new Set(boamp.map((it) => it.idweb));

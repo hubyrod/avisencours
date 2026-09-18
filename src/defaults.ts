@@ -110,6 +110,31 @@ export const MPE_SEARCHES: readonly FamilleSearch[] = [
   { famille: "inondations", marche: "services", keywords: MPE_INONDATIONS },
 ];
 
+// Recherches Marchés Online (src/marchesonline.ts) : les cinq « profils de
+// recherche » de la procédure du cabinet (EXPLAIN Etudes / Planif / Planif 2 /
+// planif 3 / Services) fondus en une liste, plus Kiomda (compteurs : le site
+// est parcouru mot-clé par mot-clé, la nature se filtre sur la carte).
+export const MARCHESONLINE_SEARCHES: readonly FamilleSearch[] = [
+  {
+    famille: "mobilité",
+    marche: "services",
+    keywords: [
+      "vélo", "doux", "ferroviaire", "mobilité", "transport", "déplacement",
+      "planification", "trafic", "circulation", "microsimulation", "modélisation",
+      "PDU", "TCSP", "marchandises", "fret", "multimodal", "gare", "échange",
+      "jalonnement", "enquête", "covoiturage", "tarif", "cyclable", "itinéraire",
+      "schéma", "signalisation", "voie verte", "stationnement", "actifs", "piéton",
+      "autopartage", "accessibilité", "ZFE",
+    ],
+  },
+  {
+    famille: "kiomda",
+    marche: "fournitures",
+    keywords: ["compteur", "capteur", "boucle", "pyroélectrique", "piézoélectrique"],
+  },
+  { famille: "inondations", marche: "services", keywords: MPE_INONDATIONS },
+];
+
 export function today(): string {
   return new Date().toISOString().slice(0, 10);
 }

@@ -17,7 +17,7 @@ export type Announcement = {
   famille: Famille;
 };
 
-export type Source = "boamp" | "achatpublic" | "afd" | "maximilien" | "ampa";
+export type Source = "boamp" | "achatpublic" | "afd" | "maximilien" | "ampa" | "marchesonline";
 
 export const SOURCE_LABELS: Record<Source, string> = {
   boamp: "BOAMP",
@@ -25,6 +25,7 @@ export const SOURCE_LABELS: Record<Source, string> = {
   afd: "AFD (dgMarket)",
   maximilien: "Maximilien",
   ampa: "Marchés publics d'Aquitaine",
+  marchesonline: "Marchés Online (Le Moniteur)",
 };
 
 type OdsRecord = {

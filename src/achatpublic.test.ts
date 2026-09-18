@@ -225,6 +225,11 @@ describe("classifyFamille", () => {
     expect(classifyFamille("kiomda", { ...base, objet: "Fourniture de compteurs d'eau", raw: "", famille: "kiomda" })?.category).toBe("excluded");
     expect(classifyFamille("kiomda", { ...base, objet: "Acquisition de vélos électriques", raw: "", famille: "kiomda" })?.category).toBe("excluded");
   });
+  test("les règles ne lisent que l'intitulé (le descriptif cite « marché », « travaux »…)", () => {
+    const raw = "Le présent marché porte sur la fourniture… véhicules de service… travaux de pose";
+    expect(classifyFamille("kiomda", { ...base, objet: "Fourniture de compteurs d'eau", raw, famille: "kiomda" })?.category).toBe("excluded");
+    expect(classifyFamille("inondations", { ...base, objet: "Étude pour la mise en place d'un PAPI 2", raw, famille: "inondations" })?.category).toBe("relevant");
+  });
   test("inondations : étude gardée, travaux écartés", () => {
     expect(classifyFamille("inondations", { ...base, objet: "AMC du PAPI de la Vézère", raw: "", famille: "inondations" })?.category).toBe("relevant");
     expect(classifyFamille("inondations", { ...base, objet: "Travaux de protection contre les inondations (PAPI)", raw: "", famille: "inondations" })?.category).toBe("travaux");
