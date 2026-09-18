@@ -223,7 +223,14 @@ export async function terminateRunLockHolders(): Promise<number> {
     WHERE l.locktype = 'advisory' AND l.granted
       AND l.classid = ${Math.floor(RUN_LOCK_ID / 2 ** 32)} AND l.objid = ${RUN_LOCK_ID % 2 ** 32} AND l.objsubid = 1
       AND l.pid <> pg_backend_pid()`;
-  return (rows as Array<{ ok: boolean }>).filter((r) => r.ok).length;
+  const n = (rows as Array<{ ok: boolean }>).filter((r) => r.ok).length;
+  // pg_terminate_backend est asynchrone : le verrou tombe quand la session
+  // s'arrête, quelques millisecondes plus tard. On attend (2 s max) pour que
+  // l'appelant puisse reprendre le verrou tout de suite.
+  for (let i = 0; n > 0 && i < 40 && (await isRunLockHeld()); i++) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return n;
 }
 
 // Ligne(s) « running » sans processus derrière — mise à jour manuelle tuée par
@@ -407,6 +414,11 @@ function toRunRow(row: Record<string, unknown> | undefined): RunRow | null {
 
 export async function getLastRun(): Promise<RunRow | null> {
   const rows = await db()`SELECT * FROM runs ORDER BY id DESC LIMIT 1`;
+  return toRunRow(rows[0] as Record<string, unknown> | undefined);
+}
+
+export async function getRun(id: number): Promise<RunRow | null> {
+  const rows = await db()`SELECT * FROM runs WHERE id = ${id}`;
   return toRunRow(rows[0] as Record<string, unknown> | undefined);
 }
 

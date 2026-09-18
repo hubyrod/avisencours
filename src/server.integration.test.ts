@@ -199,12 +199,29 @@ if (!TEST_URL) {
       const sante = JSON.parse((await get("/sante")).text);
       expect(sante.lastRun.status).toBe("running");
       expect(sante.lastRun.progress.steps).toHaveLength(5);
+
+      // Suivi en direct : la page embarque la config du script, le fragment
+      // rendu par le serveur suit l'état, le flux répond 503 sans moteur Skip.
+      expect(conf.text).toContain('id="cfg-maj"');
+      expect(home.text).toContain('id="bandeau-maj"');
+      const runId = sante.lastRun.id;
+      const frag = JSON.parse((await get(`/mise-a-jour/${runId}/fragment`)).text);
+      expect(frag.running).toBe(true);
+      expect(frag.card).toContain("8 / 22 pages");
+      expect(frag.card).toContain("Relancer maintenant");
+      expect(frag.banner).toContain("Maximilien 8 / 22 pages");
+      expect((await get(`/mise-a-jour/${runId}/flux`)).status).toBe(503);
+      expect((await get("/mise-a-jour/abc/fragment")).status).toBe(404);
     } finally {
       await control`SELECT pg_advisory_unlock(823741)`;
     }
-    // Verrou relâché : la ligne est clôturée au prochain affichage, comme avant.
+    // Verrou relâché : le fragment répond « terminé » (la page se recharge) et
+    // la ligne est clôturée, comme avant.
+    const lastId = JSON.parse((await get("/sante")).text).lastRun.id;
+    expect(JSON.parse((await get(`/mise-a-jour/${lastId}/fragment`)).text).running).toBe(false);
     const conf = await get("/configuration");
     expect(conf.text).not.toContain("Mise à jour en cours");
+    expect(conf.text).not.toContain('id="cfg-maj"');
     const rows = (await control`SELECT status FROM runs ORDER BY id DESC LIMIT 1`) as Array<{ status: string }>;
     expect(rows[0]!.status).toBe("error");
   });

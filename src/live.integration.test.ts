@@ -270,7 +270,7 @@ describe.skipIf(!TEST_URL)("moteur Skip complet (startLive + flux SSE)", () => {
     await dbmod.migrate();
     // statuses aussi : migrate() la réensemence quand elle est vide, ce qui remet
     // le libellé sondé plus bas à sa valeur d'origine même après un échec.
-    await control`TRUNCATE comments, status_events, announcements, users, statuses RESTART IDENTITY CASCADE`;
+    await control`TRUNCATE comments, status_events, announcements, runs, users, statuses RESTART IDENTITY CASCADE`;
     await dbmod.migrate();
     const [u] = (await control`
       INSERT INTO users (email, name) VALUES ('ana@example.com', 'Ana') RETURNING id
@@ -334,7 +334,7 @@ describe.skipIf(!TEST_URL)("moteur Skip complet (startLive + flux SSE)", () => {
     // son LISTEN est perdue — limite connue du patch, d'où l'attente ici.
     await waitFor(() => {
       const st = live.liveAdapterState();
-      return st.connected && st.watched === 4;
+      return st.connected && st.watched === 5;
     }, RECONNECT_TIMEOUT, "LISTEN rétablis sur les 4 tables");
 
     // Un renommage de statut (table jointe, pas la table du fil) se propage en direct.
@@ -356,6 +356,49 @@ describe.skipIf(!TEST_URL)("moteur Skip complet (startLive + flux SSE)", () => {
 
     abort.abort();
   }, 60_000);
+
+  test("ressource run : init, mise à jour de la progression, fin de run, id inconnu", async () => {
+    const [row] = (await control`INSERT INTO runs (status, progress) VALUES ('running', ${JSON.stringify({
+      steps: [{ id: "boamp", label: "BOAMP", status: "running", done: 3, total: 68, unit: "pages" }],
+      updatedAt: new Date().toISOString(),
+    })}::text::jsonb) RETURNING id`) as Array<{ id: string }>;
+    const id = String(row!.id);
+    const abort = new AbortController();
+    const res = await live.runStream(new Request("http://local/mise-a-jour/flux", { signal: abort.signal }), id);
+    expect(res.status).toBe(200);
+    const reader = sseReader(res);
+    const view = async (pred: (v: any) => boolean, label: string) => {
+      for (;;) {
+        const ev = await withTimeout(reader.next(), 10_000, label);
+        if (ev.event !== "init" && ev.event !== "update") continue;
+        const entries = JSON.parse(ev.data) as Array<[string, unknown[]]>;
+        const v = entries.find(([k]) => k === id)?.[1]?.[0];
+        if (v && pred(v)) return v as any;
+      }
+    };
+    const init = await view((v) => v.status === "running", "init du run");
+    expect(init.id).toBe(id);
+    expect(init.progress.steps[0].done).toBe(3);
+
+    await dbmod.updateRunProgress(Number(id), {
+      steps: [{ id: "boamp", label: "BOAMP", status: "running", done: 40, total: 68, unit: "pages" }],
+      updatedAt: new Date().toISOString(),
+    });
+    const upd = await view((v) => v.progress?.steps?.[0]?.done === 40, "progression mise à jour");
+    expect(upd.status).toBe("running");
+
+    await dbmod.finishRun(Number(id), { status: "success", totalFetched: 1, relevant: 1, travaux: 0, excluded: 0 });
+    const fin = await view((v) => v.status === "success", "fin de run");
+    expect(fin.finished_at).not.toBeNull();
+    abort.abort();
+
+    const abort2 = new AbortController();
+    const res2 = await live.runStream(new Request("http://local/x", { signal: abort2.signal }), "999999");
+    const first = await withTimeout(sseReader(res2).next(), 10_000, "init id inconnu");
+    expect(first.event).toBe("init");
+    expect(JSON.parse(first.data)).toEqual([]);
+    abort2.abort();
+  }, 30_000);
 
   test("un second abonné sur le même avis reçoit l'état courant à l'init", async () => {
     const abort = new AbortController();

@@ -6,6 +6,7 @@ import {
   migrate,
   getLastRun,
   getLastSuccessfulRun,
+  getRun,
   countCurrentBySource,
   isRunLockHeld,
   closeOrphanRuns,
@@ -40,7 +41,7 @@ import {
   type StatusRow,
   type ScopeRuleRow,
 } from "./db.ts";
-import { startLive, isLiveReady, liveAdapterState, commentStream } from "./live.ts";
+import { startLive, isLiveReady, liveAdapterState, commentStream, runStream } from "./live.ts";
 import { frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
 import { matchPath } from "./router.ts";
 import {
@@ -646,6 +647,100 @@ function renderProgress(run: RunRow | null, live: boolean): string {
         <ul class="etapes">${rows}</ul>`;
 }
 
+// Contenu de la carte « Mise à jour » pendant un run : servi dans la page et
+// re-servi par /mise-a-jour/:id/fragment à chaque événement du flux Skip.
+function renderRunCard(run: RunRow, runLine: string): string {
+  return `<p>${runLine}</p>
+        <div class="banner ok">Mise à jour en cours… La progression se met à jour en direct.</div>
+        ${renderProgress(run, true)}
+        <div class="actions"><button class="primary" disabled>Relancer maintenant</button></div>`;
+}
+
+function runLineFor(run: RunRow, running: boolean): string {
+  return `Dernière mise à jour&nbsp;: ${
+    run.status === "running"
+      ? `démarrée le ${esc(frDateTime(new Date(run.started_at)))}${running ? " — en cours" : " — semble interrompue"}`
+      : `${run.status === "success" ? "réussie" : "échouée"} le ${esc(frDateTime(new Date(run.finished_at ?? run.started_at)))}${
+          run.status === "success" ? ` (${run.relevant_count ?? 0} avis pertinents)` : ""
+        }${run.status === "success" ? llmRunLine(run) : ""}`
+  }`;
+}
+
+// Script de suivi en direct : ouvre le flux Skip du run, et à chaque événement
+// va chercher le fragment rendu par le serveur (le rendu reste côté serveur —
+// aucune logique d'affichage dupliquée). Fin de run : un rechargement, pour que
+// le récapitulatif, les comptes par source et le bouton viennent du serveur.
+// Flux indisponible avant le premier événement : repli sur un rechargement
+// toutes les 15 s (et <noscript> garde le meta refresh).
+const PROGRESS_JS = String.raw`
+(function () {
+  const cfg = JSON.parse(document.getElementById("cfg-maj").textContent);
+  const cible = document.getElementById(cfg.cible);
+  if (!cible) return;
+  let gotInit = false;
+  let reloading = false;
+  let enCours = false;
+  const reload = () => { if (!reloading) { reloading = true; location.reload(); } };
+  const fallback = () => setTimeout(reload, 15000);
+  if (!window.EventSource) { fallback(); return; }
+  const rafraichir = async () => {
+    if (enCours || reloading) return;
+    enCours = true;
+    try {
+      const res = await fetch(cfg.fragment, { headers: { Accept: "application/json" } });
+      if (!res.ok) throw new Error(String(res.status));
+      const d = await res.json();
+      if (!d.running) { reload(); return; }
+      const html = cfg.champ === "bandeau" ? d.banner : d.card;
+      if (typeof html === "string") cible.innerHTML = html;
+    } catch (e) {
+      // le serveur ne répond pas : on retentera au prochain événement
+    } finally {
+      enCours = false;
+    }
+  };
+  const es = new EventSource(cfg.flux);
+  const onEvent = (e) => {
+    let entries;
+    try { entries = JSON.parse(e.data); } catch { return; }
+    if (e.type === "init") gotInit = true;
+    if (!Array.isArray(entries) || entries.length === 0) return; // maintien de connexion
+    rafraichir();
+  };
+  es.addEventListener("init", onEvent);
+  es.addEventListener("update", onEvent);
+  es.onerror = () => { if (!gotInit) { es.close(); fallback(); } };
+})();
+`;
+
+function progressClient(run: RunRow, cible: "maj-carte" | "bandeau-maj"): string {
+  const cfg = {
+    runId: String(run.id),
+    flux: `/mise-a-jour/${encodeURIComponent(String(run.id))}/flux`,
+    fragment: `/mise-a-jour/${encodeURIComponent(String(run.id))}/fragment`,
+    cible,
+    champ: cible === "bandeau-maj" ? "bandeau" : "card",
+  };
+  return `<script type="application/json" id="cfg-maj">${jsonBlob(cfg)}</script>
+      <script>${PROGRESS_JS}</script>`;
+}
+
+// JSON { running, card, banner } pour le run demandé : « running » passe par
+// runInFlight (verrou + battement), donc un run zombie est détecté ici aussi
+// et la page se recharge sur l'état final rendu par le serveur.
+async function handleRunFragment(id: string): Promise<Response> {
+  const n = Number(id);
+  const run = Number.isInteger(n) && n > 0 ? await getRun(n) : null;
+  if (!run) return Response.json({ running: false, card: "", banner: "" }, { status: 404 });
+  const running = await runInFlight(run);
+  const lastSuccess = await getLastSuccessfulRun();
+  return Response.json({
+    running,
+    card: running ? renderRunCard(run, runLineFor(run, true)) : "",
+    banner: running ? banner(run, lastSuccess, true) : "",
+  });
+}
+
 function llmRunLine(run: RunRow): string {
   const parts: string[] = [];
   if (run.llm_stats) parts.push(` — LLM : ${esc(llmStatsSummary(run.llm_stats))}`);
@@ -713,17 +808,7 @@ async function configPage(
   const running = await runInFlight(lastRun0);
   // La ligne a pu être clôturée à l'instant : on relit pour l'afficher juste.
   const lastRun = running || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
-  const runLine = lastRun
-    ? `Dernière mise à jour&nbsp;: ${
-        lastRun.status === "running"
-          ? `démarrée le ${esc(frDateTime(new Date(lastRun.started_at)))}${running ? " — en cours" : " — semble interrompue"}`
-          : `${lastRun.status === "success" ? "réussie" : "échouée"} le ${esc(
-              frDateTime(new Date(lastRun.finished_at ?? lastRun.started_at)),
-            )}${lastRun.status === "success" ? ` (${lastRun.relevant_count ?? 0} avis pertinents)` : ""}${
-              lastRun.status === "success" ? llmRunLine(lastRun) : ""
-            }`
-      }`
-    : "Aucune mise à jour n'a encore été effectuée.";
+  const runLine = lastRun ? runLineFor(lastRun, running) : "Aucune mise à jour n'a encore été effectuée.";
 
   const llmBlock = renderLlmSettings(modeles, catalog, credit);
 
@@ -741,7 +826,7 @@ async function configPage(
       <h2 class="titre-page">Configuration de la veille</h2>
       <p class="retour"><a href="/">← Retour aux avis</a></p>
       ${banner}
-      ${running ? '<meta http-equiv="refresh" content="15">' : ""}
+      ${running ? '<noscript><meta http-equiv="refresh" content="15"></noscript>' : ""}
 
       <div class="card" style="margin:16px 0;max-width:640px;">
         <h2>Mots-clés de recherche</h2>
@@ -813,13 +898,12 @@ async function configPage(
 
       <div class="card" style="margin:16px 0;max-width:640px;">
         <h2>Mise à jour</h2>
-        <p>${runLine}</p>
         ${
           running
-            ? `<div class="banner ok">Mise à jour en cours… Cette page se rafraîchit toutes les 15 secondes.</div>
-               ${renderProgress(lastRun, true)}
-               <div class="actions"><button class="primary" disabled>Relancer maintenant</button></div>`
-            : `${renderProgress(lastRun, false)}
+            ? `<div id="maj-carte">${renderRunCard(lastRun!, runLine)}</div>
+               ${progressClient(lastRun!, "maj-carte")}`
+            : `<p>${runLine}</p>
+               ${renderProgress(lastRun, false)}
                <p style="color:var(--encre-2);font-size:13.5px;">
                  Lance immédiatement une récupération et un reclassement des avis
                  (35 à 45 minutes avec toutes les sources). Aucun email n'est envoyé lors d'une
@@ -1523,7 +1607,11 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const body = `
   <style>${DASHBOARD_CSS}</style>
   <main>
-    ${banner(lastRun, lastSuccess, inFlight)}
+    ${
+      inFlight && lastRun
+        ? `<div id="bandeau-maj">${banner(lastRun, lastSuccess, true)}</div>${progressClient(lastRun, "bandeau-maj")}`
+        : banner(lastRun, lastSuccess, inFlight)
+    }
     ${tabs}
     ${filtres}
     ${table}
@@ -1728,6 +1816,11 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
       return commentStream(req, params.idweb ?? "");
     } },
   { method: "POST", path: "/commentaires/supprimer", access: "user", handler: (req, url, user) => handleDeleteComment(req, url, user!) },
+  { method: "GET", path: "/mise-a-jour/:id/flux", access: "user", handler: async (req, _url, user, params) => {
+      if (!rateLimit(`flux:${user!.id}`, 30, 60_000)) return new Response("Trop de connexions", { status: 429 });
+      return runStream(req, params.id ?? "");
+    } },
+  { method: "GET", path: "/mise-a-jour/:id/fragment", access: "user", handler: (_req, _url, _user, params) => handleRunFragment(params.id ?? "") },
   { method: "POST", path: "/avis/:idweb/statut", access: "user", handler: (req, url, user, params) => handleSetStatus(req, url, user!, params) },
   { method: "GET", path: "/configuration", access: "config", handler: (req, url, user) => handleConfigHome(req, url, user!) },
   { method: "POST", path: "/configuration/mots-cles/ajouter", access: "config", handler: (req, url, user) => handleKeywordAdd(req, url, user!) },

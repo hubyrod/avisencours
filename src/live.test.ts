@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   commentToItem,
   eventToItem,
+  runToView,
   sortThread,
   type DbComment,
   type DbStatusEvent,
@@ -126,5 +127,15 @@ describe("sortThread", () => {
     ]);
     expect(thread.map((c) => c.id)).toEqual(["1", "2"]);
     expect(thread.every((c) => c.kind === "statut")).toBe(true);
+  });
+});
+
+describe("runToView", () => {
+  test("garde le strict nécessaire, tolère progress null", () => {
+    const progress = { steps: [{ id: "boamp", label: "BOAMP", status: "done" as const }], updatedAt: "2026-09-18T10:00:00Z" };
+    expect(runToView({ id: "68", status: "running", started_at: "2026-09-18T09:00:00Z", finished_at: null, progress })).toEqual({
+      id: "68", status: "running", started_at: "2026-09-18T09:00:00Z", finished_at: null, progress,
+    });
+    expect(runToView({ id: "1", status: "success", started_at: "x", finished_at: "y", progress: null }).progress).toBeNull();
   });
 });

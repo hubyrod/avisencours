@@ -1,6 +1,8 @@
-// Commentaires en direct : moteur réactif Skip (WASM, in-process) + flux SSE.
-// Ce module est réservé au serveur web — run.ts (cron) ne doit JAMAIS l'importer,
-// sinon le job ouvrirait une connexion LISTEN Postgres et chargerait le runtime WASM.
+// Commentaires en direct et suivi des mises à jour : moteur réactif Skip (WASM,
+// in-process) + flux SSE. Ce module est réservé au serveur web — run.ts (cron)
+// ne doit JAMAIS l'importer, sinon le job ouvrirait une connexion LISTEN
+// Postgres et chargerait le runtime WASM. Le job écrit runs.progress en SQL
+// ordinaire ; c'est l'adaptateur, dans le serveur, qui voit ces écritures.
 import { runService } from "@skipruntime/server";
 import { PostgresExternalService } from "@skip-adapter/postgres";
 import type {
@@ -13,6 +15,7 @@ import type {
   Values,
 } from "@skipruntime/core";
 import { db } from "./db.ts";
+import type { RunProgress } from "./progress.ts";
 
 const STREAM_PORT = Number(Bun.env.SKIP_STREAMING_PORT ?? 9080);
 const CONTROL_PORT = Number(Bun.env.SKIP_CONTROL_PORT ?? 9081);
@@ -72,7 +75,30 @@ export type ThreadItem =
       status_color: string | null;
     };
 
-type ResourceInputs = { threads: EagerCollection<string, ThreadItem[]> };
+// Ligne de `runs` vue par l'adaptateur (id et dates en chaînes, progress déjà
+// désérialisé — ou null avant la première écriture du job).
+export type DbRun = {
+  id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  progress: RunProgress | null;
+};
+
+// Vue exposée aux pages : le strict nécessaire pour savoir « quelque chose a
+// changé » — le rendu (jalons, bandeau) reste côté serveur.
+export type RunView = {
+  id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  progress: RunProgress | null;
+};
+
+type ResourceInputs = {
+  threads: EagerCollection<string, ThreadItem[]>;
+  runs: EagerCollection<string, RunView>;
+};
 
 type UserOf = (id: string) => DbUser | undefined;
 
@@ -152,6 +178,38 @@ class ThreadSorter implements Mapper<string, ThreadItem, string, ThreadItem[]> {
   }
 }
 
+export function runToView(r: DbRun): RunView {
+  return {
+    id: String(r.id),
+    status: r.status,
+    started_at: r.started_at,
+    finished_at: r.finished_at ?? null,
+    progress: r.progress && typeof r.progress === "object" ? r.progress : null,
+  };
+}
+
+class RunViews implements Mapper<string, DbRun, string, RunView> {
+  mapEntry(id: string, rows: Values<DbRun>, _context: Context): Iterable<[string, RunView]> {
+    return rows.toArray().map((r) => [id, runToView(r)] as [string, RunView]);
+  }
+}
+
+// Une ligne de `runs` (paramètre id, chaîne) : la page ouvre ce flux pendant une
+// mise à jour et retourne chercher le fragment rendu à chaque événement.
+class RunResource implements Resource<ResourceInputs> {
+  private id: string;
+
+  constructor(params: Json) {
+    const id = (params as { id?: unknown } | null)?.id;
+    if (typeof id !== "string" || !/^\d+$/.test(id)) throw new Error("RunResource : id numérique requis");
+    this.id = id;
+  }
+
+  instantiate(collections: ResourceInputs): EagerCollection<string, RunView> {
+    return collections.runs.slice(this.id, this.id);
+  }
+}
+
 class ThreadResource implements Resource<ResourceInputs> {
   private idweb: string;
 
@@ -196,7 +254,7 @@ function makeService(): SkipService<Record<string, never>, ResourceInputs> {
   adapter = postgres;
   return {
     externalServices: { postgres },
-    resources: { thread: ThreadResource },
+    resources: { thread: ThreadResource, run: RunResource },
     createGraph(_inputs, context) {
       // Clés déclarées TEXT même pour les bigint : la synchro initiale produit des
       // clés chaînes alors que le chemin NOTIFY produirait des nombres — les clés
@@ -221,9 +279,16 @@ function makeService(): SkipService<Record<string, never>, ResourceInputs> {
         identifier: "statuses",
         params: { key: { col: "id", type: "TEXT" } },
       });
+      // `runs` : une ligne par mise à jour (une par jour). L'adaptateur relit la
+      // table entière à chaque (re)synchronisation — négligeable à cette taille.
+      const runs = context.useExternalResource<string, DbRun>({
+        service: "postgres",
+        identifier: "runs",
+        params: { key: { col: "id", type: "TEXT" } },
+      });
       const commentItems = comments.map(CommentItems, users);
       const eventItems = statusEvents.map(StatusEventItems, users, statuses);
-      return { threads: commentItems.merge(eventItems).map(ThreadSorter) };
+      return { threads: commentItems.merge(eventItems).map(ThreadSorter), runs: runs.map(RunViews) };
     },
   };
 }
@@ -235,7 +300,7 @@ async function cleanupOrphanTriggers(): Promise<void> {
   const rows = (await sql`
     SELECT trigger_name, event_object_table
     FROM information_schema.triggers
-    WHERE event_object_table IN ('comments', 'users', 'status_events', 'statuses') AND trigger_schema = 'public'
+    WHERE event_object_table IN ('comments', 'users', 'status_events', 'statuses', 'runs') AND trigger_schema = 'public'
   `) as Array<{ trigger_name: string; event_object_table: string }>;
   const seen = new Set<string>();
   for (const { trigger_name, event_object_table } of rows) {
@@ -290,15 +355,23 @@ const unavailable = () => new Response("Flux indisponible", { status: 503 });
 // par handle()) : création de l'UUID sur le port de contrôle, puis relais du flux
 // SSE du port de streaming vers le client. À la déconnexion, DELETE de l'UUID —
 // indispensable, sinon le graphe réactif de l'abonné fuit dans le runtime WASM.
-export async function commentStream(req: Request, idweb: string): Promise<Response> {
+export function commentStream(req: Request, idweb: string): Promise<Response> {
+  return resourceStream(req, "thread", { idweb });
+}
+
+export function runStream(req: Request, id: string): Promise<Response> {
+  return resourceStream(req, "run", { id });
+}
+
+export async function resourceStream(req: Request, resource: "thread" | "run", params: Json): Promise<Response> {
   if (!liveReady) return unavailable();
 
   let uuid: string;
   try {
-    const mint = await fetch(`http://localhost:${CONTROL_PORT}/v1/streams/thread`, {
+    const mint = await fetch(`http://localhost:${CONTROL_PORT}/v1/streams/${resource}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ idweb }),
+      body: JSON.stringify(params),
       signal: AbortSignal.timeout(5000),
     });
     if (!mint.ok) return unavailable();
