@@ -13,6 +13,7 @@ import { matchKeywords, type FamilleSearch } from "./familles.ts";
 import { departementCodes } from "./departements.ts";
 import type { Announcement } from "./scraper.ts";
 import { errMessage } from "./http.ts";
+import { moisCode } from "./mois.ts";
 
 export const ACHATPUBLIC_BASE = "https://www.achatpublic.com";
 const SEARCH_URL = `${ACHATPUBLIC_BASE}/sdm/ent2/gen/rechercheCsl.action`;
@@ -38,22 +39,6 @@ export type Fiche = {
   cpv: string;
   ouverture: string; // texte tel quel, ex. « 27 juillet 2026 16:23 »
 };
-
-const MOIS: Record<string, string> = {
-  jan: "01", fev: "02", mar: "03", avr: "04", mai: "05", jui: "06", juil: "07",
-  aou: "08", sep: "09", oct: "10", nov: "11", dec: "12",
-};
-
-function moisCode(s: string): string | null {
-  const k = s
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z]/g, "");
-  if (k.startsWith("juil")) return "07";
-  if (k.startsWith("juin")) return "06";
-  return MOIS[k.slice(0, 3)] ?? null;
-}
 
 // « 24 », « Sept. 2026 », « 12 : 00 » -> « 24/09/2026 à 12h00 »
 export function parseCardDeadline(day: string, monthYear: string, time: string): string | null {

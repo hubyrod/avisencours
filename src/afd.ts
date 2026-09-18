@@ -11,6 +11,7 @@
 // classifieurs mobilité comme les avis BOAMP.
 import type { Announcement } from "./scraper.ts";
 import { errMessage } from "./http.ts";
+import { moisCode } from "./mois.ts";
 
 export const AFD_BASE = "https://afd.dgmarket.com";
 const LIST_URL = `${AFD_BASE}/tenders/brandedNoticeList.do`;
@@ -31,20 +32,12 @@ export type AfdNotice = {
   texte: string;
 };
 
-// Mois en français ou en anglais, abrégés ou non : « Sept », « Aou », « Octobre », « Feb ».
-const MOIS: Array<[RegExp, string]> = [
-  [/^jan/, "01"], [/^f[eé][bv]/, "02"], [/^mar/, "03"], [/^a[vp]r/, "04"], [/^ma[iy]/, "05"],
-  [/^juin|^jun/, "06"], [/^juil|^jul/, "07"], [/^ao[uû]|^aug/, "08"], [/^sep/, "09"],
-  [/^oct/, "10"], [/^nov/, "11"], [/^d[eé]c/, "12"],
-];
-
 // « Sept 17, 2026 », « Aou 31, 2026 », « Octobre 2, 2026 - 12:00 »
 //   -> « 17/09/2026 » ou « 02/10/2026 à 12h00 » (format du reste du projet).
 export function parseAfdDate(s: string): string | null {
   const m = s.trim().match(/^([A-Za-zéûÉ]+)\.?\s+(\d{1,2}),\s*(\d{4})(?:\s*-\s*(\d{1,2}):(\d{2}))?/);
   if (!m) return null;
-  const key = m[1]!.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
-  const mm = MOIS.find(([re]) => re.test(key))?.[1];
+  const mm = moisCode(m[1]!);
   if (!mm) return null;
   const date = `${m[2]!.padStart(2, "0")}/${mm}/${m[3]}`;
   return m[4] ? `${date} à ${m[4].padStart(2, "0")}h${m[5]}` : date;

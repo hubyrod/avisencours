@@ -83,6 +83,33 @@ export const RECOMMENDED_MODELS: readonly string[] = [
   "openai/gpt-4.1-nano",
 ];
 
+// Recherches Maximilien (src/maximilien.ts), reprises de la procédure de
+// veille du cabinet pour l'Île-de-France : marchés de services, une seule liste
+// de mots-clés dont on détache les termes « inondations » pour la famille du
+// même nom (règle de classement propre, sans LLM).
+const MAXIMILIEN_INONDATIONS = [
+  "AMC", "MCDA", "multicritère", "multi-critère", "PAPI", "GEMAPI",
+  "prévention des inondations", "SYMAR", "syndicat de rivière",
+];
+
+export const MAXIMILIEN_SEARCHES: readonly FamilleSearch[] = [
+  {
+    famille: "mobilité",
+    marche: "services",
+    keywords: [
+      "vélo", "doux", "ferroviaire", "mobilité", "transport", "déplacement",
+      "planification", "trafic", "circulation", "microsimulation", "modél", "PDU",
+      "PDM", "TCSP", "marchandises", "fret", "multimodal", "gare", "échange",
+      "jalonnement", "enquête", "covoiturage", "tarif", "cyclable", "itinéraire",
+      "schéma", "signalisation", "voie verte", "stationnement", "actifs", "piéton",
+      "autopartage", "accessibilité", "ZFE", "ZFEM", "desserte", "intermodal",
+      "voirie", "scot", "prospective", "socioéconomique", "socio-économique",
+      "multicritère", "multi-critère", "AMC", "MCDA",
+    ],
+  },
+  { famille: "inondations", marche: "services", keywords: MAXIMILIEN_INONDATIONS },
+];
+
 export function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
