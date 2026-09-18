@@ -19,14 +19,6 @@ export type Announcement = {
 
 export type Source = "boamp" | "achatpublic" | "afd" | "maximilien" | "ampa" | "marchesonline";
 
-export const SOURCE_LABELS: Record<Source, string> = {
-  boamp: "BOAMP",
-  achatpublic: "achatpublic.com",
-  afd: "AFD (dgMarket)",
-  maximilien: "Maximilien",
-  ampa: "Marchés publics d'Aquitaine",
-  marchesonline: "Marchés Online (Le Moniteur)",
-};
 
 type OdsRecord = {
   idweb?: string;

@@ -358,11 +358,12 @@ export async function getLastSuccessfulRun(): Promise<RunRow | null> {
 export async function getCurrent(
   category: string,
   runId: number,
-  filter?: { statusId?: number | null; hideRejet?: boolean; famille?: string | null },
+  filter?: { statusId?: number | null; hideRejet?: boolean; famille?: string | null; source?: string | null },
 ): Promise<StoredAnnouncement[]> {
   const statusId = filter?.statusId ?? null;
   const hideRejet = filter?.hideRejet ?? false;
   const famille = filter?.famille ?? null;
+  const source = filter?.source ?? null;
   const defaultId = (await getDefaultStatus())?.id ?? null;
   const rows = await db()`
     SELECT a.*,
@@ -385,8 +386,24 @@ export async function getCurrent(
       AND (${statusId}::bigint IS NULL OR COALESCE(cur.status_id, ${defaultId}) = ${statusId})
       AND (${hideRejet} = false OR COALESCE(s.is_rejet, false) = false)
       AND (${famille}::text IS NULL OR a.famille = ${famille})
+      AND (${source}::text IS NULL OR a.source = ${source})
     ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
   return rows as StoredAnnouncement[];
+}
+
+// Avis « en cours » (même définition que getCurrent, sans filtre) comptés par
+// source et catégorie — pour le filtre du tableau de bord et la page
+// configuration.
+export type SourceCount = { source: string; category: string; count: number };
+
+export async function countCurrentBySource(runId: number): Promise<SourceCount[]> {
+  const rows = await db()`
+    SELECT source, category, count(*)::int AS count
+    FROM announcements
+    WHERE last_seen_run_id = ${runId}
+      AND (deadline IS NULL OR deadline >= now())
+    GROUP BY source, category`;
+  return rows as SourceCount[];
 }
 
 export async function getAnnouncement(idweb: string): Promise<StoredAnnouncement | null> {

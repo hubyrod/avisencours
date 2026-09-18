@@ -1,6 +1,6 @@
 import type { StoredAnnouncement } from "./db.ts";
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
-import { SOURCE_LABELS, type Source } from "./scraper.ts";
+import { sourceLabel } from "./sources.ts";
 import { postWithRetry, DEFAULT_RETRYABLE } from "./http.ts";
 import { llmStatsSummary, type LlmStats } from "./llm.ts";
 
@@ -90,7 +90,7 @@ function esc(s: string): string {
 // Provenance hors BOAMP et famille hors mobilité, pour situer l'avis d'un coup d'œil.
 function sourceTag(a: StoredAnnouncement): string {
   const parts: string[] = [];
-  if (a.source && a.source !== "boamp") parts.push(SOURCE_LABELS[a.source as Source] ?? a.source);
+  if (a.source && a.source !== "boamp") parts.push(sourceLabel(a.source));
   if (a.famille && a.famille !== "mobilité") parts.push(FAMILLE_LABELS[a.famille as Famille] ?? a.famille);
   return parts.length ? ` — <span style="color:#0e6b51;">${esc(parts.join(" · "))}</span>` : "";
 }

@@ -4,6 +4,7 @@ import { scrapeAchatPublic } from "./achatpublic.ts";
 import { scrapeAfd } from "./afd.ts";
 import { MPE_SITES, scrapeMpe } from "./mpe.ts";
 import { scrapeMarchesOnline } from "./marchesonline.ts";
+import { isSourceEnabled, sourceLabel } from "./sources.ts";
 import { classifyFamille } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM, type LlmContext } from "./classify-llm.ts";
@@ -145,18 +146,20 @@ async function loadAll(
     }
   }
   const boamp = await scrapeBoamp(query, maxPages, opts.codeDepartement, log);
+  // Activation : option explicite, sinon la variable d'environnement de la
+  // source (src/sources.ts — même registre que la page de configuration).
   const sources: SecondarySource[] = [];
-  if (opts.achatPublic ?? Bun.env.ACHATPUBLIC !== "0") {
-    sources.push({ name: "achatpublic.com", run: () => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log }) });
+  if (opts.achatPublic ?? isSourceEnabled("achatpublic")) {
+    sources.push({ name: sourceLabel("achatpublic"), run: () => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log }) });
   }
-  if (opts.afd ?? Bun.env.AFD !== "0") sources.push({ name: "AFD (dgMarket)", run: () => scrapeAfd({ log }) });
+  if (opts.afd ?? isSourceEnabled("afd")) sources.push({ name: sourceLabel("afd"), run: () => scrapeAfd({ log }) });
   for (const site of MPE_SITES) {
-    if (opts.mpe ?? Bun.env[site.env] !== "0") {
-      sources.push({ name: site.name, run: () => scrapeMpe({ site, searches: MPE_SEARCHES, log }) });
+    if (opts.mpe ?? isSourceEnabled(site.source)) {
+      sources.push({ name: sourceLabel(site.source), run: () => scrapeMpe({ site, searches: MPE_SEARCHES, log }) });
     }
   }
-  if (opts.marchesOnline ?? Bun.env.MARCHESONLINE !== "0") {
-    sources.push({ name: "Marchés Online", run: () => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log }) });
+  if (opts.marchesOnline ?? isSourceEnabled("marchesonline")) {
+    sources.push({ name: sourceLabel("marchesonline"), run: () => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log }) });
   }
   const secondary = await scrapeSecondary(sources, opts.codeDepartement, log);
   const ids = new Set(boamp.map((it) => it.idweb));

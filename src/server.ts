@@ -1,9 +1,11 @@
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
-import { SOURCE_LABELS, type Source } from "./scraper.ts";
+import { SOURCES, isSource, isSourceEnabled, sourceLabel, type SourceInfo } from "./sources.ts";
 import {
   migrate,
   getLastRun,
   getLastSuccessfulRun,
+  countCurrentBySource,
+  type SourceCount,
   getCurrent,
   getAnnouncement,
   addComment,
@@ -534,6 +536,46 @@ function classifierLabel(c: string | null | undefined): string | null {
   return `modèle ${c}`;
 }
 
+// Liste des sources de veille : ce qui est lu, activation (variable
+// d'environnement), avis en cours par source dans la dernière mise à jour
+// réussie, et signalement d'une source en échec (avertissement du dernier run).
+function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null): string {
+  const rows = SOURCES.map((s: SourceInfo) => {
+    const enabled = isSourceEnabled(s.id);
+    const n = (cat: string) => counts.find((c) => c.source === s.id && c.category === cat)?.count ?? 0;
+    const failed = enabled && !!lastRun?.warning && lastRun.warning.includes(s.label);
+    const etat = !enabled
+      ? `<span class="badge-statut" title="${esc(s.env ?? "")}=0 sur le serveur"><span class="dot" style="background:#9a9a9a"></span><span class="lbl">désactivée</span></span>`
+      : failed
+        ? `<span class="badge-statut" title="Voir l'avertissement de la dernière mise à jour"><span class="dot" style="background:var(--ambre)"></span><span class="lbl">en échec</span></span>`
+        : `<span class="badge-statut"><span class="dot" style="background:var(--vert)"></span><span class="lbl">active</span></span>`;
+    return `
+      <tr>
+        <td>
+          <a href="${esc(s.url)}" target="_blank" rel="noopener" style="font-weight:600;">${esc(s.label)}</a>
+          <div class="meta" style="color:var(--encre-2);font-size:12.5px;margin-top:2px;">${esc(s.description)}</div>
+        </td>
+        <td style="white-space:nowrap;text-align:right;vertical-align:top;">
+          ${etat}
+          <div class="meta" style="color:var(--encre-2);font-size:12px;margin-top:4px;">
+            <a href="/?source=${s.id}">${n("relevant")} pertinent${n("relevant") > 1 ? "s" : ""}</a> · ${n("travaux")} travaux · ${n("excluded")} exclu${n("excluded") > 1 ? "s" : ""}
+          </div>
+        </td>
+      </tr>`;
+  }).join("");
+  return `
+      <div class="card" style="margin:16px 0;max-width:640px;">
+        <h2>Sources de veille</h2>
+        <p style="color:var(--encre-2);font-size:13.5px;">
+          Chaque mise à jour lit ces sites l'un après l'autre. Une source en panne n'empêche pas
+          les autres : elle est signalée ici et par email, et ses avis restent affichés jusqu'à
+          la prochaine lecture réussie. Les comptes sont ceux de la dernière mise à jour réussie.
+          Une source se coupe côté serveur avec sa variable d'environnement à 0.
+        </p>
+        <table><tbody>${rows}</tbody></table>
+      </div>`;
+}
+
 function llmRunLine(run: RunRow): string {
   const parts: string[] = [];
   if (run.llm_stats) parts.push(` — LLM : ${esc(llmStatsSummary(run.llm_stats))}`);
@@ -564,7 +606,7 @@ async function configPage(
   user: AuthUser,
   notice?: { kind: "ok" | "error"; text: string },
 ): Promise<Response> {
-  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun, catalog, credit] =
+  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun, lastSuccess, catalog, credit] =
     await Promise.all([
       listKeywords(),
       listScopeRules(),
@@ -573,9 +615,11 @@ async function configPage(
       getSetting("code_departements"),
       getSetting("llm_models"),
       getLastRun(),
+      getLastSuccessfulRun(),
       fetchCatalog(),
       fetchKeyCredit(),
     ]);
+  const sourceCounts = lastSuccess ? await countCurrentBySource(lastSuccess.id) : [];
 
   const banner = notice
     ? `<div class="banner ${notice.kind === "ok" ? "ok" : "error"}">${esc(notice.text)}</div>`
@@ -692,6 +736,8 @@ async function configPage(
           <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
         </form>
       </div>
+
+      ${renderSourcesCard(sourceCounts, lastRun)}
 
       <div class="card" style="margin:16px 0;max-width:640px;">
         <h2>Mise à jour</h2>
@@ -1068,7 +1114,7 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
     .join("");
 
   const facts: Array<[string, string | null]> = [
-    ["Source", SOURCE_LABELS[(a.source ?? "boamp") as Source] ?? a.source ?? null],
+    ["Source", sourceLabel(a.source)],
     ["Famille", a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null],
     ["Acheteur", a.acheteur],
     ["Département", a.department],
@@ -1212,12 +1258,9 @@ function jChip(deadline: Date | null): string {
   return `<span class="jrest ${urgence}">J−${j}</span>`;
 }
 
-// Provenance hors BOAMP et famille hors mobilité : badges discrets sur la ligne.
+// Provenance (toujours) et famille hors mobilité : badges discrets sur la ligne.
 function sourceBadges(a: StoredAnnouncement): string {
-  let out = "";
-  if (a.source && a.source !== "boamp") {
-    out += `<span class="badge src">${esc(SOURCE_LABELS[a.source as Source] ?? a.source)}</span>`;
-  }
+  let out = `<span class="badge src${a.source === "boamp" || !a.source ? " boamp" : ""}">${esc(sourceLabel(a.source))}</span>`;
   if (a.famille && a.famille !== "mobilité") {
     out += `<span class="badge fam">${esc(FAMILLE_LABELS[a.famille as Famille] ?? a.famille)}</span>`;
   }
@@ -1298,6 +1341,7 @@ const DASHBOARD_CSS = `
     .statut-col { width: 1%; white-space: nowrap; }
     .badge { display: inline-block; background: #e5efe9; color: var(--vert); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 4px; margin-left: 7px; vertical-align: 1px; }
     .badge.src { background: #eef1f6; color: #3b4a6b; }
+    .badge.src.boamp { background: transparent; border: 1px solid var(--ligne); color: var(--encre-2); font-weight: 500; }
     .badge.fam { background: #fbf1e3; color: #8a5a12; }
     .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
     .filtres { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; font-size: 13px; color: var(--encre-2); flex-wrap: wrap; }
@@ -1317,15 +1361,22 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const masquer = url.searchParams.get("masquer") === "1";
   const familleParam = url.searchParams.get("famille") ?? "";
   const famille = (Object.keys(FAMILLE_LABELS) as Famille[]).includes(familleParam as Famille) ? familleParam : null;
+  const sourceParam = url.searchParams.get("source") ?? "";
+  const source = isSource(sourceParam) ? sourceParam : null;
 
   const [lastRun, lastSuccess, statuts] = await Promise.all([
     getLastRun(),
     getLastSuccessfulRun(),
     listStatuses(false),
   ]);
-  const items = lastSuccess
-    ? await getCurrent(dbCategory, lastSuccess.id, { statusId, hideRejet: masquer, famille })
-    : [];
+  const [items, sourceCounts] = lastSuccess
+    ? await Promise.all([
+        getCurrent(dbCategory, lastSuccess.id, { statusId, hideRejet: masquer, famille, source }),
+        countCurrentBySource(lastSuccess.id),
+      ])
+    : [[], []];
+  // Compte par source pour la catégorie affichée (avant les autres filtres).
+  const countFor = (id: string) => sourceCounts.find((c) => c.source === id && c.category === dbCategory)?.count ?? 0;
   const latestRunId = lastSuccess?.id ?? null;
 
   const tabs = `
@@ -1352,6 +1403,13 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
         )
         .join("")}
     </select>
+    <label for="f-source">Source</label>
+    <select id="f-source" name="source">
+      <option value="">Toutes</option>
+      ${SOURCES.map(
+        (s) => `<option value="${s.id}"${s.id === source ? " selected" : ""}>${esc(s.label)} (${countFor(s.id)})</option>`,
+      ).join("")}
+    </select>
     <label for="f-famille">Famille</label>
     <select id="f-famille" name="famille">
       <option value="">Toutes</option>
@@ -1366,7 +1424,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const table =
     items.length === 0
       ? `<p class="empty">${
-          statusId !== null || masquer || famille !== null
+          statusId !== null || masquer || famille !== null || source !== null
             ? "Aucun avis ne correspond à ce filtre."
             : "Aucun avis en cours dans cette catégorie."
         }</p>`
