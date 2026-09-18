@@ -17,13 +17,14 @@ export type Announcement = {
   famille: Famille;
 };
 
-export type Source = "boamp" | "achatpublic" | "afd" | "maximilien";
+export type Source = "boamp" | "achatpublic" | "afd" | "maximilien" | "ampa";
 
 export const SOURCE_LABELS: Record<Source, string> = {
   boamp: "BOAMP",
   achatpublic: "achatpublic.com",
   afd: "AFD (dgMarket)",
   maximilien: "Maximilien",
+  ampa: "Marchés publics d'Aquitaine",
 };
 
 type OdsRecord = {

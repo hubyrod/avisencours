@@ -83,16 +83,16 @@ export const RECOMMENDED_MODELS: readonly string[] = [
   "openai/gpt-4.1-nano",
 ];
 
-// Recherches Maximilien (src/maximilien.ts), reprises de la procédure de
-// veille du cabinet pour l'Île-de-France : marchés de services, une seule liste
-// de mots-clés dont on détache les termes « inondations » pour la famille du
-// même nom (règle de classement propre, sans LLM).
-const MAXIMILIEN_INONDATIONS = [
+// Recherches sur les plateformes atexo MPE (src/mpe.ts : Maximilien, AMPA…),
+// reprises de la procédure de veille du cabinet : marchés de services, une seule
+// liste de mots-clés dont on détache les termes « inondations » pour la famille
+// du même nom (règle de classement propre, sans LLM).
+const MPE_INONDATIONS = [
   "AMC", "MCDA", "multicritère", "multi-critère", "PAPI", "GEMAPI",
   "prévention des inondations", "SYMAR", "syndicat de rivière",
 ];
 
-export const MAXIMILIEN_SEARCHES: readonly FamilleSearch[] = [
+export const MPE_SEARCHES: readonly FamilleSearch[] = [
   {
     famille: "mobilité",
     marche: "services",
@@ -107,7 +107,7 @@ export const MAXIMILIEN_SEARCHES: readonly FamilleSearch[] = [
       "multicritère", "multi-critère", "AMC", "MCDA",
     ],
   },
-  { famille: "inondations", marche: "services", keywords: MAXIMILIEN_INONDATIONS },
+  { famille: "inondations", marche: "services", keywords: MPE_INONDATIONS },
 ];
 
 export function today(): string {

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { departementsFromLieux, parseFiche, parsePageState, parsePagination, parseRows, toAnnouncement } from "./maximilien.ts";
+import { MPE_SITES, departementsFromLieux, parseFiche, parsePageState, parsePagination, parseRows, toAnnouncement } from "./mpe.ts";
+
+const MAXIMILIEN = MPE_SITES.find((s) => s.source === "maximilien")!;
+const AMPA = MPE_SITES.find((s) => s.source === "ampa")!;
 
 // Extrait réel de la liste « AllCons » (septembre 2026), réduit aux balises lues.
 const LIST = `
@@ -100,7 +103,7 @@ const LIST = `
 </div>
 <input type="text" style="display:none" autocomplete="off" name="PRADO_PAGESTATE" id="PRADO_PAGESTATE" value="eJztfUtz40iS" />`;
 
-describe("Maximilien parseRows", () => {
+describe("MPE parseRows", () => {
   test("lit une consultation complète", () => {
     const rows = parseRows(LIST);
     expect(rows).toHaveLength(2);
@@ -139,7 +142,7 @@ describe("Maximilien parseRows", () => {
   });
 });
 
-describe("Maximilien parseFiche", () => {
+describe("MPE parseFiche", () => {
   const FICHE = `<html><body><script>var s = "Objet : piège";</script>
     <div>Détail de la consultation</div>
     <p>Référence : 26U044</p><p>Intitulé : Prestations</p>
@@ -161,7 +164,7 @@ describe("Maximilien parseFiche", () => {
   });
 });
 
-describe("Maximilien departementsFromLieux", () => {
+describe("MPE departementsFromLieux", () => {
   test("codes, Corse, France entière", () => {
     expect(departementsFromLieux("(75) Paris, (77) Seine-et-Marne")).toBe("75, 77");
     expect(departementsFromLieux("(2A) Corse-du-Sud, (974) La Réunion")).toBe("2A, 974");
@@ -171,10 +174,10 @@ describe("Maximilien departementsFromLieux", () => {
   });
 });
 
-describe("Maximilien toAnnouncement", () => {
+describe("MPE toAnnouncement", () => {
   test("assemble un Announcement", () => {
     const row = parseRows(LIST)[1]!;
-    const a = toAnnouncement(row, { typeAnnonce: "Avis d'appel public à la concurrence", cpv: "71311200", objet: "" }, "mobilité");
+    const a = toAnnouncement(row, { typeAnnonce: "Avis d'appel public à la concurrence", cpv: "71311200", objet: "" }, "mobilité", MAXIMILIEN);
     expect(a.idweb).toBe("MX-940001");
     expect(a.url).toBe("https://marches.maximilien.fr/entreprise/consultation/940001?orgAcronyme=ville-de-x");
     expect(a.objet).toBe("Élaboration du plan de mobilité simplifié");
@@ -186,5 +189,12 @@ describe("Maximilien toAnnouncement", () => {
     expect(a.source).toBe("maximilien");
     expect(a.raw).toContain("Étude pour l'élaboration du plan de mobilité simplifié");
     expect(a.raw).toContain("CPV: 71311200");
+  });
+  test("autre site MPE : préfixe, URL et source propres", () => {
+    const a = toAnnouncement(parseRows(LIST)[0]!, { typeAnnonce: "", cpv: "", objet: "" }, "mobilité", AMPA);
+    expect(a.idweb).toBe("AMPA-932590");
+    expect(a.url).toBe("https://demat-ampa.fr/entreprise/consultation/932590?orgAcronyme=a2w");
+    expect(a.source).toBe("ampa");
+    expect(a.typeAvis).toBe("Consultation AMPA (demat-ampa.fr) (Services)");
   });
 });

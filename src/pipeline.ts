@@ -1,8 +1,8 @@
-import { ACHATPUBLIC_SEARCHES, MAXIMILIEN_SEARCHES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
+import { ACHATPUBLIC_SEARCHES, MPE_SEARCHES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
 import { scrapeAll, type Announcement } from "./scraper.ts";
 import { scrapeAchatPublic } from "./achatpublic.ts";
 import { scrapeAfd } from "./afd.ts";
-import { scrapeMaximilien } from "./maximilien.ts";
+import { MPE_SITES, scrapeMpe } from "./mpe.ts";
 import { classifyFamille } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM, type LlmContext } from "./classify-llm.ts";
@@ -37,10 +37,11 @@ export type PipelineOptions = {
   llmModels?: string[];
   scopeRules?: ScopeRules;
   codeDepartement?: string[];
-  // Sources secondaires (défaut : activées sauf ACHATPUBLIC=0 / AFD=0 / MAXIMILIEN=0).
+  // Sources secondaires (défaut : activées sauf ACHATPUBLIC=0 / AFD=0, et par
+  // site MPE : MAXIMILIEN=0 / AMPA=0 — voir MPE_SITES).
   achatPublic?: boolean;
   afd?: boolean;
-  maximilien?: boolean;
+  mpe?: boolean;
   log?: (msg: string) => void;
 };
 
@@ -147,8 +148,10 @@ async function loadAll(
     sources.push({ name: "achatpublic.com", run: () => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log }) });
   }
   if (opts.afd ?? Bun.env.AFD !== "0") sources.push({ name: "AFD (dgMarket)", run: () => scrapeAfd({ log }) });
-  if (opts.maximilien ?? Bun.env.MAXIMILIEN !== "0") {
-    sources.push({ name: "Maximilien", run: () => scrapeMaximilien({ searches: MAXIMILIEN_SEARCHES, log }) });
+  for (const site of MPE_SITES) {
+    if (opts.mpe ?? Bun.env[site.env] !== "0") {
+      sources.push({ name: site.name, run: () => scrapeMpe({ site, searches: MPE_SEARCHES, log }) });
+    }
   }
   const secondary = await scrapeSecondary(sources, opts.codeDepartement, log);
   const ids = new Set(boamp.map((it) => it.idweb));

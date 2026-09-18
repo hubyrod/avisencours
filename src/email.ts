@@ -189,7 +189,7 @@ export function renderDigestHtml(d: DigestData): string {
 // (achatpublic.com) indisponible. Le texte s'adapte à la cause.
 export function renderWarningHtml(warning: string, llm: LlmStats | null | undefined, dateStr: string): string {
   const llmIssue = /LLM|OPENROUTER|coupe-circuit/i.test(warning);
-  const sourceIssue = /achatpublic|AFD|Maximilien/i.test(warning);
+  const sourceIssue = /achatpublic|AFD|Maximilien|AMPA/i.test(warning);
   const title = llmIssue ? "Classification LLM interrompue" : "Mise à jour partielle";
   const intro = llmIssue
     ? "La mise à jour quotidienne a réussi, mais la classification par modèle de langage n'a pas pu aller au bout : les avis restants ont été classés par les règles regex seules."
@@ -197,7 +197,7 @@ export function renderWarningHtml(warning: string, llm: LlmStats | null | undefi
   const advice = [
     llmIssue ? "Vérifiez la clé et le crédit OpenRouter, puis relancez depuis la page Configuration." : "",
     sourceIssue
-      ? "Une source secondaire (achatpublic.com, AFD/dgMarket ou Maximilien) n'a pas répondu (maintenance, panne ou page modifiée) : ses avis n'apparaissent pas comme « en cours » tant qu'un run ne les a pas relus. Relancez plus tard depuis la page Configuration."
+      ? "Une source secondaire (achatpublic.com, AFD/dgMarket, Maximilien, AMPA…) n'a pas répondu (maintenance, panne ou page modifiée) : ses avis n'apparaissent pas comme « en cours » tant qu'un run ne les a pas relus. Relancez plus tard depuis la page Configuration."
       : "",
   ].filter(Boolean);
   return `

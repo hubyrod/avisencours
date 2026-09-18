@@ -1,7 +1,7 @@
-// Source secondaire : Maximilien (marches.maximilien.fr), le profil d'acheteur
-// mutualisé des collectivités d'Île-de-France (plateforme atexo MPE, framework
-// PRADO). Tout est public : la liste des consultations ouvertes
-// (« ?page=Entreprise.EntrepriseAdvancedSearch&AllCons », ~450 consultations,
+// Sources secondaires sur plateforme atexo MPE (framework PRADO) : Maximilien
+// (Île-de-France), Marchés publics d'Aquitaine (demat-ampa.fr)… — même logiciel,
+// même HTML, seule l'URL change (`MPE_SITES`). Tout est public : la liste des
+// consultations ouvertes (« ?page=Entreprise.EntrepriseAdvancedSearch&AllCons »,
 // 20 par page), les fiches (/entreprise/consultation/<id>?orgAcronyme=<org>).
 // La pagination est un « postback » : chaque page renvoie un PRADO_PAGESTATE
 // à renvoyer avec la cible « PagerTop$ctl2 » (page suivante) et le cookie de
@@ -11,11 +11,23 @@
 // retenues (CPV, type d'annonce).
 import { matchKeywords, type FamilleSearch } from "./familles.ts";
 import { moisCode } from "./mois.ts";
-import type { Announcement } from "./scraper.ts";
+import type { Announcement, Source } from "./scraper.ts";
 import { errMessage } from "./http.ts";
 
-export const MAXIMILIEN_BASE = "https://marches.maximilien.fr";
-const LIST_URL = `${MAXIMILIEN_BASE}/?page=Entreprise.EntrepriseAdvancedSearch&AllCons`;
+export type MpeSite = {
+  source: Source;
+  name: string; // libellé des journaux / avertissements
+  base: string; // https://… sans barre finale
+  prefix: string; // préfixe des idweb (« MX- »)
+  env: string; // variable d'environnement « =0 » qui désactive le site
+};
+
+export const MPE_SITES: readonly MpeSite[] = [
+  { source: "maximilien", name: "Maximilien", base: "https://marches.maximilien.fr", prefix: "MX-", env: "MAXIMILIEN" },
+  { source: "ampa", name: "AMPA (demat-ampa.fr)", base: "https://demat-ampa.fr", prefix: "AMPA-", env: "AMPA" },
+];
+
+const LIST_PATH = "/?page=Entreprise.EntrepriseAdvancedSearch&AllCons";
 const USER_AGENT = "avis-en-cours (veille marchés publics)";
 const PAGE_SIZE = "20";
 const NEXT_TARGET = "ctl0$CONTENU_PAGE$resultSearch$PagerTop$ctl2";
@@ -144,41 +156,44 @@ class Session {
           if (m) this.cookie = this.cookie ? `${this.cookie}; ${m[0]}` : m[0];
         }
         const body = await res.text();
-        if (!res.ok) throw new Error(`Maximilien ${res.status} ${res.statusText} sur ${url.slice(0, 80)}`);
+        if (!res.ok) throw new Error(`MPE ${res.status} ${res.statusText} sur ${url.slice(0, 80)}`);
         return body;
       } catch (err) {
         lastErr = err;
         if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt));
       }
     }
-    throw new Error(`Maximilien injoignable : ${errMessage(lastErr)}`);
+    throw new Error(`site injoignable : ${errMessage(lastErr)}`);
   }
 }
 
-export type ScrapeMaximilienOptions = {
+export type ScrapeMpeOptions = {
+  site: MpeSite;
   searches: readonly FamilleSearch[];
   maxPages?: number;
   client?: MaximilienClient;
   log?: (msg: string) => void;
 };
 
-export type MaximilienItem = Announcement & { matchedQueries: string[] };
+export type MpeItem = Announcement & { matchedQueries: string[] };
 
 const CATEGORIE: Record<FamilleSearch["marche"], string> = { services: "Services", fournitures: "Fournitures" };
 
-export async function scrapeMaximilien(opts: ScrapeMaximilienOptions): Promise<MaximilienItem[]> {
+export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
+  const { site } = opts;
   const log = opts.log ?? (() => {});
-  const maxPages = opts.maxPages ?? 100;
+  const maxPages = opts.maxPages ?? 150;
   const session = new Session(opts.client ?? defaultClient);
+  const listUrl = `${site.base}${LIST_PATH}`;
 
-  let html = await session.request(LIST_URL);
+  let html = await session.request(listUrl);
   let { page, pages, total } = parsePagination(html);
   const seen = new Set<string>();
   const matched = new Map<string, { row: MxRow; famille: FamilleSearch["famille"]; keywords: string[] }>();
   let count = 0;
   for (;;) {
     const rows = parseRows(html);
-    if (rows.length === 0 && page === 1 && total !== 0) throw new Error("Maximilien : aucune consultation lue — structure de page changée ?");
+    if (rows.length === 0 && page === 1 && total !== 0) throw new Error("aucune consultation lue — structure de page changée ?");
     for (const row of rows) {
       if (seen.has(row.id)) continue;
       seen.add(row.id);
@@ -191,8 +206,8 @@ export async function scrapeMaximilien(opts: ScrapeMaximilienOptions): Promise<M
     }
     if (page >= pages || page >= maxPages) break;
     const state = parsePageState(html);
-    if (!state) throw new Error("Maximilien : PRADO_PAGESTATE introuvable (page suivante impossible)");
-    html = await session.request(LIST_URL, {
+    if (!state) throw new Error("PRADO_PAGESTATE introuvable (page suivante impossible)");
+    html = await session.request(listUrl, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -204,27 +219,27 @@ export async function scrapeMaximilien(opts: ScrapeMaximilienOptions): Promise<M
       }).toString(),
     });
     const next = parsePagination(html);
-    if (next.page !== page + 1) throw new Error(`Maximilien : pagination incohérente (page ${next.page} après ${page}/${pages})`);
+    if (next.page !== page + 1) throw new Error(`pagination incohérente (page ${next.page} après ${page}/${pages})`);
     page = next.page;
     pages = next.pages;
   }
-  log(`  Maximilien: ${count} consultations sur ${page} page(s)${total !== null ? ` (annoncées : ${total})` : ""}, ${matched.size} retenue(s)`);
+  log(`  ${site.name}: ${count} consultations sur ${page} page(s)${total !== null ? ` (annoncées : ${total})` : ""}, ${matched.size} retenue(s)`);
 
-  const out: MaximilienItem[] = [];
+  const out: MpeItem[] = [];
   for (const { row, famille, keywords } of matched.values()) {
     let fiche: MxFiche = { typeAnnonce: "", cpv: "", objet: "" };
     try {
-      fiche = parseFiche(await session.request(ficheUrl(row)));
+      fiche = parseFiche(await session.request(ficheUrl(site, row)));
     } catch (err) {
-      log(`  fiche Maximilien ${row.id} illisible : ${errMessage(err)}`);
+      log(`  fiche ${site.name} ${row.id} illisible : ${errMessage(err)}`);
     }
-    out.push({ ...toAnnouncement(row, fiche, famille), matchedQueries: keywords });
+    out.push({ ...toAnnouncement(row, fiche, famille, site), matchedQueries: keywords });
   }
   return out;
 }
 
-function ficheUrl(row: MxRow): string {
-  return `${MAXIMILIEN_BASE}/entreprise/consultation/${row.id}?orgAcronyme=${encodeURIComponent(row.org)}`;
+function ficheUrl(site: MpeSite, row: MxRow): string {
+  return `${site.base}/entreprise/consultation/${row.id}?orgAcronyme=${encodeURIComponent(row.org)}`;
 }
 
 // « (75) Paris, (77) Seine-et-Marne » -> « 75, 77 » ; toute la France -> « France entière ».
@@ -233,7 +248,7 @@ export function departementsFromLieux(lieux: string): string {
   return codes.length > MAX_DEPARTEMENTS ? "France entière" : codes.join(", ");
 }
 
-export function toAnnouncement(row: MxRow, fiche: MxFiche, famille: FamilleSearch["famille"]): Announcement {
+export function toAnnouncement(row: MxRow, fiche: MxFiche, famille: FamilleSearch["famille"], site: MpeSite): Announcement {
   const objet = row.intitule || row.objet;
   const description = fiche.objet || row.objet;
   const raw = [
@@ -251,17 +266,17 @@ export function toAnnouncement(row: MxRow, fiche: MxFiche, famille: FamilleSearc
     .filter(Boolean)
     .join(" — ");
   return {
-    idweb: `MX-${row.id}`,
-    url: ficheUrl(row),
+    idweb: `${site.prefix}${row.id}`,
+    url: ficheUrl(site, row),
     publishedAt: row.publie,
     deadline: row.deadline,
     objet,
     department: departementsFromLieux(row.lieux),
     acheteur: row.organisme,
-    typeAvis: `Consultation Maximilien${fiche.typeAnnonce ? ` — ${fiche.typeAnnonce}` : ""} (${row.categorie || "?"})`,
+    typeAvis: `Consultation ${site.name}${fiche.typeAnnonce ? ` — ${fiche.typeAnnonce}` : ""} (${row.categorie || "?"})`,
     procedure: row.procedure,
     raw,
-    source: "maximilien",
+    source: site.source,
     famille,
   };
 }
