@@ -1,6 +1,7 @@
 import { ACHATPUBLIC_SEARCHES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
 import { scrapeAll, type Announcement } from "./scraper.ts";
 import { scrapeAchatPublic } from "./achatpublic.ts";
+import { scrapeAfd } from "./afd.ts";
 import { classifyFamille } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM, type LlmContext } from "./classify-llm.ts";
@@ -35,8 +36,9 @@ export type PipelineOptions = {
   llmModels?: string[];
   scopeRules?: ScopeRules;
   codeDepartement?: string[];
-  // Source secondaire achatpublic.com (défaut : activée sauf ACHATPUBLIC=0).
+  // Sources secondaires (défaut : activées sauf ACHATPUBLIC=0 / AFD=0).
   achatPublic?: boolean;
+  afd?: boolean;
   log?: (msg: string) => void;
 };
 
@@ -81,28 +83,36 @@ async function scrapeBoamp(
   return [...byId.values()];
 }
 
-// achatpublic.com : source secondaire, non bloquante — une panne du site (ou
-// un changement de sa page) ne doit pas faire échouer la veille BOAMP ; elle
-// remonte en avertissement (email d'alerte, page configuration).
+// Sources secondaires (achatpublic.com, AFD/dgMarket) : non bloquantes — une
+// panne d'un site (ou un changement de sa page) ne doit pas faire échouer la
+// veille BOAMP ; elle remonte en avertissement (email d'alerte, page
+// configuration) et ses avis ne sont simplement pas revus ce jour-là.
+type SecondarySource = { name: string; run: () => Promise<Announcement[]> };
+
 async function scrapeSecondary(
+  sources: SecondarySource[],
   codeDepartement: string[] | undefined,
   log: (msg: string) => void,
-): Promise<{ items: CachedItem[]; warning?: string }> {
-  log("achatpublic: lecture des consultations ouvertes…");
-  try {
-    const items = await scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log });
-    const filtered = codeDepartement?.length
-      ? items.filter((it) => {
-          const codes = it.department.split(",").map((c) => c.trim()).filter(Boolean);
-          return codes.length === 0 || codes.some((c) => codeDepartement.includes(c));
-        })
-      : items;
-    return { items: filtered };
-  } catch (err) {
-    const warning = `achatpublic.com indisponible — ${errMessage(err)} — veille BOAMP seule pour ce run`;
-    log(warning);
-    return { items: [], warning };
+): Promise<{ items: CachedItem[]; warnings: string[] }> {
+  const items: CachedItem[] = [];
+  const warnings: string[] = [];
+  for (const src of sources) {
+    log(`${src.name}: lecture des avis en cours…`);
+    try {
+      for (const it of (await src.run()).filter(keep)) {
+        // Filtre départements : ne s'applique qu'aux avis dont on connaît le code
+        // (une consultation « France entière » ou un pays étranger passe).
+        const codes = it.department.split(",").map((c) => c.trim()).filter((c) => /^(\d{2,3}|2A|2B)$/.test(c));
+        if (codeDepartement?.length && codes.length > 0 && !codes.some((c) => codeDepartement.includes(c))) continue;
+        items.push({ ...it, matchedQueries: (it as Partial<CachedItem>).matchedQueries ?? [] });
+      }
+    } catch (err) {
+      const warning = `${src.name} indisponible — ${errMessage(err)} — ses avis ne sont pas mis à jour ce run`;
+      log(warning);
+      warnings.push(warning);
+    }
   }
+  return { items, warnings };
 }
 
 async function loadAll(
@@ -130,13 +140,17 @@ async function loadAll(
     }
   }
   const boamp = await scrapeBoamp(query, maxPages, opts.codeDepartement, log);
-  const useSecondary = opts.achatPublic ?? Bun.env.ACHATPUBLIC !== "0";
-  const secondary = useSecondary ? await scrapeSecondary(opts.codeDepartement, log) : { items: [] };
+  const sources: SecondarySource[] = [];
+  if (opts.achatPublic ?? Bun.env.ACHATPUBLIC !== "0") {
+    sources.push({ name: "achatpublic.com", run: () => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log }) });
+  }
+  if (opts.afd ?? Bun.env.AFD !== "0") sources.push({ name: "AFD (dgMarket)", run: () => scrapeAfd({ log }) });
+  const secondary = await scrapeSecondary(sources, opts.codeDepartement, log);
   const ids = new Set(boamp.map((it) => it.idweb));
   const items = [...boamp, ...secondary.items.filter((it) => !ids.has(it.idweb))];
   await Bun.write(cachePath, JSON.stringify(items, null, 2));
-  log(`cached ${items.length} unique avis (${boamp.length} BOAMP, ${items.length - boamp.length} achatpublic) -> ${cachePath}`);
-  return { items, warning: secondary.warning };
+  log(`cached ${items.length} unique avis (${boamp.length} BOAMP, ${items.length - boamp.length} sources secondaires) -> ${cachePath}`);
+  return { items, warning: secondary.warnings.join(" ; ") || undefined };
 }
 
 async function mapConcurrent<T, R>(

@@ -17,7 +17,13 @@ export type Announcement = {
   famille: Famille;
 };
 
-export type Source = "boamp" | "achatpublic";
+export type Source = "boamp" | "achatpublic" | "afd";
+
+export const SOURCE_LABELS: Record<Source, string> = {
+  boamp: "BOAMP",
+  achatpublic: "achatpublic.com",
+  afd: "AFD (dgMarket)",
+};
 
 type OdsRecord = {
   idweb?: string;

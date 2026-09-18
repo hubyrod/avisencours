@@ -1,4 +1,5 @@
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
+import { SOURCE_LABELS, type Source } from "./scraper.ts";
 import {
   migrate,
   getLastRun,
@@ -1067,7 +1068,7 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
     .join("");
 
   const facts: Array<[string, string | null]> = [
-    ["Source", a.source === "achatpublic" ? "achatpublic.com" : "BOAMP"],
+    ["Source", SOURCE_LABELS[(a.source ?? "boamp") as Source] ?? a.source ?? null],
     ["Famille", a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null],
     ["Acheteur", a.acheteur],
     ["Département", a.department],
@@ -1214,7 +1215,9 @@ function jChip(deadline: Date | null): string {
 // Provenance hors BOAMP et famille hors mobilité : badges discrets sur la ligne.
 function sourceBadges(a: StoredAnnouncement): string {
   let out = "";
-  if (a.source && a.source !== "boamp") out += `<span class="badge src">${esc(a.source)}</span>`;
+  if (a.source && a.source !== "boamp") {
+    out += `<span class="badge src">${esc(SOURCE_LABELS[a.source as Source] ?? a.source)}</span>`;
+  }
   if (a.famille && a.famille !== "mobilité") {
     out += `<span class="badge fam">${esc(FAMILLE_LABELS[a.famille as Famille] ?? a.famille)}</span>`;
   }

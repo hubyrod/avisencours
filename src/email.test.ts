@@ -80,7 +80,7 @@ describe("renderWarningHtml", () => {
   test("achatpublic indisponible : mise à jour partielle", () => {
     const html = renderWarningHtml("achatpublic.com indisponible — Error: 503 — veille BOAMP seule pour ce run", null, "lundi");
     expect(html).toContain("Mise à jour partielle");
-    expect(html).toContain("achatpublic.com n'a pas répondu");
+    expect(html).toContain("n'a pas répondu");
     expect(html).not.toContain("crédit OpenRouter");
   });
 });

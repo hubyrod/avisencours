@@ -1,5 +1,6 @@
 import type { StoredAnnouncement } from "./db.ts";
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
+import { SOURCE_LABELS, type Source } from "./scraper.ts";
 import { postWithRetry, DEFAULT_RETRYABLE } from "./http.ts";
 import { llmStatsSummary, type LlmStats } from "./llm.ts";
 
@@ -89,7 +90,7 @@ function esc(s: string): string {
 // Provenance hors BOAMP et famille hors mobilité, pour situer l'avis d'un coup d'œil.
 function sourceTag(a: StoredAnnouncement): string {
   const parts: string[] = [];
-  if (a.source && a.source !== "boamp") parts.push(a.source);
+  if (a.source && a.source !== "boamp") parts.push(SOURCE_LABELS[a.source as Source] ?? a.source);
   if (a.famille && a.famille !== "mobilité") parts.push(FAMILLE_LABELS[a.famille as Famille] ?? a.famille);
   return parts.length ? ` — <span style="color:#0e6b51;">${esc(parts.join(" · "))}</span>` : "";
 }
@@ -188,7 +189,7 @@ export function renderDigestHtml(d: DigestData): string {
 // (achatpublic.com) indisponible. Le texte s'adapte à la cause.
 export function renderWarningHtml(warning: string, llm: LlmStats | null | undefined, dateStr: string): string {
   const llmIssue = /LLM|OPENROUTER|coupe-circuit/i.test(warning);
-  const sourceIssue = /achatpublic/i.test(warning);
+  const sourceIssue = /achatpublic|AFD/i.test(warning);
   const title = llmIssue ? "Classification LLM interrompue" : "Mise à jour partielle";
   const intro = llmIssue
     ? "La mise à jour quotidienne a réussi, mais la classification par modèle de langage n'a pas pu aller au bout : les avis restants ont été classés par les règles regex seules."
@@ -196,7 +197,7 @@ export function renderWarningHtml(warning: string, llm: LlmStats | null | undefi
   const advice = [
     llmIssue ? "Vérifiez la clé et le crédit OpenRouter, puis relancez depuis la page Configuration." : "",
     sourceIssue
-      ? "achatpublic.com n'a pas répondu (maintenance, panne ou page modifiée) : les consultations de ce site n'apparaissent pas comme « en cours » tant qu'un run ne les a pas relues. Relancez plus tard depuis la page Configuration."
+      ? "Une source secondaire (achatpublic.com ou AFD/dgMarket) n'a pas répondu (maintenance, panne ou page modifiée) : ses avis n'apparaissent pas comme « en cours » tant qu'un run ne les a pas relus. Relancez plus tard depuis la page Configuration."
       : "",
   ].filter(Boolean);
   return `
