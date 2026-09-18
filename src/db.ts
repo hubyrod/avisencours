@@ -183,8 +183,17 @@ export async function tryAcquireRunLock(): Promise<boolean> {
   return rows[0]?.locked === true;
 }
 
+// Appelé sous le verrou consultatif (tryAcquireRunLock) : toute ligne encore
+// « running » appartient donc à un processus mort — mise à jour manuelle tuée
+// par un redéploiement, instance arrêtée… On la clôt en erreur pour que le
+// tableau de bord cesse d'annoncer une mise à jour en cours.
 export async function startRun(): Promise<number> {
-  const rows = await db()`INSERT INTO runs DEFAULT VALUES RETURNING id`;
+  const sql = db();
+  await sql`
+    UPDATE runs SET status = 'error', finished_at = now(),
+      error = 'interrompu : le processus de mise à jour a été arrêté avant la fin (redéploiement ou arrêt de l''instance)'
+    WHERE status = 'running'`;
+  const rows = await sql`INSERT INTO runs DEFAULT VALUES RETURNING id`;
   return Number(rows[0].id);
 }
 

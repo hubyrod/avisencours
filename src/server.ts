@@ -506,7 +506,9 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
 
 // Au-delà de ce délai, un run resté « running » est considéré planté (le verrou
 // consultatif Postgres reste la vraie protection contre les runs concurrents).
-const RUN_STALE_MS = 15 * 60_000;
+// Un run complet (BOAMP + six sources secondaires + classement LLM) prend
+// 35 à 45 minutes ; au-delà d'une heure sans fin, on le considère interrompu.
+const RUN_STALE_MS = 60 * 60_000;
 
 function runInFlight(lastRun: RunRow | null): boolean {
   return (
@@ -748,7 +750,9 @@ async function configPage(
                <div class="actions"><button class="primary" disabled>Relancer maintenant</button></div>`
             : `<p style="color:var(--encre-2);font-size:13.5px;">
                  Lance immédiatement une récupération et un reclassement des avis
-                 (environ 3 minutes). Aucun email n'est envoyé lors d'une mise à jour manuelle.
+                 (35 à 45 minutes avec toutes les sources). Aucun email n'est envoyé lors d'une
+                 mise à jour manuelle. Un redéploiement de l'application pendant ce temps
+                 interrompt la mise à jour : elle sera alors marquée en erreur au run suivant.
                </p>
                <form method="post" action="/configuration/relancer">
                  <div class="actions"><button class="primary" type="submit">Relancer maintenant</button></div>
@@ -762,7 +766,7 @@ async function configPage(
 
 async function handleConfigHome(_req: Request, url: URL, user: AuthUser): Promise<Response> {
   const notice = url.searchParams.has("lancee")
-    ? { kind: "ok" as const, text: "Mise à jour lancée — comptez environ 3 minutes." }
+    ? { kind: "ok" as const, text: "Mise à jour lancée — comptez 35 à 45 minutes." }
     : undefined;
   return configPage(user, notice);
 }
@@ -1318,6 +1322,12 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null): string {
     return `<div class="banner error">⚠️ La dernière mise à jour a échoué. Données affichées : ${esc(when)}. L'administrateur a été prévenu.</div>`;
   }
   if (lastRun.status === "running") {
+    if (!runInFlight(lastRun)) {
+      const when = lastSuccess?.finished_at ? frDateTime(new Date(lastSuccess.finished_at)) : "jamais";
+      return `<div class="banner error">⚠️ La dernière mise à jour semble interrompue (démarrée le ${esc(
+        frDateTime(new Date(lastRun.started_at)),
+      )}). Données affichées : ${esc(when)}. Relancez-la depuis la page Configuration.</div>`;
+    }
     return `<div class="statut warn"><span class="pastille"></span>Mise à jour en cours…</div>`;
   }
   const when = lastRun.finished_at ? frDateTime(new Date(lastRun.finished_at)) : "?";
