@@ -183,17 +183,34 @@ export async function tryAcquireRunLock(): Promise<boolean> {
   return rows[0]?.locked === true;
 }
 
-// Appelé sous le verrou consultatif (tryAcquireRunLock) : toute ligne encore
-// « running » appartient donc à un processus mort — mise à jour manuelle tuée
-// par un redéploiement, instance arrêtée… On la clôt en erreur pour que le
-// tableau de bord cesse d'annoncer une mise à jour en cours.
-export async function startRun(): Promise<number> {
-  const sql = db();
-  await sql`
+// Le verrou consultatif est tenu par la session Postgres du run tant que son
+// processus vit : c'est le signe de vie fiable d'une mise à jour (un run tué
+// par un redéploiement le relâche aussitôt). Clé bigint : classid = 32 bits
+// hauts (0 ici), objid = 32 bits bas, objsubid = 1.
+export async function isRunLockHeld(): Promise<boolean> {
+  const rows = await db()`
+    SELECT count(*)::int AS n FROM pg_locks
+    WHERE locktype = 'advisory' AND granted
+      AND classid = ${Math.floor(RUN_LOCK_ID / 2 ** 32)} AND objid = ${RUN_LOCK_ID % 2 ** 32} AND objsubid = 1`;
+  return Number(rows[0]?.n ?? 0) > 0;
+}
+
+// Ligne(s) « running » sans processus derrière — mise à jour manuelle tuée par
+// un redéploiement, instance arrêtée… — clôturée(s) en erreur. Sans danger
+// tant que le verrou n'est pas tenu (ou que l'appelant le tient lui-même).
+export async function closeOrphanRuns(): Promise<number> {
+  const rows = await db()`
     UPDATE runs SET status = 'error', finished_at = now(),
       error = 'interrompu : le processus de mise à jour a été arrêté avant la fin (redéploiement ou arrêt de l''instance)'
-    WHERE status = 'running'`;
-  const rows = await sql`INSERT INTO runs DEFAULT VALUES RETURNING id`;
+    WHERE status = 'running' RETURNING id`;
+  return rows.length;
+}
+
+// Appelé sous le verrou (tryAcquireRunLock) : toute ligne encore « running »
+// appartient donc à un processus mort.
+export async function startRun(): Promise<number> {
+  await closeOrphanRuns();
+  const rows = await db()`INSERT INTO runs DEFAULT VALUES RETURNING id`;
   return Number(rows[0].id);
 }
 

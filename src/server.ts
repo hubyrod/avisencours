@@ -1,10 +1,13 @@
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
 import { SOURCES, isSource, isSourceEnabled, sourceLabel, type SourceInfo } from "./sources.ts";
+import { errMessage } from "./http.ts";
 import {
   migrate,
   getLastRun,
   getLastSuccessfulRun,
   countCurrentBySource,
+  isRunLockHeld,
+  closeOrphanRuns,
   type SourceCount,
   getCurrent,
   getAnnouncement,
@@ -506,16 +509,25 @@ async function adminPage(user: AuthUser, error?: string): Promise<Response> {
 
 // Au-delà de ce délai, un run resté « running » est considéré planté (le verrou
 // consultatif Postgres reste la vraie protection contre les runs concurrents).
-// Un run complet (BOAMP + six sources secondaires + classement LLM) prend
-// 35 à 45 minutes ; au-delà d'une heure sans fin, on le considère interrompu.
+// Un run est « en cours » si sa ligne est running ET que le verrou Postgres
+// du run est tenu (signe de vie du processus). Ligne running sans verrou =
+// processus mort (redéploiement pendant une mise à jour manuelle, instance
+// arrêtée) : on la clôt en erreur tout de suite plutôt que d'attendre le run
+// suivant. Si pg_locks est illisible, repli sur l'âge de la ligne (un run
+// complet prend 35 à 45 minutes).
 const RUN_STALE_MS = 60 * 60_000;
 
-function runInFlight(lastRun: RunRow | null): boolean {
-  return (
-    lastRun !== null &&
-    lastRun.status === "running" &&
-    Date.now() - new Date(lastRun.started_at).getTime() < RUN_STALE_MS
-  );
+async function runInFlight(lastRun: RunRow | null): Promise<boolean> {
+  if (lastRun === null || lastRun.status !== "running") return false;
+  try {
+    if (await isRunLockHeld()) return true;
+    const closed = await closeOrphanRuns();
+    if (closed) console.error(`run #${lastRun.id}: ligne « running » sans verrou — clôturée en erreur`);
+    return false;
+  } catch (err) {
+    console.error(`pg_locks illisible (${errMessage(err)}) — repli sur l'âge du run`);
+    return Date.now() - new Date(lastRun.started_at).getTime() < RUN_STALE_MS;
+  }
 }
 
 function effectiveClassifierDefault(): string {
@@ -608,7 +620,7 @@ async function configPage(
   user: AuthUser,
   notice?: { kind: "ok" | "error"; text: string },
 ): Promise<Response> {
-  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun, lastSuccess, catalog, credit] =
+  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun0, lastSuccess, catalog, credit] =
     await Promise.all([
       listKeywords(),
       listScopeRules(),
@@ -642,7 +654,9 @@ async function configPage(
     )
     .join("");
 
-  const running = runInFlight(lastRun);
+  const running = await runInFlight(lastRun0);
+  // La ligne a pu être clôturée à l'instant : on relit pour l'afficher juste.
+  const lastRun = running || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
   const runLine = lastRun
     ? `Dernière mise à jour&nbsp;: ${
         lastRun.status === "running"
@@ -924,7 +938,7 @@ async function handleRelance(_req: Request, _url: URL, user: AuthUser): Promise<
     });
   }
   const lastRun = await getLastRun();
-  if (runInFlight(lastRun)) {
+  if (await runInFlight(lastRun)) {
     return configPage(user, { kind: "error", text: "Une mise à jour est déjà en cours." });
   }
   // Processus séparé : run.ts termine par process.exit et ne doit jamais
@@ -1313,7 +1327,7 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
   </tr>`;
 }
 
-function banner(lastRun: RunRow | null, lastSuccess: RunRow | null): string {
+function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: boolean): string {
   if (!lastRun) {
     return `<div class="statut warn"><span class="pastille"></span>Aucune donnée pour l'instant — la première mise à jour n'a pas encore eu lieu.</div>`;
   }
@@ -1322,7 +1336,7 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null): string {
     return `<div class="banner error">⚠️ La dernière mise à jour a échoué. Données affichées : ${esc(when)}. L'administrateur a été prévenu.</div>`;
   }
   if (lastRun.status === "running") {
-    if (!runInFlight(lastRun)) {
+    if (!inFlight) {
       const when = lastSuccess?.finished_at ? frDateTime(new Date(lastSuccess.finished_at)) : "jamais";
       return `<div class="banner error">⚠️ La dernière mise à jour semble interrompue (démarrée le ${esc(
         frDateTime(new Date(lastRun.started_at)),
@@ -1374,11 +1388,13 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const sourceParam = url.searchParams.get("source") ?? "";
   const source = isSource(sourceParam) ? sourceParam : null;
 
-  const [lastRun, lastSuccess, statuts] = await Promise.all([
+  const [lastRun0, lastSuccess, statuts] = await Promise.all([
     getLastRun(),
     getLastSuccessfulRun(),
     listStatuses(false),
   ]);
+  const inFlight = await runInFlight(lastRun0);
+  const lastRun = inFlight || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
   const [items, sourceCounts] = lastSuccess
     ? await Promise.all([
         getCurrent(dbCategory, lastSuccess.id, { statusId, hideRejet: masquer, famille, source }),
@@ -1446,7 +1462,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const body = `
   <style>${DASHBOARD_CSS}</style>
   <main>
-    ${banner(lastRun, lastSuccess)}
+    ${banner(lastRun, lastSuccess, inFlight)}
     ${tabs}
     ${filtres}
     ${table}
