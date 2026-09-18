@@ -65,6 +65,9 @@ export async function migrate(): Promise<void> {
   // Classification via OpenRouter : coût/usage du run, avertissement non
   // bloquant (coupe-circuit, clé absente), et qui a classé chaque avis.
   await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS llm_stats jsonb`;
+  // Les runs écrits avant le 18/09/2026 ont un jsonb « chaîne » (le JSON était
+  // lui-même sérialisé une seconde fois par le pilote) : on le déplie une fois.
+  await sql`UPDATE runs SET llm_stats = (llm_stats #>> '{}')::jsonb WHERE jsonb_typeof(llm_stats) = 'string'`;
   await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS warning text`;
   await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS classifier text`;
   // Sources secondaires (achatpublic.com) et familles de veille (src/familles.ts).
@@ -206,7 +209,7 @@ export async function finishRun(
         relevant_count = ${outcome.relevant},
         travaux_count = ${outcome.travaux},
         excluded_count = ${outcome.excluded},
-        llm_stats = ${outcome.llmStats ? JSON.stringify(outcome.llmStats) : null}::jsonb,
+        llm_stats = ${outcome.llmStats ? JSON.stringify(outcome.llmStats) : null}::text::jsonb,
         warning = ${outcome.warning?.slice(0, 2000) ?? null}
       WHERE id = ${id}`;
   } else {
@@ -315,14 +318,37 @@ export type RunRow = {
   warning?: string | null;
 };
 
+// llm_stats peut revenir en chaîne JSON (colonne jsonb de type « string »,
+// écrite par une version antérieure) : on la déplie, et on ignore ce qui n'a
+// pas la forme attendue plutôt que de faire tomber la page.
+export function normalizeLlmStats(v: unknown): LlmStats | null {
+  let s: unknown = v;
+  if (typeof s === "string") {
+    try {
+      s = JSON.parse(s);
+    } catch {
+      return null;
+    }
+  }
+  if (!s || typeof s !== "object") return null;
+  const o = s as Partial<LlmStats>;
+  if (typeof o.calls !== "number") return null;
+  return { ...o, byModel: o.byModel && typeof o.byModel === "object" ? o.byModel : {} } as LlmStats;
+}
+
+function toRunRow(row: Record<string, unknown> | undefined): RunRow | null {
+  if (!row) return null;
+  return { ...(row as RunRow), llm_stats: normalizeLlmStats(row.llm_stats) };
+}
+
 export async function getLastRun(): Promise<RunRow | null> {
   const rows = await db()`SELECT * FROM runs ORDER BY id DESC LIMIT 1`;
-  return (rows[0] as RunRow) ?? null;
+  return toRunRow(rows[0] as Record<string, unknown> | undefined);
 }
 
 export async function getLastSuccessfulRun(): Promise<RunRow | null> {
   const rows = await db()`SELECT * FROM runs WHERE status = 'success' ORDER BY id DESC LIMIT 1`;
-  return (rows[0] as RunRow) ?? null;
+  return toRunRow(rows[0] as Record<string, unknown> | undefined);
 }
 
 // Announcements still present in the latest successful run, deadline not passed
