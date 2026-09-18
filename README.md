@@ -67,11 +67,15 @@ A full run hits the portal API ~30 times (~3 minutes for ~3 000 records over a 1
 ## Checks
 
 ```bash
-bun run typecheck && bun run lint && bun test && bun run build   # what CI runs
-TEST_DATABASE_URL=postgresql://<user>@localhost:5432/avis_test bun test live.integration
+bun run typecheck && bun run lint && bun test && bun run build   # unit tests only
+TEST_DATABASE_URL=postgresql://<user>@localhost:5432/avis_test bun test   # + integration tests — what CI runs
 ```
 
-The unit tests are pure logic (no DB, no network). The second line runs the live-engine integration tests against a throwaway local Postgres (`createdb avis_test`): they boot the Skip engine, subscribe to a thread over SSE, write comments and status changes, kill the engine's Postgres connection with `pg_terminate_backend` and check the thread keeps updating. They are skipped when `TEST_DATABASE_URL` is unset (CI has no DB), so run them locally before touching the Skip packages, their patch, or `src/live.ts`.
+Unit tests are pure logic (no DB, no network). With `TEST_DATABASE_URL` pointing at a throwaway local Postgres (`createdb avis_test`) the three integration files also run, and CI runs them against a `postgres:16` service container before every deploy:
+
+- `db.integration` — the real schema: the jsonb shape stored for run statistics and its migration, the run advisory lock seen from a second connection, orphaned « running » rows closed at start, dashboard filters by source and family, counts per source.
+- `server.integration` — spawns the real `bun src/server.ts` on a test port, logs in with the dev login code printed on stderr, and checks `/sante`, the dashboard (badges, `?source=`, `?famille=`), `/configuration` (sources card, LLM statistics, an orphaned run being closed) and a notice page.
+- `live.integration` — boots the Skip engine, subscribes to a thread over SSE, writes comments and status changes, kills the engine's Postgres connection with `pg_terminate_backend` and checks the thread keeps updating. Run it before touching the Skip packages, their patch, or `src/live.ts`.
 
 ## Classifier modes
 

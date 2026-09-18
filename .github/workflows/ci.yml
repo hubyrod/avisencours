@@ -22,6 +22,21 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Base Postgres jetable : les tests d'intégration (db, server, live) ne
+    # tournent que si TEST_DATABASE_URL est défini — ici, toujours.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: avis
+          POSTGRES_PASSWORD: avis
+          POSTGRES_DB: avis_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U avis"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -45,7 +60,9 @@ jobs:
       - name: Lint
         run: bun run lint
 
-      - name: Test
+      - name: Test (unit + integration on a throwaway Postgres)
+        env:
+          TEST_DATABASE_URL: postgresql://avis:avis@localhost:5432/avis_test
         run: bun test
 
       - name: Build
