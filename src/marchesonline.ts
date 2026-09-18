@@ -160,6 +160,9 @@ export type ScrapeMarchesOnlineOptions = {
   maxPagesPerKeyword?: number;
   client?: MarchesOnlineClient;
   log?: (msg: string) => void;
+  // Avancement : mots-clés parcourus / mots-clés (le nombre de pages n'est
+  // connu qu'au fil de l'eau).
+  onPage?: (done: number, total: number | null) => void;
 };
 
 export type MarchesOnlineItem = Announcement & { matchedQueries: string[] };
@@ -178,7 +181,8 @@ export async function scrapeMarchesOnline(opts: ScrapeMarchesOnlineOptions): Pro
   const matched = new Map<string, { card: MoCard; famille: FamilleSearch["famille"]; keywords: string[] }>();
   let pages = 0;
   let total = 0;
-  for (const term of terms) {
+  for (const [i, term] of terms.entries()) {
+    opts.onPage?.(i, terms.length);
     let count: number | null = null;
     for (let page = 1; page <= maxPages; page++) {
       const html = await get(client, listUrl(term, page));

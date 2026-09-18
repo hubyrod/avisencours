@@ -173,6 +173,8 @@ export type ScrapeMpeOptions = {
   maxPages?: number;
   client?: MaximilienClient;
   log?: (msg: string) => void;
+  // Avancement : pages de liste lues / pages annoncées.
+  onPage?: (done: number, total: number | null) => void;
 };
 
 export type MpeItem = Announcement & { matchedQueries: string[] };
@@ -192,6 +194,7 @@ export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
   const matched = new Map<string, { row: MxRow; famille: FamilleSearch["famille"]; keywords: string[] }>();
   let count = 0;
   for (;;) {
+    opts.onPage?.(page, pages);
     const rows = parseRows(html);
     if (rows.length === 0 && page === 1 && total !== 0) throw new Error("aucune consultation lue — structure de page changée ?");
     for (const row of rows) {

@@ -60,6 +60,25 @@ if (!TEST_URL) {
     });
   });
 
+  describe("runs.progress", () => {
+    test("updateRunProgress stocke un objet jsonb relu avec le run", async () => {
+      const id = await db.startRun();
+      const progress = {
+        steps: [
+          { id: "boamp", label: "BOAMP", status: "done" as const, done: 38, total: 38, unit: "pages" as const },
+          { id: "classify", label: "Classement", status: "running" as const, done: 120, total: 3900, unit: "avis" as const },
+        ],
+        updatedAt: "2026-09-18T10:00:00.000Z",
+      };
+      await db.updateRunProgress(id, progress);
+      const [row] = (await control`SELECT jsonb_typeof(progress) AS t FROM runs WHERE id = ${id}`) as Array<{ t: string }>;
+      expect(row!.t).toBe("object");
+      expect((await db.getLastRun())?.progress).toEqual(progress);
+      await db.finishRun(id, { status: "success", totalFetched: 0, relevant: 0, travaux: 0, excluded: 0 });
+      expect((await db.getLastRun())?.progress).toEqual(progress);
+    });
+  });
+
   describe("verrou et runs orphelins", () => {
     test("isRunLockHeld suit le verrou d'une autre session", async () => {
       expect(await db.isRunLockHeld()).toBe(false);

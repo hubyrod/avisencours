@@ -1,4 +1,5 @@
 import { SQL } from "bun";
+import { normalizeProgress, type RunProgress } from "./progress.ts";
 import type { ClassifiedItem } from "./pipeline.ts";
 import { KEYWORDS } from "./defaults.ts";
 import type { LlmStats } from "./llm.ts";
@@ -69,6 +70,8 @@ export async function migrate(): Promise<void> {
   // lui-même sérialisé une seconde fois par le pilote) : on le déplie une fois.
   await sql`UPDATE runs SET llm_stats = (llm_stats #>> '{}')::jsonb WHERE jsonb_typeof(llm_stats) = 'string'`;
   await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS warning text`;
+  // Progression du run en cours (src/progress.ts), écrite par le job au fil des étapes.
+  await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS progress jsonb`;
   await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS classifier text`;
   // Sources secondaires (achatpublic.com) et familles de veille (src/familles.ts).
   await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'boamp'`;
@@ -214,6 +217,12 @@ export async function startRun(): Promise<number> {
   return Number(rows[0].id);
 }
 
+// Écrit l'état d'avancement (jalons + compteurs). Ne doit jamais faire
+// échouer un run : l'appelant ignore les erreurs.
+export async function updateRunProgress(id: number, progress: RunProgress): Promise<void> {
+  await db()`UPDATE runs SET progress = ${JSON.stringify(progress)}::text::jsonb WHERE id = ${id}`;
+}
+
 export async function finishRun(
   id: number,
   outcome:
@@ -342,6 +351,7 @@ export type RunRow = {
   digest_sent?: boolean;
   llm_stats?: LlmStats | null;
   warning?: string | null;
+  progress?: RunProgress | null;
 };
 
 // llm_stats peut revenir en chaîne JSON (colonne jsonb de type « string »,
@@ -364,7 +374,7 @@ export function normalizeLlmStats(v: unknown): LlmStats | null {
 
 function toRunRow(row: Record<string, unknown> | undefined): RunRow | null {
   if (!row) return null;
-  return { ...(row as RunRow), llm_stats: normalizeLlmStats(row.llm_stats) };
+  return { ...(row as RunRow), llm_stats: normalizeLlmStats(row.llm_stats), progress: normalizeProgress(row.progress) };
 }
 
 export async function getLastRun(): Promise<RunRow | null> {

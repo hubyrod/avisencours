@@ -8,6 +8,7 @@ import {
   getNewSinceLastDigest,
   getUpcomingDeadlines,
   markDigestSent,
+  updateRunProgress,
   listKeywords,
   listScopeRules,
   getSetting,
@@ -30,6 +31,8 @@ import {
 } from "./email.ts";
 import { cleanupAuth, getDigestUserEmails } from "./auth.ts";
 import type { LlmStats } from "./llm.ts";
+import { SOURCES } from "./sources.ts";
+import { ProgressTracker } from "./progress.ts";
 
 function frDate(d: Date): string {
   return d.toLocaleDateString("fr-FR", {
@@ -77,6 +80,23 @@ async function main() {
   const runId = await startRun();
   console.error(`run #${runId} started`);
 
+  // Jalons : une étape par source (même désactivée : elle apparaît « sautée »),
+  // puis le classement, puis l'email. Chaque changement d'état est écrit dans
+  // runs.progress (compteurs limités à un écrit toutes les 2 s) ; une erreur
+  // d'écriture ne doit jamais interrompre le run.
+  const progress = new ProgressTracker(
+    [
+      ...SOURCES.map((s) => ({ id: s.id, label: s.label, unit: s.id === "marchesonline" ? ("mots-clés" as const) : ("pages" as const) })),
+      { id: "classify", label: "Classement", unit: "avis" as const },
+      { id: "digest", label: "Email quotidien" },
+    ],
+    {
+      onChange: (p) => {
+        updateRunProgress(runId, p).catch((e) => console.error(`progress write failed: ${e}`));
+      },
+    },
+  );
+
   try {
     // Configuration éditable (/configuration) — lue ici, dans le try, pour
     // qu'un échec de lecture passe par le circuit erreur + email d'alerte.
@@ -106,10 +126,13 @@ async function main() {
       llmModels: chainFromSetting(modelsSetting),
       scopeRules,
       codeDepartement: dep.ok ? dep.codes : [],
+      progress,
     });
 
     const all = [...relevant, ...travaux, ...excluded];
     await upsertAnnouncements(runId, all);
+    // Le dernier compteur a pu être retenu par la limitation : état final exact.
+    await updateRunProgress(runId, progress.snapshot()).catch((e) => console.error(`progress write failed: ${e}`));
     await finishRun(runId, {
       status: "success",
       totalFetched: all.length,
@@ -138,6 +161,7 @@ async function main() {
     // resteront « nouvelles » pour le prochain digest réellement envoyé.
     if (Bun.env.SKIP_DIGEST === "1") {
       console.error("SKIP_DIGEST=1 — skipping digest email (manual run)");
+      progress.skip("digest", "mise à jour manuelle");
       return;
     }
 
@@ -147,6 +171,7 @@ async function main() {
     // ci-dessus tient lieu de signe de vie pour la journée.
     if (llm?.breakerTripped) {
       console.error("LLM breaker tripped — skipping digest email (will be sent by the next healthy run)");
+      progress.skip("digest", "coupe-circuit LLM : reporté au prochain run sain");
       return;
     }
 
@@ -154,8 +179,10 @@ async function main() {
     const recipients = uniqueEmails([await getDigestUserEmails()]);
     if (recipients.length === 0 || !hasEmailToken()) {
       console.error("no opted-in digest recipients or no MAILPACE_API_TOKEN — skipping digest email");
+      progress.skip("digest", recipients.length === 0 ? "aucun destinataire" : "envoi d'email non configuré");
       return;
     }
+    progress.start("digest");
 
     const newRelevant = await getNewSinceLastDigest(runId, "relevant");
     const upcoming = await getUpcomingDeadlines(runId, digestWindow);
@@ -176,6 +203,7 @@ async function main() {
     });
     await markDigestSent(runId);
     console.error(`digest sent to ${recipients.length} recipient(s)`);
+    progress.finish("digest", `${recipients.length} destinataire${recipients.length > 1 ? "s" : ""}`);
   } catch (err) {
     const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
     console.error(`run #${runId} failed: ${msg}`);

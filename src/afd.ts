@@ -192,6 +192,8 @@ export type ScrapeAfdOptions = {
   maxPages?: number;
   client?: AfdClient;
   log?: (msg: string) => void;
+  // Avancement : pages de liste lues (le total n'est pas annoncé).
+  onPage?: (done: number, total: number | null) => void;
 };
 
 export async function scrapeAfd(opts: ScrapeAfdOptions = {}): Promise<Announcement[]> {
@@ -213,6 +215,7 @@ export async function scrapeAfd(opts: ScrapeAfdOptions = {}): Promise<Announceme
   const rows: AfdRow[] = [];
   const seen = new Set<string>();
   for (let page = 1; ; page++) {
+    opts.onPage?.(page, null);
     const pageRows = parseListRows(html);
     if (pageRows.length === 0 && page === 1 && total !== 0 && !/Aucun avis trouvé/.test(html)) {
       throw new Error("AFD : aucune ligne lue — structure de page changée ?");

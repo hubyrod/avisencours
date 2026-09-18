@@ -212,6 +212,8 @@ export type ScrapeAchatPublicOptions = {
   maxPages?: number;
   client?: AchatPublicClient;
   log?: (msg: string) => void;
+  // Avancement : pages de liste lues / pages annoncées (toutes natures cumulées).
+  onPage?: (done: number, total: number | null) => void;
 };
 
 export type AchatPublicItem = Announcement & { matchedQueries: string[] };
@@ -224,6 +226,7 @@ export async function scrapeAchatPublic(opts: ScrapeAchatPublicOptions): Promise
   const client = opts.client ?? defaultClient;
   const out: AchatPublicItem[] = [];
   const natures = [...new Set(opts.searches.map((s) => s.marche))];
+  let pagesDone = 0;
 
   for (const marche of natures) {
     const session = new Session(client);
@@ -239,7 +242,10 @@ export async function scrapeAchatPublic(opts: ScrapeAchatPublicOptions): Promise
     const seen = new Set<string>();
     const matched = new Map<string, { card: Card; famille: FamilleSearch["famille"]; keywords: string[] }>();
     let total = 0;
+    const pagesBefore = pagesDone;
     while (true) {
+      // Total = pages déjà lues (autres natures) + pages annoncées pour celle-ci.
+      opts.onPage?.(++pagesDone, pagesBefore + pages);
       const cards = parseCards(html);
       if (cards.length === 0 && page === 1) throw new Error(`achatpublic : aucune carte lue (${marche}) — structure de page changée ?`);
       for (const card of cards) {

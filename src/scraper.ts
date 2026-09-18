@@ -42,7 +42,7 @@ type OdsResponse = { total_count: number; results: OdsRecord[] };
 export type ScrapeOptions = {
   maxPages?: number;
   pageSize?: number;
-  onPage?: (pageNum: number, items: Announcement[]) => void;
+  onPage?: (pageNum: number, items: Announcement[], totalPages: number) => void;
 };
 
 export async function scrapeAll(
@@ -67,7 +67,7 @@ export async function scrapeAll(
     if (items.length === 0) break;
 
     all.push(...items);
-    opts.onPage?.(pageNum, items);
+    opts.onPage?.(pageNum, items, Math.max(1, Math.ceil(data.total_count / pageSize)));
 
     if (start + items.length >= data.total_count) break;
     if (items.length < pageSize) break;

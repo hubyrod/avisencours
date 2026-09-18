@@ -168,6 +168,46 @@ if (!TEST_URL) {
     expect(home.text).toContain("Plan de mobilité BOAMP");
   });
 
+  test("run en cours (verrou tenu) : jalons sur la configuration, résumé sur le tableau de bord, /sante", async () => {
+    const progress = {
+      steps: [
+        { id: "boamp", label: "BOAMP", status: "done", done: 38, total: 38, unit: "pages", startedAt: "2026-09-18T10:00:00Z", finishedAt: "2026-09-18T10:12:00Z" },
+        { id: "achatpublic", label: "achatpublic.com", status: "skipped", detail: "désactivée" },
+        { id: "afd", label: "AFD (dgMarket)", status: "failed", detail: "indisponible : 503" },
+        { id: "maximilien", label: "Maximilien", status: "running", done: 8, total: 22, unit: "pages", startedAt: "2026-09-18T10:12:00Z" },
+        { id: "classify", label: "Classement", status: "pending", unit: "avis" },
+      ],
+      updatedAt: "2026-09-18T10:13:00Z",
+    };
+    await control`SELECT pg_advisory_lock(823741)`;
+    try {
+      await control`INSERT INTO runs (status, progress) VALUES ('running', ${JSON.stringify(progress)}::text::jsonb)`;
+      const conf = await get("/configuration");
+      expect(conf.status).toBe(200);
+      expect(conf.text).toContain("Mise à jour en cours");
+      expect(conf.text).toContain('role="progressbar"');
+      expect(conf.text).toContain("8 / 22 pages");
+      expect(conf.text).toContain("indisponible : 503");
+      expect(conf.text).toContain("désactivée");
+      expect(conf.text).toContain('content="15"');
+      expect(conf.text).toContain('<button class="primary" disabled>Relancer maintenant</button>');
+
+      const home = await get("/");
+      expect(home.text).toContain("Mise à jour en cours — BOAMP terminé · AFD (dgMarket) en échec · Maximilien 8 / 22 pages · démarrée il y a");
+
+      const sante = JSON.parse((await get("/sante")).text);
+      expect(sante.lastRun.status).toBe("running");
+      expect(sante.lastRun.progress.steps).toHaveLength(5);
+    } finally {
+      await control`SELECT pg_advisory_unlock(823741)`;
+    }
+    // Verrou relâché : la ligne est clôturée au prochain affichage, comme avant.
+    const conf = await get("/configuration");
+    expect(conf.text).not.toContain("Mise à jour en cours");
+    const rows = (await control`SELECT status FROM runs ORDER BY id DESC LIMIT 1`) as Array<{ status: string }>;
+    expect(rows[0]!.status).toBe("error");
+  });
+
   test("fiche d'un avis et avis inconnu", async () => {
     const page = await get("/avis/CSL_1");
     expect(page.status).toBe(200);

@@ -1,6 +1,7 @@
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
 import { SOURCES, isSource, isSourceEnabled, sourceLabel, type SourceInfo } from "./sources.ts";
 import { errMessage } from "./http.ts";
+import { formatCounter, formatDuration, progressPercent, summarizeProgress, type RunProgress } from "./progress.ts";
 import {
   migrate,
   getLastRun,
@@ -590,6 +591,50 @@ function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null): strin
       </div>`;
 }
 
+// Jalons de la mise à jour (runs.progress) : liste des étapes avec état,
+// compteur et durée, plus une barre globale. En cours (`live`) : l'étape en
+// cours affiche son temps écoulé ; terminée : récapitulatif compact.
+const STEP_GLYPH: Record<string, string> = { done: "●", running: "◐", pending: "○", failed: "✕", skipped: "–" };
+
+function renderProgress(run: RunRow | null, live: boolean): string {
+  const p: RunProgress | null | undefined = run?.progress;
+  if (!run || !p || p.steps.length === 0) return "";
+  const now = Date.now();
+  const rows = p.steps
+    .map((s) => {
+      const counter = formatCounter(s);
+      let duration = "";
+      if (s.status === "running" && s.startedAt && live) duration = `depuis ${formatDuration(now - new Date(s.startedAt).getTime())}`;
+      else if (s.startedAt && s.finishedAt) duration = formatDuration(new Date(s.finishedAt).getTime() - new Date(s.startedAt).getTime());
+      const parts = [counter, s.detail ?? "", duration].filter(Boolean).map(esc).join(" · ");
+      return `<li class="etape ${s.status}"><span class="glyphe" aria-hidden="true">${STEP_GLYPH[s.status] ?? "○"}</span><span class="lbl">${esc(
+        s.label,
+      )}</span><span class="info">${parts}</span></li>`;
+    })
+    .join("");
+  const pct = Math.round(progressPercent(p) * 100);
+  const bar = live
+    ? `<div class="barre" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" title="${pct} %"><div class="remplissage" style="width:${pct}%"></div></div>`
+    : "";
+  return `
+        <style>
+          .barre { height: 8px; background: #e5efe9; border-radius: 4px; overflow: hidden; margin: 10px 0 6px; }
+          .remplissage { height: 100%; background: var(--panneau); transition: width .3s; }
+          ul.etapes { list-style: none; padding: 0; margin: 6px 0 10px; font-size: 13px; }
+          .etape { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; color: var(--encre-2); }
+          .etape .glyphe { width: 14px; text-align: center; flex: none; }
+          .etape .lbl { min-width: 190px; color: var(--encre); }
+          .etape.done .glyphe { color: var(--vert); }
+          .etape.running { color: var(--encre); font-weight: 600; }
+          .etape.running .glyphe { color: var(--ambre); }
+          .etape.failed .glyphe, .etape.failed .info { color: var(--rouge); }
+          .etape.skipped, .etape.pending { color: var(--encre-2); opacity: .8; }
+          .etape .info { font-weight: 400; }
+        </style>
+        ${bar}
+        <ul class="etapes">${rows}</ul>`;
+}
+
 function llmRunLine(run: RunRow): string {
   const parts: string[] = [];
   if (run.llm_stats) parts.push(` — LLM : ${esc(llmStatsSummary(run.llm_stats))}`);
@@ -685,7 +730,7 @@ async function configPage(
       <h2 class="titre-page">Configuration de la veille</h2>
       <p class="retour"><a href="/">← Retour aux avis</a></p>
       ${banner}
-      ${running ? '<meta http-equiv="refresh" content="30">' : ""}
+      ${running ? '<meta http-equiv="refresh" content="15">' : ""}
 
       <div class="card" style="margin:16px 0;max-width:640px;">
         <h2>Mots-clés de recherche</h2>
@@ -760,9 +805,11 @@ async function configPage(
         <p>${runLine}</p>
         ${
           running
-            ? `<div class="banner ok">Mise à jour en cours… Cette page se rafraîchit automatiquement.</div>
+            ? `<div class="banner ok">Mise à jour en cours… Cette page se rafraîchit toutes les 15 secondes.</div>
+               ${renderProgress(lastRun, true)}
                <div class="actions"><button class="primary" disabled>Relancer maintenant</button></div>`
-            : `<p style="color:var(--encre-2);font-size:13.5px;">
+            : `${renderProgress(lastRun, false)}
+               <p style="color:var(--encre-2);font-size:13.5px;">
                  Lance immédiatement une récupération et un reclassement des avis
                  (35 à 45 minutes avec toutes les sources). Aucun email n'est envoyé lors d'une
                  mise à jour manuelle. Un redéploiement de l'application pendant ce temps
@@ -1342,7 +1389,10 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: bo
         frDateTime(new Date(lastRun.started_at)),
       )}). Données affichées : ${esc(when)}. Relancez-la depuis la page Configuration.</div>`;
     }
-    return `<div class="statut warn"><span class="pastille"></span>Mise à jour en cours…</div>`;
+    const resume = lastRun.progress
+      ? ` — ${esc(summarizeProgress(lastRun.progress, new Date(lastRun.started_at)))}`
+      : "";
+    return `<div class="statut warn"><span class="pastille"></span>Mise à jour en cours${resume}</div>`;
   }
   const when = lastRun.finished_at ? frDateTime(new Date(lastRun.finished_at)) : "?";
   return `<div class="statut ok"><span class="pastille"></span>Dernière mise à jour : ${esc(when)} — ${lastRun.relevant_count ?? 0} avis pertinents.</div>`;
@@ -1628,7 +1678,7 @@ async function health(): Promise<Response> {
       live: isLiveReady(),
       livePg: liveAdapterState(),
       lastRun: lastRun
-        ? { id: lastRun.id, status: lastRun.status, finishedAt: lastRun.finished_at }
+        ? { id: lastRun.id, status: lastRun.status, finishedAt: lastRun.finished_at, progress: lastRun.progress ?? null }
         : null,
     });
   } catch (err) {

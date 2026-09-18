@@ -4,7 +4,9 @@ import { scrapeAchatPublic } from "./achatpublic.ts";
 import { scrapeAfd } from "./afd.ts";
 import { MPE_SITES, scrapeMpe } from "./mpe.ts";
 import { scrapeMarchesOnline } from "./marchesonline.ts";
-import { isSourceEnabled, sourceLabel } from "./sources.ts";
+import { SOURCES, isSourceEnabled, sourceLabel } from "./sources.ts";
+import type { ProgressTracker } from "./progress.ts";
+import type { Source } from "./scraper.ts";
 import { classifyFamille } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM, type LlmContext } from "./classify-llm.ts";
@@ -46,6 +48,9 @@ export type PipelineOptions = {
   mpe?: boolean;
   marchesOnline?: boolean;
   log?: (msg: string) => void;
+  // Suivi d'avancement (jalons par source + classement), alimenté si fourni.
+  // Les identifiants d'étape sont ceux des sources (src/sources.ts) et « classify ».
+  progress?: ProgressTracker;
 };
 
 export type PipelineResult = {
@@ -67,7 +72,9 @@ async function scrapeBoamp(
   maxPages: number,
   codeDepartement: string[] | undefined,
   log: (msg: string) => void,
+  progress?: ProgressTracker,
 ): Promise<CachedItem[]> {
+  progress?.start("boamp");
   const params = buildDefaultParams(query);
   if (codeDepartement?.length) params.codeDepartement = codeDepartement;
 
@@ -76,7 +83,10 @@ async function scrapeBoamp(
   const items = await scrapeAll(params, {
     maxPages,
     pageSize: 100,
-    onPage: (n, batch) => log(`  page ${n}: ${batch.length} items`),
+    onPage: (n, batch, totalPages) => {
+      log(`  page ${n}: ${batch.length} items`);
+      progress?.advance("boamp", n, totalPages);
+    },
   });
 
   const byId = new Map<string, CachedItem>();
@@ -86,26 +96,33 @@ async function scrapeBoamp(
     if (!byId.has(key)) byId.set(key, { ...it, matchedQueries: [query] });
   }
 
-  return [...byId.values()];
+  const arr = [...byId.values()];
+  progress?.finish("boamp", `${arr.length} avis`);
+  return arr;
 }
 
 // Sources secondaires (achatpublic.com, AFD/dgMarket) : non bloquantes — une
 // panne d'un site (ou un changement de sa page) ne doit pas faire échouer la
 // veille BOAMP ; elle remonte en avertissement (email d'alerte, page
 // configuration) et ses avis ne sont simplement pas revus ce jour-là.
-type SecondarySource = { name: string; run: () => Promise<Announcement[]> };
+type OnPage = (done: number, total: number | null) => void;
+type SecondarySource = { id: Source; name: string; run: (onPage: OnPage) => Promise<Announcement[]> };
 
 async function scrapeSecondary(
   sources: SecondarySource[],
   codeDepartement: string[] | undefined,
   log: (msg: string) => void,
+  progress?: ProgressTracker,
 ): Promise<{ items: CachedItem[]; warnings: string[] }> {
   const items: CachedItem[] = [];
   const warnings: string[] = [];
   for (const src of sources) {
     log(`${src.name}: lecture des avis en cours…`);
+    progress?.start(src.id);
     try {
-      for (const it of (await src.run()).filter(keep)) {
+      const found = (await src.run((done, total) => progress?.advance(src.id, done, total))).filter(keep);
+      progress?.finish(src.id, `${found.length} avis retenu${found.length > 1 ? "s" : ""}`);
+      for (const it of found) {
         // Filtre départements : ne s'applique qu'aux avis dont on connaît le code
         // (une consultation « France entière » ou un pays étranger passe).
         const codes = it.department.split(",").map((c) => c.trim()).filter((c) => /^(\d{2,3}|2A|2B)$/.test(c));
@@ -116,6 +133,7 @@ async function scrapeSecondary(
       const warning = `${src.name} indisponible — ${errMessage(err)} — ses avis ne sont pas mis à jour ce run`;
       log(warning);
       warnings.push(warning);
+      progress?.fail(src.id, `indisponible : ${errMessage(err).slice(0, 120)}`);
     }
   }
   return { items, warnings };
@@ -129,10 +147,12 @@ async function loadAll(
   useCache: boolean,
   log: (msg: string) => void,
 ): Promise<{ items: CachedItem[]; warning?: string }> {
+  const progress = opts.progress;
   if (useCache) {
     const f = Bun.file(cachePath);
     if (await f.exists()) {
       log(`loading cache: ${cachePath}`);
+      for (const s of SOURCES) progress?.skip(s.id, "cache");
       const cached = (await f.json()) as Array<Partial<CachedItem> & Announcement>;
       // Cache antérieur aux champs source / famille : c'était du BOAMP.
       return {
@@ -145,23 +165,40 @@ async function loadAll(
       };
     }
   }
-  const boamp = await scrapeBoamp(query, maxPages, opts.codeDepartement, log);
   // Activation : option explicite, sinon la variable d'environnement de la
   // source (src/sources.ts — même registre que la page de configuration).
+  // Déterminée avant BOAMP pour que les sources désactivées apparaissent
+  // « sautées » dès le début de la progression.
   const sources: SecondarySource[] = [];
   if (opts.achatPublic ?? isSourceEnabled("achatpublic")) {
-    sources.push({ name: sourceLabel("achatpublic"), run: () => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log }) });
+    sources.push({
+      id: "achatpublic",
+      name: sourceLabel("achatpublic"),
+      run: (onPage) => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log, onPage }),
+    });
   }
-  if (opts.afd ?? isSourceEnabled("afd")) sources.push({ name: sourceLabel("afd"), run: () => scrapeAfd({ log }) });
+  if (opts.afd ?? isSourceEnabled("afd")) sources.push({ id: "afd", name: sourceLabel("afd"), run: (onPage) => scrapeAfd({ log, onPage }) });
   for (const site of MPE_SITES) {
     if (opts.mpe ?? isSourceEnabled(site.source)) {
-      sources.push({ name: sourceLabel(site.source), run: () => scrapeMpe({ site, searches: MPE_SEARCHES, log }) });
+      sources.push({
+        id: site.source,
+        name: sourceLabel(site.source),
+        run: (onPage) => scrapeMpe({ site, searches: MPE_SEARCHES, log, onPage }),
+      });
     }
   }
   if (opts.marchesOnline ?? isSourceEnabled("marchesonline")) {
-    sources.push({ name: sourceLabel("marchesonline"), run: () => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log }) });
+    sources.push({
+      id: "marchesonline",
+      name: sourceLabel("marchesonline"),
+      run: (onPage) => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log, onPage }),
+    });
   }
-  const secondary = await scrapeSecondary(sources, opts.codeDepartement, log);
+  for (const s of SOURCES) {
+    if (s.id !== "boamp" && !sources.some((x) => x.id === s.id)) progress?.skip(s.id, "désactivée");
+  }
+  const boamp = await scrapeBoamp(query, maxPages, opts.codeDepartement, log, progress);
+  const secondary = await scrapeSecondary(sources, opts.codeDepartement, log, progress);
   const ids = new Set(boamp.map((it) => it.idweb));
   const items = [...boamp, ...secondary.items.filter((it) => !ids.has(it.idweb))];
   await Bun.write(cachePath, JSON.stringify(items, null, 2));
@@ -263,7 +300,15 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
   };
 
   const concurrency = mode === "regex" ? items.length : 5;
-  const classifications = await mapConcurrent(items, classifyOne, concurrency);
+  opts.progress?.start("classify", items.length);
+  let classified = 0;
+  const classifyCounted = async (it: Announcement): Promise<Classification> => {
+    const c = await classifyOne(it);
+    opts.progress?.advance("classify", ++classified);
+    return c;
+  };
+  const classifications = await mapConcurrent(items, classifyCounted, concurrency);
+  opts.progress?.finish("classify", mode === "regex" ? "règles regex" : `${mode} — ${ctx ? llmStatsSummary(ctx.stats) : ""}`);
   if (forcedKeep || forcedExclude) {
     log(`règles personnalisées: ${forcedKeep} gardé(s), ${forcedExclude} exclu(s)`);
   }
