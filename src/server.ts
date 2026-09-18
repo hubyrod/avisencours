@@ -1,3 +1,4 @@
+import { FAMILLE_LABELS, type Famille } from "./familles.ts";
 import {
   migrate,
   getLastRun,
@@ -1066,6 +1067,8 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
     .join("");
 
   const facts: Array<[string, string | null]> = [
+    ["Source", a.source === "achatpublic" ? "achatpublic.com" : "BOAMP"],
+    ["Famille", a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null],
     ["Acheteur", a.acheteur],
     ["Département", a.department],
     ["Date limite", a.deadline_text],
@@ -1208,6 +1211,16 @@ function jChip(deadline: Date | null): string {
   return `<span class="jrest ${urgence}">J−${j}</span>`;
 }
 
+// Provenance hors BOAMP et famille hors mobilité : badges discrets sur la ligne.
+function sourceBadges(a: StoredAnnouncement): string {
+  let out = "";
+  if (a.source && a.source !== "boamp") out += `<span class="badge src">${esc(a.source)}</span>`;
+  if (a.famille && a.famille !== "mobilité") {
+    out += `<span class="badge fam">${esc(FAMILLE_LABELS[a.famille as Famille] ?? a.famille)}</span>`;
+  }
+  return out;
+}
+
 function announcementRow(a: StoredAnnouncement, latestRunId: number | null): string {
   const isNew = latestRunId !== null && a.first_seen_run_id === latestRunId;
   const tooltip = statusTooltip(
@@ -1236,8 +1249,8 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
     }</td>
     <td>
       <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.objet)}</a>
-      ${isNew ? '<span class="badge">Nouveau</span>' : ""}
-      <div class="meta">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department ?? "?")}${
+      ${isNew ? '<span class="badge">Nouveau</span>' : ""}${sourceBadges(a)}
+      <div class="meta">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department || "?")}${
         a.type_avis ? ` — ${esc(a.type_avis)}` : ""
       }${
         a.published_at ? ` — publié le ${esc(a.published_at)}` : ""
@@ -1281,6 +1294,8 @@ const DASHBOARD_CSS = `
     .jdate { font-family: var(--fonte-mono); font-size: 11px; color: var(--encre-2); margin-top: 3px; }
     .statut-col { width: 1%; white-space: nowrap; }
     .badge { display: inline-block; background: #e5efe9; color: var(--vert); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 4px; margin-left: 7px; vertical-align: 1px; }
+    .badge.src { background: #eef1f6; color: #3b4a6b; }
+    .badge.fam { background: #fbf1e3; color: #8a5a12; }
     .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
     .filtres { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; font-size: 13px; color: var(--encre-2); flex-wrap: wrap; }
     .filtres select { padding: 5px 8px; border: 1px solid var(--ligne-forte); border-radius: 6px; font-family: inherit; background: var(--carte); font-size: 13px; color: var(--encre); }
@@ -1297,6 +1312,8 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const statutParam = Number(url.searchParams.get("statut"));
   const statusId = Number.isInteger(statutParam) && statutParam > 0 ? statutParam : null;
   const masquer = url.searchParams.get("masquer") === "1";
+  const familleParam = url.searchParams.get("famille") ?? "";
+  const famille = (Object.keys(FAMILLE_LABELS) as Famille[]).includes(familleParam as Famille) ? familleParam : null;
 
   const [lastRun, lastSuccess, statuts] = await Promise.all([
     getLastRun(),
@@ -1304,7 +1321,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     listStatuses(false),
   ]);
   const items = lastSuccess
-    ? await getCurrent(dbCategory, lastSuccess.id, { statusId, hideRejet: masquer })
+    ? await getCurrent(dbCategory, lastSuccess.id, { statusId, hideRejet: masquer, famille })
     : [];
   const latestRunId = lastSuccess?.id ?? null;
 
@@ -1332,6 +1349,13 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
         )
         .join("")}
     </select>
+    <label for="f-famille">Famille</label>
+    <select id="f-famille" name="famille">
+      <option value="">Toutes</option>
+      ${(Object.keys(FAMILLE_LABELS) as Famille[])
+        .map((f) => `<option value="${f}"${f === famille ? " selected" : ""}>${esc(FAMILLE_LABELS[f])}</option>`)
+        .join("")}
+    </select>
     <label><input type="checkbox" name="masquer" value="1"${masquer ? " checked" : ""}> Masquer les avis abandonnés</label>
     <button type="submit">Filtrer</button>
   </form>`;
@@ -1339,7 +1363,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const table =
     items.length === 0
       ? `<p class="empty">${
-          statusId !== null || masquer
+          statusId !== null || masquer || famille !== null
             ? "Aucun avis ne correspond à ce filtre."
             : "Aucun avis en cours dans cette catégorie."
         }</p>`

@@ -1,4 +1,5 @@
 import type { SearchParams } from "./params.ts";
+import type { FamilleSearch } from "./familles.ts";
 
 export const KEYWORDS = [
   "mobilité",
@@ -18,6 +19,42 @@ export const KEYWORDS = [
 ];
 
 export const DEFAULT_QUERY = KEYWORDS.join(" OR ");
+
+// Recherches achatpublic.com (src/achatpublic.ts), reprises de la procédure de
+// veille manuelle du cabinet : une nature de marché et des mots-clés par
+// famille, comparés en début de mot sur l'intitulé de chaque consultation
+// ouverte. La famille « mobilité » est ensuite classée comme les avis BOAMP ;
+// « kiomda » (fourniture de compteurs) et « inondations » (études AMC /
+// prévention des inondations) par une règle propre (src/familles.ts).
+export const ACHATPUBLIC_SEARCHES: readonly FamilleSearch[] = [
+  {
+    famille: "mobilité",
+    marche: "services",
+    keywords: [
+      "vélo", "ferroviaire", "mobilité", "déplacement", "planification", "trafic",
+      "circulation", "microsimulation", "model", "PDM", "TCSP", "marchandises",
+      "fret", "multimodal", "gare", "échange", "jalonnement", "enquête",
+      "covoiturage", "tarif", "cyclable", "itinéraire", "schéma", "signalisation",
+      "voie verte", "stationnement", "piéton", "autopartage", "accessibilité",
+      "ZFE", "desserte", "intermodal", "voirie", "scot", "prospective",
+      "socioéconomique", "socio", "fréquentation", "économique", "statistique",
+      "étude", "multicritère", "multi-critère", "AMC", "MCDA",
+    ],
+  },
+  {
+    famille: "kiomda",
+    marche: "fournitures",
+    keywords: ["compteur", "capteur", "vélo", "piéton"],
+  },
+  {
+    famille: "inondations",
+    marche: "services",
+    keywords: [
+      "AMC", "multicritère", "multi-critère", "MCDA", "prévention des inondations",
+      "SYMAR", "PAPI", "GEMAPI", "syndicat de rivière",
+    ],
+  },
+];
 
 // Chaîne de modèles OpenRouter par défaut, ordonnée par prix : le banc d'essai
 // (`bun run eval`, 2026-09) donne mistral-nemo à 39/40 pour 0,019 $/M tokens

@@ -14,6 +14,8 @@ function avis(objet: string, typeAvis = "Avis de marché"): Announcement {
     typeAvis,
     procedure: "Procédure adaptée",
     raw: objet,
+    source: "boamp",
+    famille: "mobilité",
   };
 }
 

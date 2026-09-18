@@ -1,5 +1,7 @@
-import { buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
+import { ACHATPUBLIC_SEARCHES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
 import { scrapeAll, type Announcement } from "./scraper.ts";
+import { scrapeAchatPublic } from "./achatpublic.ts";
+import { classifyFamille } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM, type LlmContext } from "./classify-llm.ts";
 import { classifyHybrid } from "./classify-hybrid.ts";
@@ -33,6 +35,8 @@ export type PipelineOptions = {
   llmModels?: string[];
   scopeRules?: ScopeRules;
   codeDepartement?: string[];
+  // Source secondaire achatpublic.com (défaut : activée sauf ACHATPUBLIC=0).
+  achatPublic?: boolean;
   log?: (msg: string) => void;
 };
 
@@ -50,22 +54,12 @@ export type PipelineResult = {
 
 type CachedItem = Announcement & { matchedQueries: string[] };
 
-async function loadOrScrape(
+async function scrapeBoamp(
   query: string,
   maxPages: number,
-  cachePath: string,
-  useCache: boolean,
   codeDepartement: string[] | undefined,
   log: (msg: string) => void,
 ): Promise<CachedItem[]> {
-  if (useCache) {
-    const f = Bun.file(cachePath);
-    if (await f.exists()) {
-      log(`loading cache: ${cachePath}`);
-      return (await f.json()) as CachedItem[];
-    }
-  }
-
   const params = buildDefaultParams(query);
   if (codeDepartement?.length) params.codeDepartement = codeDepartement;
 
@@ -84,10 +78,65 @@ async function loadOrScrape(
     if (!byId.has(key)) byId.set(key, { ...it, matchedQueries: [query] });
   }
 
-  const arr = [...byId.values()];
-  await Bun.write(cachePath, JSON.stringify(arr, null, 2));
-  log(`cached ${arr.length} unique avis -> ${cachePath}`);
-  return arr;
+  return [...byId.values()];
+}
+
+// achatpublic.com : source secondaire, non bloquante — une panne du site (ou
+// un changement de sa page) ne doit pas faire échouer la veille BOAMP ; elle
+// remonte en avertissement (email d'alerte, page configuration).
+async function scrapeSecondary(
+  codeDepartement: string[] | undefined,
+  log: (msg: string) => void,
+): Promise<{ items: CachedItem[]; warning?: string }> {
+  log("achatpublic: lecture des consultations ouvertes…");
+  try {
+    const items = await scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log });
+    const filtered = codeDepartement?.length
+      ? items.filter((it) => {
+          const codes = it.department.split(",").map((c) => c.trim()).filter(Boolean);
+          return codes.length === 0 || codes.some((c) => codeDepartement.includes(c));
+        })
+      : items;
+    return { items: filtered };
+  } catch (err) {
+    const warning = `achatpublic.com indisponible — ${errMessage(err)} — veille BOAMP seule pour ce run`;
+    log(warning);
+    return { items: [], warning };
+  }
+}
+
+async function loadAll(
+  opts: PipelineOptions,
+  query: string,
+  maxPages: number,
+  cachePath: string,
+  useCache: boolean,
+  log: (msg: string) => void,
+): Promise<{ items: CachedItem[]; warning?: string }> {
+  if (useCache) {
+    const f = Bun.file(cachePath);
+    if (await f.exists()) {
+      log(`loading cache: ${cachePath}`);
+      const cached = (await f.json()) as Array<Partial<CachedItem> & Announcement>;
+      // Cache antérieur aux champs source / famille : c'était du BOAMP.
+      return {
+        items: cached.map((it) => ({
+          ...it,
+          matchedQueries: it.matchedQueries ?? [],
+          source: it.source ?? "boamp",
+          famille: it.famille ?? "mobilité",
+        })),
+      };
+    }
+  }
+  const boamp = await scrapeBoamp(query, maxPages, opts.codeDepartement, log);
+  const useSecondary = opts.achatPublic ?? Bun.env.ACHATPUBLIC !== "0";
+  const secondary = useSecondary ? await scrapeSecondary(opts.codeDepartement, log) : { items: [] };
+  const ids = new Set(boamp.map((it) => it.idweb));
+  const items = [...boamp, ...secondary.items.filter((it) => !ids.has(it.idweb))];
+  await Bun.write(cachePath, JSON.stringify(items, null, 2));
+  log(`cached ${items.length} unique avis (${boamp.length} BOAMP, ${items.length - boamp.length} achatpublic) -> ${cachePath}`);
+  return { items, warning: secondary.warning };
 }
 
 async function mapConcurrent<T, R>(
@@ -135,11 +184,12 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
   const cachePath = opts.cachePath ?? ".cache/scrape.json";
   const useCache = opts.useCache ?? false;
 
-  const items = await loadOrScrape(query, maxPages, cachePath, useCache, opts.codeDepartement, log);
+  const loaded = await loadAll(opts, query, maxPages, cachePath, useCache, log);
+  const items = loaded.items;
 
   const resolved = resolveMode(opts.classifier ?? "hybrid", log);
   const mode = resolved.mode;
-  let warning = resolved.warning;
+  let warning = [loaded.warning, resolved.warning].filter(Boolean).join(" ; ") || undefined;
   log(`classifier: ${mode}`);
 
   const ctx: LlmContext | null =
@@ -178,7 +228,8 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
       else forcedExclude++;
       return { ...forced, classifier: "regle" };
     }
-    return baseClassify(it);
+    // Familles hors mobilité (achatpublic) : règle propre, jamais le LLM.
+    return classifyFamille(it.famille, it) ?? baseClassify(it);
   };
 
   const concurrency = mode === "regex" ? items.length : 5;

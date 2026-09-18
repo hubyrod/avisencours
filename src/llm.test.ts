@@ -389,6 +389,8 @@ const avis: Announcement = {
   typeAvis: "Avis de marché",
   procedure: "MAPA",
   raw: "Plan de mobilité",
+  source: "boamp",
+  famille: "mobilité",
 };
 
 describe("classifyLLM", () => {

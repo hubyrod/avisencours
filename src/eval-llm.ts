@@ -41,6 +41,8 @@ function toAnnouncement(c: EvalCase): Announcement {
     typeAvis: c.typeAvis ?? "Avis de marché",
     procedure: c.procedure ?? "Procédure adaptée",
     raw: c.raw ?? c.objet,
+    source: "boamp",
+    famille: "mobilité",
   };
 }
 

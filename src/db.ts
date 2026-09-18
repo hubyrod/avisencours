@@ -67,6 +67,9 @@ export async function migrate(): Promise<void> {
   await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS llm_stats jsonb`;
   await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS warning text`;
   await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS classifier text`;
+  // Sources secondaires (achatpublic.com) et familles de veille (src/familles.ts).
+  await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'boamp'`;
+  await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS famille text NOT NULL DEFAULT 'mobilité'`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
@@ -231,13 +234,13 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
         INSERT INTO announcements (
           idweb, url, objet, acheteur, department, type_avis, procedure,
           published_at, deadline, deadline_text, category, reason, classifier, raw,
-          first_seen_run_id, last_seen_run_id
+          source, famille, first_seen_run_id, last_seen_run_id
         ) VALUES (
           ${it.idweb}, ${it.url}, ${it.objet}, ${it.acheteur}, ${it.department},
           ${it.typeAvis}, ${it.procedure}, ${it.publishedAt},
           ${parseDeadlineText(it.deadline)}, ${it.deadline},
           ${it.category}, ${it.reason ?? null}, ${it.classifier ?? null}, ${it.raw},
-          ${runId}, ${runId}
+          ${it.source}, ${it.famille}, ${runId}, ${runId}
         )
         ON CONFLICT (idweb) DO UPDATE SET
           url = EXCLUDED.url,
@@ -253,6 +256,8 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
           reason = EXCLUDED.reason,
           classifier = EXCLUDED.classifier,
           raw = EXCLUDED.raw,
+          source = EXCLUDED.source,
+          famille = EXCLUDED.famille,
           last_seen_run_id = EXCLUDED.last_seen_run_id`;
     }
   });
@@ -272,6 +277,8 @@ export type StoredAnnouncement = {
   category: string;
   reason: string | null;
   classifier?: string | null;
+  source?: string | null;
+  famille?: string | null;
   first_seen_run_id: number | null;
   comment_count?: number;
   status_id?: number | null;
@@ -325,10 +332,11 @@ export async function getLastSuccessfulRun(): Promise<RunRow | null> {
 export async function getCurrent(
   category: string,
   runId: number,
-  filter?: { statusId?: number | null; hideRejet?: boolean },
+  filter?: { statusId?: number | null; hideRejet?: boolean; famille?: string | null },
 ): Promise<StoredAnnouncement[]> {
   const statusId = filter?.statusId ?? null;
   const hideRejet = filter?.hideRejet ?? false;
+  const famille = filter?.famille ?? null;
   const defaultId = (await getDefaultStatus())?.id ?? null;
   const rows = await db()`
     SELECT a.*,
@@ -350,6 +358,7 @@ export async function getCurrent(
       AND (a.deadline IS NULL OR a.deadline >= now())
       AND (${statusId}::bigint IS NULL OR COALESCE(cur.status_id, ${defaultId}) = ${statusId})
       AND (${hideRejet} = false OR COALESCE(s.is_rejet, false) = false)
+      AND (${famille}::text IS NULL OR a.famille = ${famille})
     ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
   return rows as StoredAnnouncement[];
 }

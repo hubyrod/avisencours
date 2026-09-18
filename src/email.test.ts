@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { digestSubject, renderDigestHtml, uniqueEmails, type DigestData } from "./email.ts";
+import { digestSubject, renderDigestHtml, renderWarningHtml, uniqueEmails, type DigestData } from "./email.ts";
 import type { StoredAnnouncement } from "./db.ts";
 
 function stored(n: number, objet = `Avis ${n}`): StoredAnnouncement {
@@ -67,5 +67,20 @@ describe("renderDigestHtml", () => {
 
   test("inclut le lien tableau de bord", () => {
     expect(renderDigestHtml(digest(2))).toContain("https://dashboard.example");
+  });
+});
+
+describe("renderWarningHtml", () => {
+  test("coupe-circuit LLM : titre et conseil OpenRouter", () => {
+    const html = renderWarningHtml("coupe-circuit LLM ouvert : clé refusée", null, "lundi 1 septembre 2026");
+    expect(html).toContain("Classification LLM interrompue");
+    expect(html).toContain("crédit OpenRouter");
+    expect(html).not.toContain("achatpublic.com n'a pas répondu");
+  });
+  test("achatpublic indisponible : mise à jour partielle", () => {
+    const html = renderWarningHtml("achatpublic.com indisponible — Error: 503 — veille BOAMP seule pour ce run", null, "lundi");
+    expect(html).toContain("Mise à jour partielle");
+    expect(html).toContain("achatpublic.com n'a pas répondu");
+    expect(html).not.toContain("crédit OpenRouter");
   });
 });

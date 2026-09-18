@@ -1,4 +1,5 @@
 import type { StoredAnnouncement } from "./db.ts";
+import { FAMILLE_LABELS, type Famille } from "./familles.ts";
 import { postWithRetry, DEFAULT_RETRYABLE } from "./http.ts";
 import { llmStatsSummary, type LlmStats } from "./llm.ts";
 
@@ -85,13 +86,21 @@ function esc(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+// Provenance hors BOAMP et famille hors mobilité, pour situer l'avis d'un coup d'œil.
+function sourceTag(a: StoredAnnouncement): string {
+  const parts: string[] = [];
+  if (a.source && a.source !== "boamp") parts.push(a.source);
+  if (a.famille && a.famille !== "mobilité") parts.push(FAMILLE_LABELS[a.famille as Famille] ?? a.famille);
+  return parts.length ? ` — <span style="color:#0e6b51;">${esc(parts.join(" · "))}</span>` : "";
+}
+
 function itemRow(a: StoredAnnouncement): string {
   const deadline = a.deadline_text ?? "—";
   return `
     <tr>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e5e5;">
         <a href="${esc(a.url)}" style="color:#1a5fb4;text-decoration:none;font-weight:600;">${esc(a.objet)}</a><br>
-        <span style="color:#666;font-size:13px;">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department ?? "?")}</span>
+        <span style="color:#666;font-size:13px;">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department || "?")}${sourceTag(a)}</span>
       </td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e5e5;white-space:nowrap;vertical-align:top;">${esc(deadline)}</td>
     </tr>`;
@@ -175,14 +184,28 @@ export function renderDigestHtml(d: DigestData): string {
 
 // Avertissement non bloquant : le run a réussi (avis récupérés et stockés)
 // mais la classification LLM a été interrompue ou n'a pas pu être utilisée.
+// Avertissement non bloquant : coupe-circuit / clé LLM, ou source secondaire
+// (achatpublic.com) indisponible. Le texte s'adapte à la cause.
 export function renderWarningHtml(warning: string, llm: LlmStats | null | undefined, dateStr: string): string {
+  const llmIssue = /LLM|OPENROUTER|coupe-circuit/i.test(warning);
+  const sourceIssue = /achatpublic/i.test(warning);
+  const title = llmIssue ? "Classification LLM interrompue" : "Mise à jour partielle";
+  const intro = llmIssue
+    ? "La mise à jour quotidienne a réussi, mais la classification par modèle de langage n'a pas pu aller au bout : les avis restants ont été classés par les règles regex seules."
+    : "La mise à jour quotidienne a réussi, mais une partie de la veille n'a pas pu être faite.";
+  const advice = [
+    llmIssue ? "Vérifiez la clé et le crédit OpenRouter, puis relancez depuis la page Configuration." : "",
+    sourceIssue
+      ? "achatpublic.com n'a pas répondu (maintenance, panne ou page modifiée) : les consultations de ce site n'apparaissent pas comme « en cours » tant qu'un run ne les a pas relues. Relancez plus tard depuis la page Configuration."
+      : "",
+  ].filter(Boolean);
   return `
   <div style="font-family:Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;color:#222;">
-    <h1 style="font-size:20px;color:#b5600a;">⚠️ Classification LLM interrompue — ${esc(dateStr)}</h1>
-    <p>La mise à jour quotidienne a réussi, mais la classification par modèle de langage n'a pas pu aller au bout : les avis restants ont été classés par les règles regex seules.</p>
+    <h1 style="font-size:20px;color:#b5600a;">⚠️ ${title} — ${esc(dateStr)}</h1>
+    <p>${intro}</p>
     <pre style="background:#f6f6f6;padding:12px;border-radius:4px;font-size:12px;white-space:pre-wrap;">${esc(warning)}</pre>
-    ${llm ? `<p style="color:#666;font-size:13px;">Avant l'interruption : ${esc(llmStatsSummary(llm))}.</p>` : ""}
-    <p style="color:#666;font-size:13px;">Vérifiez la clé et le crédit OpenRouter, puis relancez depuis la page Configuration.</p>
+    ${llm && llmIssue ? `<p style="color:#666;font-size:13px;">Avant l'interruption : ${esc(llmStatsSummary(llm))}.</p>` : ""}
+    ${advice.map((a) => `<p style="color:#666;font-size:13px;">${esc(a)}</p>`).join("")}
   </div>`;
 }
 

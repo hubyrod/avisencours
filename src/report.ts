@@ -39,6 +39,7 @@ export function renderMarkdown(items: Matched[], meta: ReportMeta): string {
     bullets.push(`- **Publié le** ${it.publishedAt || "?"}`);
     if (it.typeAvis) bullets.push(`- **Type d'avis** ${it.typeAvis}`);
     if (it.procedure) bullets.push(`- **Procédure** ${it.procedure}`);
+    bullets.push(`- **Source** ${it.source}${it.famille !== "mobilité" ? ` — famille ${it.famille}` : ""}`);
     bullets.push(`- **Mots-clés trouvés** ${it.matchedQueries.join(", ")}`);
     if (it.reason) bullets.push(`- **Classement** ${it.reason}`);
     bullets.push(`- [Voir l'avis](${it.url})`);

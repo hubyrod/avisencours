@@ -128,7 +128,10 @@ async function main() {
     // Avertissement non bloquant (coupe-circuit, clé absente) : email d'alerte
     // même si le run est un succès — sinon la dégradation passe inaperçue.
     if (warning) {
-      await sendAlert("⚠️ Avis en cours — classification LLM interrompue", renderWarningHtml(warning, llm, frDate(new Date())));
+      const subject = /LLM|OPENROUTER|coupe-circuit/i.test(warning)
+        ? "⚠️ Avis en cours — classification LLM interrompue"
+        : "⚠️ Avis en cours — mise à jour partielle";
+      await sendAlert(subject, renderWarningHtml(warning, llm, frDate(new Date())));
     }
 
     // Run manuel (« Relancer maintenant ») : pas de digest. Les nouveautés

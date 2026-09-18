@@ -1,4 +1,5 @@
 import { buildApiUrl, type SearchParams } from "./params.ts";
+import type { Famille } from "./familles.ts";
 
 export type Announcement = {
   idweb: string;
@@ -11,7 +12,12 @@ export type Announcement = {
   typeAvis: string;
   procedure: string;
   raw: string;
+  // Provenance et famille de veille (src/familles.ts). BOAMP = mobilité.
+  source: Source;
+  famille: Famille;
 };
+
+export type Source = "boamp" | "achatpublic";
 
 type OdsRecord = {
   idweb?: string;
@@ -113,6 +119,8 @@ function toAnnouncement(f: OdsRecord): Announcement {
     typeAvis,
     procedure: f.procedure_libelle ?? "",
     raw,
+    source: "boamp",
+    famille: "mobilité",
   };
 }
 
