@@ -1,6 +1,6 @@
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
 import { SOURCES, isSource, isSourceEnabled, sourceLabel, type SourceInfo } from "./sources.ts";
-import { decouperRaw } from "./avis-texte.ts";
+import { decouperRaw, structurerTexte, type TexteStructure } from "./avis-texte.ts";
 import { errMessage } from "./http.ts";
 import { formatCounter, formatDuration, progressPercent, summarizeProgress, type RunProgress } from "./progress.ts";
 import {
@@ -1390,6 +1390,16 @@ const AVIS_CSS = `
     .description p { margin: 0 0 10px; font-size: 14px; line-height: 1.55; max-width: 72ch; white-space: pre-wrap; }
     .description p:last-child { margin-bottom: 0; }
     .description .vide { color: var(--encre-2); font-style: italic; }
+    .description details { margin-top: 12px; border-top: 1px solid var(--ligne); padding-top: 10px; }
+    .description summary { cursor: pointer; font-size: 13px; color: var(--vert); font-weight: 600; }
+    .description summary:hover { text-decoration: underline; }
+    .section-avis { margin-top: 12px; }
+    .section-avis h3 { font-size: 13px; margin: 0 0 4px; color: var(--encre-2); font-weight: 600; }
+    .section-avis h3 .num { font-family: var(--fonte-mono); font-weight: 500; margin-right: 6px; }
+    .section-avis dl { margin: 0; display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 3px 12px; font-size: 13px; }
+    .section-avis dt { color: var(--encre-2); }
+    .section-avis dd { margin: 0; overflow-wrap: anywhere; }
+    .section-avis dd.long { grid-column: 1 / -1; white-space: pre-wrap; }
     .echeance { background: var(--panneau); color: #fff; border-radius: 8px; padding: 16px 18px; }
     .echeance .jours { font-family: var(--fonte-mono); font-size: 34px; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
     .echeance .jours.urgent { color: #ffd4cf; }
@@ -1415,6 +1425,30 @@ const AVIS_CSS = `
       .avis > .principal { grid-column: 1; }
     }
 `;
+
+// Résumé (première « Description ») puis l'avis complet par sections, replié.
+// Les champs longs (description, titre, adresse…) passent en pleine largeur.
+function renderTexteStructure(s: TexteStructure): string {
+  const sections = s.sections
+    .filter((x) => x.champs.length > 0 || x.titre)
+    .map((x) => {
+      const rows = x.champs
+        .map((c) => {
+          const long = c.valeur.length > 90 || /^(description|titre)$/i.test(c.label);
+          return c.label
+            ? `<dt>${esc(c.label)}</dt><dd${long ? ' class="long"' : ""}>${esc(c.valeur)}</dd>`
+            : `<dd class="long">${esc(c.valeur)}</dd>`;
+        })
+        .join("");
+      return `<div class="section-avis"><h3><span class="num">${esc(x.numero)}</span>${esc(x.titre)}</h3>${rows ? `<dl>${rows}</dl>` : ""}</div>`;
+    })
+    .join("");
+  return `${s.resume ? `<p>${esc(s.resume)}</p>` : `<p class="vide">Pas de description dans l'avis ; voir le texte complet ci-dessous.</p>`}
+            <details>
+              <summary>Texte complet de l'avis (${s.sections.length} sections)</summary>
+              ${sections}
+            </details>`;
+}
 
 async function avisPage(user: AuthUser, idweb: string, retourParam: string | null = null): Promise<Response> {
   const a = await getAnnouncement(idweb);
@@ -1461,6 +1495,9 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
     : `<div class="echeance"><div class="jours passe">—</div><div class="quand">Date limite non indiquée</div></div>`;
 
   const { description, precisions } = decouperRaw(a.raw, a.objet);
+  // Avis eForms aplati (BOAMP, Marchés Online) : description en avant, texte
+  // structuré par sections dépliable.
+  const structure: TexteStructure | null = description.length === 1 ? structurerTexte(description[0]!) : null;
   const familleLabel = a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null;
 
   const faits: Array<[string, string | null]> = [
@@ -1536,9 +1573,11 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
           <div class="bloc description">
             <h2>Description</h2>
             ${
-              description.length
-                ? description.map((p) => `<p>${esc(p)}</p>`).join("")
-                : `<p class="vide">La plateforme ne fournit pas de texte au-delà de l'intitulé. Le détail est dans l'annonce officielle.</p>`
+              structure
+                ? renderTexteStructure(structure)
+                : description.length
+                  ? description.map((p) => `<p>${esc(p)}</p>`).join("")
+                  : `<p class="vide">La plateforme ne fournit pas de texte au-delà de l'intitulé. Le détail est dans l'annonce officielle.</p>`
             }
           </div>
           <div class="bloc">
