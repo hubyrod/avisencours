@@ -139,21 +139,57 @@ if (!TEST_URL) {
     expect(fam.text).not.toContain("Plan de mobilité BOAMP");
   });
 
-  test("page configuration : sources et statistiques LLM du dernier run", async () => {
+  test("page configuration : onglet Résultats par défaut, onglet Moteur avec sources et LLM", async () => {
     const page = await get("/configuration");
     expect(page.status).toBe(200);
     expect(page.text).not.toContain("Service indisponible");
-    expect(page.text).toContain("Sources de veille");
-    expect(page.text).toContain("BOAMP");
-    expect(page.text).toContain("Marchés Online");
-    expect(page.text).toContain("désactivée"); // ACHATPUBLIC=0
-    expect(page.text).toContain("mistral-nemo ×7");
-    expect(page.text).toContain("Relancer maintenant");
+    expect(page.text).toContain('class="active">Résultats');
+    expect(page.text).toContain("Mots-clés de recherche");
+    expect(page.text).toContain("Règles de tri");
+    expect(page.text).toContain("Périmètre géographique");
+    expect(page.text).toContain("Email quotidien");
+    expect(page.text).not.toContain("Sources de veille");
+    expect(page.text).not.toContain("Relancer maintenant");
+    // Onglet inconnu = Résultats.
+    expect((await get("/configuration?onglet=x")).text).toContain('class="active">Résultats');
+
+    const moteur = await get("/configuration?onglet=moteur");
+    expect(moteur.status).toBe(200);
+    expect(moteur.text).toContain('class="active">Moteur');
+    expect(moteur.text).toContain("Sources de veille");
+    expect(moteur.text).toContain("BOAMP");
+    expect(moteur.text).toContain("Marchés Online");
+    expect(moteur.text).toContain("désactivée"); // ACHATPUBLIC=0
+    expect(moteur.text).toContain("mistral-nemo ×7");
+    expect(moteur.text).toContain("Relancer maintenant");
+    expect(moteur.text).toContain("Classement");
+    expect(moteur.text).not.toContain("Mots-clés de recherche");
+  });
+
+  test("réglages : chaque carte n'écrit que ses champs et revient sur son onglet", async () => {
+    let res = await post("/configuration/reglages", { fenetre: "21" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/configuration?onglet=resultats#carte-email");
+    res = await post("/configuration/reglages", { classifieur: "regex", modeles: "" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/configuration?onglet=moteur#carte-classement");
+    const rows = (await control`SELECT key, value FROM settings ORDER BY key`) as Array<{ key: string; value: string }>;
+    expect(rows).toEqual([
+      { key: "classifier_mode", value: "regex" },
+      { key: "digest_window_days", value: "21" },
+    ]);
+    // La carte Email ne touche pas au classifieur, et inversement.
+    res = await post("/configuration/reglages", { fenetre: "" });
+    expect(res.status).toBe(303);
+    const after = (await control`SELECT key, value FROM settings ORDER BY key`) as Array<{ key: string; value: string }>;
+    expect(after).toEqual([{ key: "classifier_mode", value: "regex" }]);
+    expect((await post("/configuration/reglages", { fenetre: "999" })).status).toBe(200); // erreur, page re-rendue
+    await control`DELETE FROM settings`;
   });
 
   test("run « running » sans verrou : clôturé en erreur, relance possible", async () => {
     await control`INSERT INTO runs (status) VALUES ('running')`;
-    const page = await get("/configuration");
+    const page = await get("/configuration?onglet=moteur");
     expect(page.status).toBe(200);
     expect(page.text).not.toContain("Mise à jour en cours");
     expect(page.text).toContain("échouée le");
@@ -183,7 +219,11 @@ if (!TEST_URL) {
     await control`SELECT pg_advisory_lock(823741)`;
     try {
       await control`INSERT INTO runs (status, progress) VALUES ('running', ${JSON.stringify(progress)}::text::jsonb)`;
-      const conf = await get("/configuration");
+      // Onglet Résultats : renvoi vers Moteur, pas de suivi en direct.
+      const res = await get("/configuration");
+      expect(res.text).toContain("suivre la progression dans l'onglet Moteur");
+      expect(res.text).not.toContain('id="cfg-maj"');
+      const conf = await get("/configuration?onglet=moteur");
       expect(conf.status).toBe(200);
       expect(conf.text).toContain("Mise à jour en cours");
       expect(conf.text).toContain('role="progressbar"');
@@ -219,7 +259,7 @@ if (!TEST_URL) {
     // la ligne est clôturée, comme avant.
     const lastId = JSON.parse((await get("/sante")).text).lastRun.id;
     expect(JSON.parse((await get(`/mise-a-jour/${lastId}/fragment`)).text).running).toBe(false);
-    const conf = await get("/configuration");
+    const conf = await get("/configuration?onglet=moteur");
     expect(conf.text).not.toContain("Mise à jour en cours");
     expect(conf.text).not.toContain('id="cfg-maj"');
     const rows = (await control`SELECT status FROM runs ORDER BY id DESC LIMIT 1`) as Array<{ status: string }>;

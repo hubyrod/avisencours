@@ -171,6 +171,16 @@ const BASE_CSS = `
     .card p { color: var(--encre-2); font-size: 13.5px; }
     .card label { display: block; font-size: 13px; color: var(--encre-2); margin: 14px 0 4px; }
     .card .actions { margin-top: 16px; display: flex; align-items: center; gap: 16px; }
+    .card.large { margin: 16px 0; max-width: 640px; }
+    .card .effet { margin: -2px 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--encre-2); }
+    .card .sous-titre-carte { margin: 12px 0 2px; font-size: 14px; }
+    .onglet-intro { color: var(--encre-2); font-size: 13.5px; margin: 0 0 4px; max-width: 640px; }
+    nav { margin: 10px 0 14px; display: flex; gap: 22px; border-bottom: 1px solid var(--ligne-forte); }
+    nav a { padding: 8px 2px 9px; margin-bottom: -1px; text-decoration: none; font-size: 13.5px; font-weight: 500; color: var(--encre-2); border-bottom: 2px solid transparent; }
+    nav a:hover { color: var(--encre); }
+    nav a.active { color: var(--encre); font-weight: 600; border-bottom-color: var(--panneau); }
+    .meta { color: var(--encre-2); font-size: 12.5px; margin-top: 2px; }
+    .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
     .comment { border-top: 1px solid var(--ligne); padding: 10px 0; }
     .comment-head { display: flex; align-items: baseline; gap: 12px; font-size: 13px; color: var(--encre-2); }
     .comment-head span { font-family: var(--fonte-mono); font-size: 11.5px; }
@@ -591,8 +601,9 @@ function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null): strin
       </tr>`;
   }).join("");
   return `
-      <div class="card" style="margin:16px 0;max-width:640px;">
+      <div class="card large" id="carte-sources">
         <h2>Sources de veille</h2>
+        <p class="effet">Ne change pas le périmètre, seulement où la veille lit</p>
         <p style="color:var(--encre-2);font-size:13.5px;">
           Chaque mise à jour lit ces sites l'un après l'autre. Une source en panne n'empêche pas
           les autres : elle est signalée ici et par email, et ses avis restent affichés jusqu'à
@@ -767,8 +778,24 @@ function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude"): string {
     : `<p style="color:var(--encre-2);font-size:13.5px;">Aucune règle.</p>`;
 }
 
+// /configuration en deux onglets : « Résultats » (ce qui décide des avis
+// retenus et de ce que l'équipe reçoit) et « Moteur » (comment la veille est
+// produite : sources, classement, mise à jour). Chaque carte annonce son effet.
+type Onglet = "resultats" | "moteur";
+
+function parseOnglet(v: string | null | undefined): Onglet {
+  return v === "moteur" ? "moteur" : "resultats";
+}
+
+function configUrl(onglet: Onglet, carte?: string): string {
+  return `/configuration?onglet=${onglet}${carte ? `#carte-${carte}` : ""}`;
+}
+
+const SELECT_STYLE = `style="padding:10px 6px;border:1px solid var(--ligne-forte);border-radius:7px;font-family:inherit;background:var(--carte);"`;
+
 async function configPage(
   user: AuthUser,
+  onglet: Onglet,
   notice?: { kind: "ok" | "error"; text: string },
 ): Promise<Response> {
   const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun0, lastSuccess, catalog, credit] =
@@ -781,16 +808,53 @@ async function configPage(
       getSetting("llm_models"),
       getLastRun(),
       getLastSuccessfulRun(),
-      fetchCatalog(),
-      fetchKeyCredit(),
+      onglet === "moteur" ? fetchCatalog() : Promise.resolve(null),
+      onglet === "moteur" ? fetchKeyCredit() : Promise.resolve(null),
     ]);
-  const sourceCounts = lastSuccess ? await countCurrentBySource(lastSuccess.id) : [];
+  const sourceCounts = onglet === "moteur" && lastSuccess ? await countCurrentBySource(lastSuccess.id) : [];
 
   const banner = notice
     ? `<div class="banner ${notice.kind === "ok" ? "ok" : "error"}">${esc(notice.text)}</div>`
     : "";
 
-  const keywordRows = keywords
+  const running = await runInFlight(lastRun0);
+  // La ligne a pu être clôturée à l'instant : on relit pour l'afficher juste.
+  const lastRun = running || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
+  const runLine = lastRun ? runLineFor(lastRun, running) : "Aucune mise à jour n'a encore été effectuée.";
+
+  const tabs = `
+      <nav aria-label="Sections de la configuration">
+        <a href="${configUrl("resultats")}" class="${onglet === "resultats" ? "active" : ""}">Résultats</a>
+        <a href="${configUrl("moteur")}" class="${onglet === "moteur" ? "active" : ""}">Moteur</a>
+      </nav>`;
+
+  const contenu = onglet === "resultats"
+    ? renderOngletResultats({ keywords, rules, fenetre, departements, running })
+    : renderOngletMoteur({ classifieur, modeles, catalog, credit, lastRun, running, runLine, sourceCounts });
+
+  return html(
+    layout(
+      "Configuration — Avis en cours",
+      whoStrip(user),
+      `<main>
+      <h2 class="titre-page">Configuration de la veille</h2>
+      <p class="retour"><a href="/">← Retour aux avis</a></p>
+      ${tabs}
+      ${banner}
+      ${contenu}
+    </main>`,
+    ),
+  );
+}
+
+function renderOngletResultats(d: {
+  keywords: Awaited<ReturnType<typeof listKeywords>>;
+  rules: ScopeRuleRow[];
+  fenetre: string | null;
+  departements: string | null;
+  running: boolean;
+}): string {
+  const keywordRows = d.keywords
     .map(
       (k) => `
       <tr>
@@ -805,35 +869,24 @@ async function configPage(
     )
     .join("");
 
-  const running = await runInFlight(lastRun0);
-  // La ligne a pu être clôturée à l'instant : on relit pour l'afficher juste.
-  const lastRun = running || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
-  const runLine = lastRun ? runLineFor(lastRun, running) : "Aucune mise à jour n'a encore été effectuée.";
+  return `
+      <p class="onglet-intro">
+        Ce qui décide des avis retenus et de ce que l'équipe reçoit.
+        Toute modification s'applique à la prochaine mise à jour.
+      </p>
+      ${
+        d.running
+          ? `<div class="banner ok">Mise à jour en cours — <a href="${configUrl("moteur")}">suivre la progression dans l'onglet Moteur</a>.</div>`
+          : ""
+      }
 
-  const llmBlock = renderLlmSettings(modeles, catalog, credit);
-
-  const defaultMode = effectiveClassifierDefault();
-  const modeOptions = CLASSIFIER_LABELS.map(
-    ([value, label]) =>
-      `<option value="${value}" ${classifieur === value ? "selected" : ""}>${esc(label)}</option>`,
-  ).join("");
-
-  return html(
-    layout(
-      "Configuration — Avis en cours",
-      whoStrip(user),
-      `<main>
-      <h2 class="titre-page">Configuration de la veille</h2>
-      <p class="retour"><a href="/">← Retour aux avis</a></p>
-      ${banner}
-      ${running ? '<noscript><meta http-equiv="refresh" content="15"></noscript>' : ""}
-
-      <div class="card" style="margin:16px 0;max-width:640px;">
+      <div class="card large" id="carte-mots-cles">
         <h2>Mots-clés de recherche</h2>
-        <p style="color:var(--encre-2);font-size:13.5px;">
-          Un avis est récupéré s'il contient au moins un de ces termes.
+        <p class="effet">Change les avis trouvés</p>
+        <p>
+          Un avis BOAMP est récupéré s'il contient au moins un de ces termes.
           Les expressions de plusieurs mots sont recherchées telles quelles.
-          Les modifications s'appliquent à la prochaine mise à jour.
+          Les autres sources ont leurs listes propres, tenues dans le code.
         </p>
         <table>
           <tbody>${keywordRows}</tbody>
@@ -848,21 +901,22 @@ async function configPage(
         </form>
       </div>
 
-      <div class="card" style="margin:16px 0;max-width:640px;">
+      <div class="card large" id="carte-regles">
         <h2>Règles de tri</h2>
-        <p style="color:var(--encre-2);font-size:13.5px;">
+        <p class="effet">Change le classement des avis trouvés</p>
+        <p>
           Appliquées avant le classement automatique, en cherchant le terme dans le texte
           de l'avis (majuscules et accents ignorés). Une règle « toujours garder »
           l'emporte sur une règle « toujours exclure ».
         </p>
-        <h3 style="margin:12px 0 2px;font-size:14px;">Toujours exclure</h3>
-        ${ruleList(rules, "exclude")}
-        <h3 style="margin:12px 0 2px;font-size:14px;">Toujours garder</h3>
-        ${ruleList(rules, "keep")}
+        <h3 class="sous-titre-carte">Toujours exclure</h3>
+        ${ruleList(d.rules, "exclude")}
+        <h3 class="sous-titre-carte">Toujours garder</h3>
+        ${ruleList(d.rules, "keep")}
         <form method="post" action="/configuration/regles/ajouter" style="margin-top:12px;">
           <label for="regle-terme">Nouvelle règle</label>
           <div style="display:flex;gap:8px;align-items:center;">
-            <select name="kind" style="padding:10px 6px;border:1px solid var(--ligne-forte);border-radius:7px;font-family:inherit;background:var(--carte);">
+            <select name="kind" ${SELECT_STYLE}>
               <option value="exclude">toujours exclure</option>
               <option value="keep">toujours garder</option>
             </select>
@@ -873,38 +927,74 @@ async function configPage(
         </form>
       </div>
 
-      <div class="card" style="margin:16px 0;max-width:640px;">
-        <h2>Réglages</h2>
+      <div class="card large" id="carte-perimetre">
+        <h2>Périmètre géographique</h2>
+        <p class="effet">Change les avis trouvés</p>
+        <p>
+          Seuls les avis BOAMP de ces départements sont récupérés ; les consultations des autres
+          sources sont gardées si leur lieu d'exécution en fait partie, ou s'il n'est pas connu.
+        </p>
         <form method="post" action="/configuration/reglages">
-          <label for="reg-fenetre">Fenêtre des échéances dans l'email quotidien (jours)</label>
-          <input type="number" id="reg-fenetre" name="fenetre" min="1" max="60"
-                 value="${esc(fenetre ?? "")}" placeholder="14 (par défaut)">
-          <label for="reg-classifieur" style="margin-top:14px;">Classifieur</label>
-          <select id="reg-classifieur" name="classifieur" style="padding:10px 6px;border:1px solid var(--ligne-forte);border-radius:7px;font-family:inherit;background:var(--carte);">
-            <option value="">par défaut (${esc(
-              CLASSIFIER_LABELS.find(([v]) => v === defaultMode)?.[1] ?? defaultMode,
-            )})</option>
-            ${modeOptions}
-          </select>
-          ${llmBlock}
-          <label for="reg-departements" style="margin-top:14px;">Codes département (séparés par des virgules)</label>
+          <label for="reg-departements">Codes département (séparés par des virgules)</label>
           <input type="text" id="reg-departements" name="departements"
-                 value="${esc(departements ?? "")}" placeholder="vide = toute la France">
+                 value="${esc(d.departements ?? "")}" placeholder="vide = toute la France">
           <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
         </form>
       </div>
 
-      ${renderSourcesCard(sourceCounts, lastRun)}
+      <div class="card large" id="carte-email">
+        <h2>Email quotidien</h2>
+        <p class="effet">Change ce que l'équipe reçoit</p>
+        <p>
+          Envoyé chaque matin après la mise à jour aux personnes inscrites sur leur page
+          <a href="/profil">Mon profil</a> : les nouveaux avis pertinents, puis les échéances proches.
+        </p>
+        <form method="post" action="/configuration/reglages">
+          <label for="reg-fenetre">Fenêtre des échéances rappelées (jours)</label>
+          <input type="number" id="reg-fenetre" name="fenetre" min="1" max="60"
+                 value="${esc(d.fenetre ?? "")}" placeholder="14 (par défaut)">
+          <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
+        </form>
+      </div>`;
+}
 
-      <div class="card" style="margin:16px 0;max-width:640px;">
+function renderOngletMoteur(d: {
+  classifieur: string | null;
+  modeles: string | null;
+  catalog: CatalogModel[] | null;
+  credit: { usage: number; limit: number | null; remaining: number | null } | null;
+  lastRun: RunRow | null;
+  running: boolean;
+  runLine: string;
+  sourceCounts: SourceCount[];
+}): string {
+  const defaultMode = effectiveClassifierDefault();
+  const modeOptions = CLASSIFIER_LABELS.map(
+    ([value, label]) =>
+      `<option value="${value}" ${d.classifieur === value ? "selected" : ""}>${esc(label)}</option>`,
+  ).join("");
+  const dernierCout =
+    d.lastRun?.status === "success" && d.lastRun.llm_stats
+      ? `<p>Dernière mise à jour : ${esc(llmStatsSummary(d.lastRun.llm_stats))}.</p>`
+      : "";
+
+  return `
+      <p class="onglet-intro">
+        Comment la veille est produite : où elle lit, comment elle classe, où en est la dernière
+        mise à jour. Ces réglages ne changent pas le périmètre recherché, seulement la mécanique et son coût.
+      </p>
+      ${d.running ? '<noscript><meta http-equiv="refresh" content="15"></noscript>' : ""}
+
+      <div class="card large" id="carte-mise-a-jour">
         <h2>Mise à jour</h2>
+        <p class="effet">Ne change pas les avis, relit les sources</p>
         ${
-          running
-            ? `<div id="maj-carte">${renderRunCard(lastRun!, runLine)}</div>
-               ${progressClient(lastRun!, "maj-carte")}`
-            : `<p>${runLine}</p>
-               ${renderProgress(lastRun, false)}
-               <p style="color:var(--encre-2);font-size:13.5px;">
+          d.running
+            ? `<div id="maj-carte">${renderRunCard(d.lastRun!, d.runLine)}</div>
+               ${progressClient(d.lastRun!, "maj-carte")}`
+            : `<p>${d.runLine}</p>
+               ${renderProgress(d.lastRun, false)}
+               <p>
                  Lance immédiatement une récupération et un reclassement des avis
                  (35 à 45 minutes avec toutes les sources). Aucun email n'est envoyé lors d'une
                  mise à jour manuelle. Un redéploiement de l'application pendant ce temps
@@ -915,101 +1005,136 @@ async function configPage(
                </form>`
         }
       </div>
-    </main>`,
-    ),
-  );
+
+      ${renderSourcesCard(d.sourceCounts, d.lastRun)}
+
+      <div class="card large" id="carte-classement">
+        <h2>Classement</h2>
+        <p class="effet">Ne change pas les avis trouvés, seulement leur tri et son coût</p>
+        <p>
+          Chaque avis récupéré est classé pertinent, travaux ou exclu : d'abord par les règles
+          regex, puis, en mode hybride, par un modèle de langage pour ceux que les règles gardent.
+        </p>
+        ${dernierCout}
+        <form method="post" action="/configuration/reglages">
+          <label for="reg-classifieur">Classifieur</label>
+          <select id="reg-classifieur" name="classifieur" ${SELECT_STYLE}>
+            <option value="">par défaut (${esc(
+              CLASSIFIER_LABELS.find(([v]) => v === defaultMode)?.[1] ?? defaultMode,
+            )})</option>
+            ${modeOptions}
+          </select>
+          ${renderLlmSettings(d.modeles, d.catalog, d.credit)}
+          <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
+        </form>
+      </div>`;
 }
 
 async function handleConfigHome(_req: Request, url: URL, user: AuthUser): Promise<Response> {
-  const notice = url.searchParams.has("lancee")
-    ? { kind: "ok" as const, text: "Mise à jour lancée — comptez 35 à 45 minutes." }
-    : undefined;
-  return configPage(user, notice);
+  const lancee = url.searchParams.has("lancee");
+  const notice = lancee ? { kind: "ok" as const, text: "Mise à jour lancée — comptez 35 à 45 minutes." } : undefined;
+  return configPage(user, lancee ? "moteur" : parseOnglet(url.searchParams.get("onglet")), notice);
 }
 
 async function handleKeywordAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { terme = "" } = await form(req);
   const v = validateKeyword(terme);
-  if (!v.ok) return configPage(user, { kind: "error", text: v.error });
+  if (!v.ok) return configPage(user, "resultats", { kind: "error", text: v.error });
   const added = await addKeyword(v.value, user.id);
-  if (!added) return configPage(user, { kind: "error", text: "Ce mot-clé existe déjà." });
-  return redirect("/configuration", 303);
+  if (!added) return configPage(user, "resultats", { kind: "error", text: "Ce mot-clé existe déjà." });
+  return redirect(configUrl("resultats", "mots-cles"), 303);
 }
 
 async function handleKeywordDelete(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { id = "" } = await form(req);
   const kid = Number(id);
-  if (!Number.isInteger(kid)) return configPage(user, { kind: "error", text: "Requête invalide." });
+  if (!Number.isInteger(kid)) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
   const deleted = await deleteKeyword(kid);
   if (!deleted) {
-    return configPage(user, {
+    return configPage(user, "resultats", {
       kind: "error",
       text: "Impossible de supprimer le dernier mot-clé : la liste ne peut pas être vide.",
     });
   }
-  return redirect("/configuration", 303);
+  return redirect(configUrl("resultats", "mots-cles"), 303);
 }
 
 async function handleRuleAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { kind = "", terme = "" } = await form(req);
   if (kind !== "keep" && kind !== "exclude") {
-    return configPage(user, { kind: "error", text: "Requête invalide." });
+    return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
   }
   const v = validateRuleTerm(terme);
-  if (!v.ok) return configPage(user, { kind: "error", text: v.error });
+  if (!v.ok) return configPage(user, "resultats", { kind: "error", text: v.error });
   const added = await addScopeRule(kind, v.value, user.id);
-  if (!added) return configPage(user, { kind: "error", text: "Cette règle existe déjà." });
-  return redirect("/configuration", 303);
+  if (!added) return configPage(user, "resultats", { kind: "error", text: "Cette règle existe déjà." });
+  return redirect(configUrl("resultats", "regles"), 303);
 }
 
 async function handleRuleDelete(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { id = "" } = await form(req);
   const rid = Number(id);
-  if (!Number.isInteger(rid)) return configPage(user, { kind: "error", text: "Requête invalide." });
+  if (!Number.isInteger(rid)) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
   await deleteScopeRule(rid);
-  return redirect("/configuration", 303);
+  return redirect(configUrl("resultats", "regles"), 303);
 }
 
+// Un seul point d'entrée pour les réglages, mais chaque carte ne poste que ses
+// champs : seuls les champs présents dans le formulaire sont validés et écrits.
 async function handleSettingsUpdate(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { fenetre = "", classifieur = "", departements = "", modeles = "" } = await form(req);
+  const data = await form(req);
+  const has = (k: string) => Object.hasOwn(data, k);
+  const onglet: Onglet = has("classifieur") || has("modeles") ? "moteur" : "resultats";
+  const carte = has("classifieur") || has("modeles") ? "classement" : has("fenetre") ? "email" : "perimetre";
+  const fail = (text: string) => configPage(user, onglet, { kind: "error", text });
 
-  let windowValue: string | null = null;
-  if (fenetre.trim() !== "") {
-    const v = validateDigestWindow(fenetre);
-    if (!v.ok) return configPage(user, { kind: "error", text: v.error });
-    windowValue = v.value;
-  }
-  let modeValue: string | null = null;
-  if (classifieur !== "") {
-    const v = validateClassifierMode(classifieur);
-    if (!v.ok) return configPage(user, { kind: "error", text: v.error });
-    modeValue = v.value;
-  }
-  const dep = parseDepartements(departements);
-  if (!dep.ok) return configPage(user, { kind: "error", text: dep.error });
-  let modelsValue: string | null = null;
-  let catalogNotice: string | null = null;
-  if (modeles.trim() !== "") {
-    const v = validateModelChain(modeles);
-    if (!v.ok) return configPage(user, { kind: "error", text: v.error });
-    // Vérification au catalogue OpenRouter : identifiant connu + mode JSON.
-    // Catalogue injoignable = on accepte la saisie syntaxiquement valide.
-    const catalog = await fetchCatalog();
-    if (catalog) {
-      const problem = checkChainAgainstCatalog(parseModelChain(v.value), catalog);
-      if (problem) return configPage(user, { kind: "error", text: problem });
-    } else {
-      catalogNotice = "Catalogue OpenRouter injoignable : modèles enregistrés sans vérification.";
+  const writes: Array<[string, string | null]> = [];
+  if (has("fenetre")) {
+    const fenetre = data.fenetre ?? "";
+    if (fenetre.trim() === "") writes.push(["digest_window_days", null]);
+    else {
+      const v = validateDigestWindow(fenetre);
+      if (!v.ok) return fail(v.error);
+      writes.push(["digest_window_days", v.value]);
     }
-    modelsValue = v.value;
+  }
+  if (has("departements")) {
+    const dep = parseDepartements(data.departements ?? "");
+    if (!dep.ok) return fail(dep.error);
+    writes.push(["code_departements", dep.codes.length > 0 ? dep.codes.join(",") : null]);
+  }
+  if (has("classifieur")) {
+    const classifieur = data.classifieur ?? "";
+    if (classifieur === "") writes.push(["classifier_mode", null]);
+    else {
+      const v = validateClassifierMode(classifieur);
+      if (!v.ok) return fail(v.error);
+      writes.push(["classifier_mode", v.value]);
+    }
+  }
+  let catalogNotice: string | null = null;
+  if (has("modeles")) {
+    const modeles = data.modeles ?? "";
+    if (modeles.trim() === "") writes.push(["llm_models", null]);
+    else {
+      const v = validateModelChain(modeles);
+      if (!v.ok) return fail(v.error);
+      // Vérification au catalogue OpenRouter : identifiant connu + mode JSON.
+      // Catalogue injoignable = on accepte la saisie syntaxiquement valide.
+      const catalog = await fetchCatalog();
+      if (catalog) {
+        const problem = checkChainAgainstCatalog(parseModelChain(v.value), catalog);
+        if (problem) return fail(problem);
+      } else {
+        catalogNotice = "Catalogue OpenRouter injoignable : modèles enregistrés sans vérification.";
+      }
+      writes.push(["llm_models", v.value]);
+    }
   }
 
-  await setSetting("digest_window_days", windowValue, user.id);
-  await setSetting("classifier_mode", modeValue, user.id);
-  await setSetting("code_departements", dep.codes.length > 0 ? dep.codes.join(",") : null, user.id);
-  await setSetting("llm_models", modelsValue, user.id);
-  if (catalogNotice) return configPage(user, { kind: "ok", text: `Réglages enregistrés. ${catalogNotice}` });
-  return redirect("/configuration", 303);
+  for (const [key, value] of writes) await setSetting(key, value, user.id);
+  if (catalogNotice) return configPage(user, onglet, { kind: "ok", text: `Réglages enregistrés. ${catalogNotice}` });
+  return redirect(configUrl(onglet, carte), 303);
 }
 
 // Le suffixe :floor / :nitro n'est pas un modèle distinct au catalogue.
@@ -1074,14 +1199,14 @@ function renderLlmSettings(
 
 async function handleRelance(_req: Request, _url: URL, user: AuthUser): Promise<Response> {
   if (!rateLimit(`relance:${user.id}`, 2, 600_000)) {
-    return configPage(user, {
+    return configPage(user, "moteur", {
       kind: "error",
       text: "Trop de relances récentes. Patientez quelques minutes puis réessayez.",
     });
   }
   const lastRun = await getLastRun();
   if (await runInFlight(lastRun)) {
-    return configPage(user, { kind: "error", text: "Une mise à jour est déjà en cours." });
+    return configPage(user, "moteur", { kind: "error", text: "Une mise à jour est déjà en cours." });
   }
   // Processus séparé : run.ts termine par process.exit et ne doit jamais
   // charger le moteur Skip du serveur. Pas de digest sur un run manuel.
@@ -1494,12 +1619,7 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: bo
 }
 
 const DASHBOARD_CSS = `
-    nav { margin: 10px 0 14px; display: flex; gap: 22px; border-bottom: 1px solid var(--ligne-forte); }
-    nav a { padding: 8px 2px 9px; margin-bottom: -1px; text-decoration: none; font-size: 13.5px; font-weight: 500; color: var(--encre-2); border-bottom: 2px solid transparent; }
-    nav a:hover { color: var(--encre); }
-    nav a.active { color: var(--encre); font-weight: 600; border-bottom-color: var(--panneau); }
     tbody tr:hover td { background: #f7faf8; }
-    .meta { color: var(--encre-2); font-size: 12.5px; margin-top: 2px; }
     .reason { color: var(--ambre); font-size: 12px; margin-top: 2px; }
     .deadline { white-space: nowrap; width: 118px; }
     .jrest { font-family: var(--fonte-mono); font-weight: 600; font-size: 13px; }
@@ -1512,7 +1632,6 @@ const DASHBOARD_CSS = `
     .badge.src { background: #eef1f6; color: #3b4a6b; }
     .badge.src.boamp { background: transparent; border: 1px solid var(--ligne); color: var(--encre-2); font-weight: 500; }
     .badge.fam { background: #fbf1e3; color: #8a5a12; }
-    .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
     .filtres { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; font-size: 13px; color: var(--encre-2); flex-wrap: wrap; }
     .filtres select { padding: 5px 8px; border: 1px solid var(--ligne-forte); border-radius: 6px; font-family: inherit; background: var(--carte); font-size: 13px; color: var(--encre); }
     .filtres label { display: flex; align-items: center; gap: 6px; }
