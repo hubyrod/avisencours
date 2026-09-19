@@ -357,6 +357,7 @@ export type StoredAnnouncement = {
   deadline_text: string | null;
   category: string;
   reason: string | null;
+  raw?: string | null;
   classifier?: string | null;
   source?: string | null;
   famille?: string | null;

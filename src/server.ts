@@ -1,5 +1,6 @@
 import { FAMILLE_LABELS, type Famille } from "./familles.ts";
 import { SOURCES, isSource, isSourceEnabled, sourceLabel, type SourceInfo } from "./sources.ts";
+import { decouperRaw } from "./avis-texte.ts";
 import { errMessage } from "./http.ts";
 import { formatCounter, formatDuration, progressPercent, summarizeProgress, type RunProgress } from "./progress.ts";
 import {
@@ -1376,6 +1377,45 @@ const CLIENT_JS = `
 })();
 `;
 
+const AVIS_CSS = `
+    .avis { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; margin-top: 8px; }
+    .avis > aside { grid-column: 2; grid-row: 1 / span 3; position: sticky; top: 16px; display: flex; flex-direction: column; gap: 14px; }
+    .avis > .principal { grid-column: 1; }
+    .titre-avis { font-size: 21px; line-height: 1.3; font-weight: 600; margin: 0 0 6px; max-width: 72ch; }
+    .provenance { color: var(--encre-2); font-size: 13.5px; margin: 0 0 14px; }
+    .provenance .badge { margin-left: 6px; }
+    .bloc { background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; padding: 18px 20px; }
+    .bloc h2 { margin: 0 0 8px; font-size: 14.5px; }
+    .bloc + .bloc, .principal .bloc { margin-top: 14px; }
+    .description p { margin: 0 0 10px; font-size: 14px; line-height: 1.55; max-width: 72ch; white-space: pre-wrap; }
+    .description p:last-child { margin-bottom: 0; }
+    .description .vide { color: var(--encre-2); font-style: italic; }
+    .echeance { background: var(--panneau); color: #fff; border-radius: 8px; padding: 16px 18px; }
+    .echeance .jours { font-family: var(--fonte-mono); font-size: 34px; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
+    .echeance .jours.urgent { color: #ffd4cf; }
+    .echeance .jours.passe { color: #c8d8d0; }
+    .echeance .quand { margin-top: 6px; font-size: 13px; color: #d7e4dd; }
+    .echeance .quand strong { color: #fff; font-family: var(--fonte-mono); font-weight: 600; }
+    .actions-avis { display: flex; flex-direction: column; gap: 8px; }
+    .bouton-annonce { text-align: center; }
+    .publications { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+    .publications li { padding: 6px 0; border-top: 1px solid var(--ligne); display: flex; justify-content: space-between; gap: 10px; }
+    .publications li:first-child { border-top: none; }
+    .publications .ref { color: var(--encre-2); font-size: 12px; }
+    dl.faits { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 13px; }
+    dl.faits dt { color: var(--encre-2); }
+    dl.faits dd { margin: 0; }
+    .classement { font-size: 13px; color: var(--encre-2); }
+    .classement .motif { color: var(--encre); font-style: italic; }
+    .statut-btns { margin-top: 8px; }
+    .commentaires-bloc textarea { min-height: 72px; }
+    @media (max-width: 900px) {
+      .avis { grid-template-columns: minmax(0, 1fr); }
+      .avis > aside { grid-column: 1; grid-row: auto; position: static; }
+      .avis > .principal { grid-column: 1; }
+    }
+`;
+
 async function avisPage(user: AuthUser, idweb: string, retourParam: string | null = null): Promise<Response> {
   const a = await getAnnouncement(idweb);
   if (!a) return html(errorPage("Avis introuvable"), 404);
@@ -1410,76 +1450,115 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
     )
     .join("");
 
-  const facts: Array<[string, string | null]> = [
-    ["Source", publications.length > 1 ? null : sourceLabel(a.source)],
-    ["Famille", a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null],
+  // Échéance : le chiffre que le lecteur cherche en premier.
+  const jours = joursRestants(a.deadline);
+  const passe = a.deadline ? new Date(a.deadline).getTime() < Date.now() : false;
+  const echeance = a.deadline
+    ? `<div class="echeance">
+        <div class="jours${passe ? " passe" : jours !== null && jours < 7 ? " urgent" : ""}">${passe ? "Clos" : `J−${jours}`}</div>
+        <div class="quand">${passe ? "Date limite dépassée le" : "Remise des plis le"} <strong>${esc(a.deadline_text ?? "")}</strong></div>
+      </div>`
+    : `<div class="echeance"><div class="jours passe">—</div><div class="quand">Date limite non indiquée</div></div>`;
+
+  const { description, precisions } = decouperRaw(a.raw, a.objet);
+  const familleLabel = a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null;
+
+  const faits: Array<[string, string | null]> = [
     ["Acheteur", a.acheteur],
     ["Département", a.department],
-    ["Date limite", a.deadline_text],
     ["Publié le", a.published_at],
     ["Type d'avis", a.type_avis],
     ["Procédure", a.procedure],
-    ["Classement", a.reason],
-    ["Classé par", classifierLabel(a.classifier)],
+    ...precisions,
   ];
-  const factRows = facts
+  const faitsRows = faits
     .filter(([, v]) => v)
-    .map(([k, v]) => `<tr><th>${k}</th><td>${esc(v!)}</td></tr>`)
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v!)}</dd>`)
     .join("");
+
+  const principale = publications[0] ?? { idweb: a.idweb, source: a.source ?? "boamp", url: a.url, published_at: a.published_at };
+  const listePublications =
+    publications.length > 1
+      ? `<h2>Publié sur ${publications.length} plateformes</h2>
+        <ul class="publications">
+          ${publications
+            .map(
+              (p) =>
+                `<li><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(sourceLabel(p.source))} ↗</a><span class="ref">${
+                  p.published_at ? `publié le ${esc(p.published_at)}` : ""
+                }${p.idweb === a.idweb ? (p.published_at ? " · " : "") + "fiche de référence" : ""}</span></li>`,
+            )
+            .join("")}
+        </ul>
+        <p class="classement" style="margin:8px 0 0;">Regroupement automatique : même acheteur, même date limite, intitulé identique ou très proche. Statut et commentaires sont communs.</p>`
+      : `<dl class="faits"><dt>Source</dt><dd>${esc(sourceLabel(a.source))}</dd></dl>`;
 
   return html(
     layout(
       `${a.objet} — Avis en cours`,
       whoStrip(user),
-      `<main>
+      `<style>${AVIS_CSS}</style>
+      <main>
       <p class="retour"><a href="${esc(retour)}">← Retour aux avis</a></p>
-      <div class="card" style="max-width:none;margin:16px 0;">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
-          <h2 style="flex:1;min-width:240px;">${esc(a.objet)}</h2>
-          <a class="bouton-annonce" href="${esc(a.url)}" target="_blank" rel="noopener">Annonce officielle ↗</a>
+      <div class="avis">
+        <aside>
+          ${echeance}
+          <div class="actions-avis">
+            <a class="bouton-annonce" href="${esc(principale.url)}" target="_blank" rel="noopener">Annonce officielle ↗</a>
+          </div>
+          ${
+            statuts.length > 0
+              ? `<div class="bloc">
+            <h2>Statut</h2>
+            <div class="statut-btns">${statusButtons}</div>
+            <p class="statut-attrib" id="statut-attrib">${attribution}</p>
+          </div>`
+              : ""
+          }
+          <div class="bloc">
+            ${listePublications}
+          </div>
+          ${
+            a.reason || a.classifier
+              ? `<div class="bloc classement">
+            <h2>Pourquoi cet avis est là</h2>
+            ${a.reason ? `<p class="motif" style="margin:0 0 4px;">${esc(a.reason)}</p>` : ""}
+            ${classifierLabel(a.classifier) ? `<p style="margin:0;">Classé par ${esc(classifierLabel(a.classifier)!)}.</p>` : ""}
+          </div>`
+              : ""
+          }
+        </aside>
+        <div class="principal">
+          <h1 class="titre-avis">${esc(a.objet)}</h1>
+          <p class="provenance">${esc(a.acheteur ?? "Acheteur non indiqué")}${a.department ? ` (département ${esc(a.department)})` : ""}${
+            familleLabel ? `<span class="badge fam" style="display:inline-block;background:#fbf1e3;color:#8a5a12;font-size:11px;font-weight:600;padding:1px 7px;border-radius:4px;">${esc(familleLabel)}</span>` : ""
+          }</p>
+          <div class="bloc description">
+            <h2>Description</h2>
+            ${
+              description.length
+                ? description.map((p) => `<p>${esc(p)}</p>`).join("")
+                : `<p class="vide">La plateforme ne fournit pas de texte au-delà de l'intitulé. Le détail est dans l'annonce officielle.</p>`
+            }
+          </div>
+          <div class="bloc">
+            <h2>Repères</h2>
+            <dl class="faits">${faitsRows}</dl>
+          </div>
+          <div class="bloc commentaires-bloc" id="commentaires">
+            <h2>Commentaires (<span id="nb">…</span>)</h2>
+            <div id="fil"><p style="color:#78716c;">Chargement des commentaires…</p></div>
+            <div id="fil-erreur" class="banner error" aria-live="polite" hidden></div>
+            <form id="form-commenter" data-live="1" method="post"
+                  action="/avis/${encodeURIComponent(idweb)}/commenter" style="margin-top:14px;">
+              <label for="body" style="display:block;font-size:13px;color:var(--encre-2);margin:0 0 4px;">Ajouter un commentaire</label>
+              <textarea id="body" name="body" required maxlength="4000"
+                        placeholder="Votre analyse, une question, une décision…"></textarea>
+              <div class="actions" style="margin-top:10px;"><button class="primary" type="submit">Publier</button></div>
+            </form>
+            <noscript><p style="color:#78716c;">Les commentaires nécessitent JavaScript.</p></noscript>
+          </div>
         </div>
-        <table class="facts">${factRows}</table>
-        ${
-          publications.length > 1
-            ? `<div style="margin-top:14px;">
-          <strong style="font-size:13px;">Publié sur ${publications.length} plateformes</strong>
-          <ul style="margin:4px 0 0;padding-left:18px;font-size:13.5px;">
-            ${publications
-              .map(
-                (p) =>
-                  `<li><a href="${esc(p.url)}" target="_blank" rel="noopener" style="font-weight:600;">${esc(sourceLabel(p.source))} ↗</a>${
-                    p.published_at ? ` <span style="color:var(--encre-2);">— publié le ${esc(p.published_at)}</span>` : ""
-                  }${p.idweb === a.idweb ? ' <span style="color:var(--encre-2);">(fiche de référence)</span>' : ""}</li>`,
-              )
-              .join("")}
-          </ul>
-          <p style="margin:6px 0 0;">Regroupement automatique : même acheteur, même date limite, intitulé identique ou très proche. Statut et commentaires sont communs.</p>
-        </div>`
-            : `<p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-weight:600;">Voir l'annonce officielle →</a></p>`
-        }
-      </div>
-      ${
-        statuts.length > 0
-          ? `<div class="card" style="max-width:none;margin:16px 0;">
-        <h2>Statut</h2>
-        <p style="margin:2px 0 0;">Où en est-on sur cet avis ? Le changement est visible par toute l'équipe et tracé dans le fil.</p>
-        <div class="statut-btns">${statusButtons}</div>
-        <p class="statut-attrib" id="statut-attrib">${attribution}</p>
-      </div>`
-          : ""
-      }
-      <div class="card" style="max-width:none;margin:16px 0;" id="commentaires">
-        <h2>Commentaires (<span id="nb">…</span>)</h2>
-        <div id="fil"><p style="color:#78716c;">Chargement des commentaires…</p></div>
-        <div id="fil-erreur" class="banner error" aria-live="polite" hidden></div>
-        <form id="form-commenter" data-live="1" method="post"
-              action="/avis/${encodeURIComponent(idweb)}/commenter" style="margin-top:16px;">
-          <label for="body">Ajouter un commentaire</label>
-          <textarea id="body" name="body" required maxlength="4000"
-                    placeholder="Votre analyse, une question, une décision…"></textarea>
-          <div class="actions"><button class="primary" type="submit">Publier</button></div>
-        </form>
-        <noscript><p style="color:#78716c;">Les commentaires nécessitent JavaScript.</p></noscript>
       </div>
       <script type="application/json" id="cfg">${jsonBlob({
         uid: user.id,
