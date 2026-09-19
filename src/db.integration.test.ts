@@ -126,6 +126,21 @@ if (!TEST_URL) {
     });
   });
 
+  describe("markDashboardVisit", () => {
+    test("repère de visite précédente stable pendant une visite, avancé après une heure", async () => {
+      const [u] = (await control`INSERT INTO users (email) VALUES ('visite@example.org') RETURNING id`) as Array<{ id: string }>;
+      const id = Number(u!.id);
+      expect(await db.markDashboardVisit(id)).toBeNull(); // première visite
+      expect(await db.markDashboardVisit(id)).toBeNull(); // même visite
+      await control`UPDATE users SET dashboard_seen_at = now() - interval '2 hours' WHERE id = ${id}`;
+      const prev = await db.markDashboardVisit(id); // nouvelle visite : repère = fin de la précédente
+      expect(prev).not.toBeNull();
+      expect(Date.now() - prev!.getTime()).toBeGreaterThan(3_600_000);
+      const again = await db.markDashboardVisit(id); // même visite : inchangé
+      expect(again!.getTime()).toBe(prev!.getTime());
+    });
+  });
+
   describe("announcements : filtres du tableau de bord", () => {
     test("upsert, sources, familles, comptes par source", async () => {
       const run = await db.startRun();
@@ -151,6 +166,16 @@ if (!TEST_URL) {
       expect(n("boamp", "travaux")).toBe(1);
       expect(n("achatpublic", "relevant")).toBe(2);
       expect(n("marchesonline", "excluded")).toBe(1);
+
+      // Recherche texte, tri, « nouveaux depuis ».
+      expect((await db.getCurrent("relevant", run, { q: "csl_1" })).map((a) => a.idweb)).toEqual(["CSL_1"]);
+      expect((await db.getCurrent("relevant", run, { q: "Ville" })).map((a) => a.idweb).sort()).toEqual(["B1", "CSL_1", "CSL_2"]);
+      expect((await db.getCurrent("relevant", run, { q: "%" })).length).toBe(0);
+      expect((await db.getCurrent("relevant", run, { newSince: new Date(Date.now() + 60_000) })).length).toBe(0);
+      expect((await db.getCurrent("relevant", run, { newSince: new Date(Date.now() - 60_000) })).length).toBe(3);
+      await control`UPDATE announcements SET first_seen_at = now() - interval '2 days' WHERE idweb = 'B1'`;
+      expect((await db.getCurrent("relevant", run, { sort: "recents" })).map((a) => a.idweb).slice(-1)).toEqual(["B1"]);
+      expect((await db.getCurrent("relevant", run, { sort: "echeance" }))[0]!.idweb).toBe("B1");
 
       // Un second run conserve first_seen et met à jour le reste.
       const run2 = await db.startRun();

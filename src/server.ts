@@ -8,6 +8,8 @@ import {
   getLastSuccessfulRun,
   getRun,
   countCurrentBySource,
+  markDashboardVisit,
+  type CurrentSort,
   isRunLockHeld,
   closeOrphanRuns,
   heartbeatStale,
@@ -172,6 +174,8 @@ const BASE_CSS = `
     .card label { display: block; font-size: 13px; color: var(--encre-2); margin: 14px 0 4px; }
     .card .actions { margin-top: 16px; display: flex; align-items: center; gap: 16px; }
     .card.large { margin: 16px 0; max-width: 640px; }
+    .bouton-annonce { display: inline-block; background: var(--panneau); color: #fff; text-decoration: none; border-radius: 7px; padding: 7px 14px; font-size: 13.5px; font-weight: 600; white-space: nowrap; }
+    .bouton-annonce:hover { background: var(--panneau-fonce); }
     .card .effet { margin: -2px 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--encre-2); }
     .card .sous-titre-carte { margin: 12px 0 2px; font-size: 14px; }
     .onglet-intro { color: var(--encre-2); font-size: 13.5px; margin: 0 0 4px; max-width: 640px; }
@@ -1370,9 +1374,10 @@ const CLIENT_JS = `
 })();
 `;
 
-async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
+async function avisPage(user: AuthUser, idweb: string, retourParam: string | null = null): Promise<Response> {
   const a = await getAnnouncement(idweb);
   if (!a) return html(errorPage("Avis introuvable"), 404);
+  const retour = safeRetour(retourParam);
 
   // Statut courant rendu côté serveur : correct même sans moteur Skip (flux 503).
   const [statuts, currentEvent, defaultStatus] = await Promise.all([
@@ -1420,9 +1425,12 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
       `${a.objet} — Avis en cours`,
       whoStrip(user),
       `<main>
-      <p class="retour"><a href="/">← Retour aux avis</a></p>
+      <p class="retour"><a href="${esc(retour)}">← Retour aux avis</a></p>
       <div class="card" style="max-width:none;margin:16px 0;">
-        <h2>${esc(a.objet)}</h2>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+          <h2 style="flex:1;min-width:240px;">${esc(a.objet)}</h2>
+          <a class="bouton-annonce" href="${esc(a.url)}" target="_blank" rel="noopener">Annonce officielle ↗</a>
+        </div>
         <table class="facts">${factRows}</table>
         <p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-weight:600;">Voir l'annonce officielle →</a></p>
       </div>
@@ -1436,7 +1444,7 @@ async function avisPage(user: AuthUser, idweb: string): Promise<Response> {
       </div>`
           : ""
       }
-      <div class="card" style="max-width:none;margin:16px 0;">
+      <div class="card" style="max-width:none;margin:16px 0;" id="commentaires">
         <h2>Commentaires (<span id="nb">…</span>)</h2>
         <div id="fil"><p style="color:#78716c;">Chargement des commentaires…</p></div>
         <div id="fil-erreur" class="banner error" aria-live="polite" hidden></div>
@@ -1500,7 +1508,10 @@ async function handleSetStatus(
   if (!rateLimit(`statut:${user.id}`, 30, 600_000)) {
     return Response.json({ error: MSG_RATE_LIMITED }, { status: 429 });
   }
-  const { statut = "" } = await form(req);
+  const { statut = "", retour = "" } = await form(req);
+  // Formulaire classique (sans JavaScript, depuis la liste) : on revient sur la liste.
+  const wantsJson = (req.headers.get("accept") ?? "").includes("application/json");
+  const done = () => (wantsJson ? Response.json({ ok: true }) : redirect(safeRetour(retour), 303));
   const statusId = Number(statut);
   if (!Number.isInteger(statusId)) return Response.json({ error: "Requête invalide." }, { status: 400 });
   const s = await getStatus(statusId);
@@ -1511,9 +1522,9 @@ async function handleSetStatus(
   // pas de nouvel événement, le fil resterait sinon pollué de doublons.
   const current =
     (await getCurrentStatusEvent(idweb))?.status_id ?? Number((await getDefaultStatus())?.id ?? NaN);
-  if (current === statusId) return Response.json({ ok: true });
+  if (current === statusId) return done();
   await addStatusEvent(idweb, statusId, user.id);
-  return Response.json({ ok: true });
+  return done();
 }
 
 async function handleDeleteComment(req: Request, _url: URL, user: AuthUser): Promise<Response> {
@@ -1552,8 +1563,22 @@ function sourceBadges(a: StoredAnnouncement): string {
   return out;
 }
 
-function announcementRow(a: StoredAnnouncement, latestRunId: number | null): string {
-  const isNew = latestRunId !== null && a.first_seen_run_id === latestRunId;
+// Chemin de retour vers la liste avec ses filtres : uniquement un chemin
+// relatif du site (jamais une URL externe), sinon la racine.
+function safeRetour(v: string | null | undefined): string {
+  return v && v.startsWith("/") && !v.startsWith("//") && !/[\r\n]/.test(v) ? v : "/";
+}
+
+type RowContext = {
+  // Repère « Nouveau » : apparu depuis la visite précédente de l'utilisateur.
+  prevSeen: Date | null;
+  statuts: StatusRow[];
+  // Liste courante (chemin + filtres), pour revenir au même endroit.
+  retour: string;
+};
+
+function announcementRow(a: StoredAnnouncement, ctx: RowContext): string {
+  const isNew = ctx.prevSeen !== null && !!a.first_seen_at && new Date(a.first_seen_at).getTime() > ctx.prevSeen.getTime();
   const tooltip = statusTooltip(
     a.status_set_at
       ? {
@@ -1568,10 +1593,23 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
   const statusTitle = a.status_label
     ? ` title="${esc(tooltip ? `${a.status_label} — ${tooltip}` : a.status_label)}"`
     : "";
-  const statusBadge = a.status_label
-    ? `<span class="badge-statut"${statusTitle}><span class="dot" style="background:${esc(
-        a.status_color ?? "#626d66",
-      )}"></span><span class="lbl">${esc(a.status_label)}</span></span>`
+  // Statut modifiable depuis la liste : un select par ligne. Sans JavaScript
+  // le bouton « OK » poste le formulaire (handleSetStatus redirige vers `retour`).
+  const fiche = `/avis/${encodeURIComponent(a.idweb)}?retour=${encodeURIComponent(ctx.retour)}`;
+  const statusControl = ctx.statuts.length
+    ? `<form method="post" action="/avis/${encodeURIComponent(a.idweb)}/statut" data-live="statut" class="statut-form">
+        <input type="hidden" name="retour" value="${esc(ctx.retour)}">
+        <select name="statut" class="statut-select" aria-label="Statut de l'avis"${statusTitle}
+                style="border-left-color:${esc(a.status_color ?? "#626d66")}">
+          ${ctx.statuts
+            .map(
+              (s) =>
+                `<option value="${s.id}" data-color="${esc(s.color)}"${Number(s.id) === Number(a.status_id) ? " selected" : ""}>${esc(s.label)}</option>`,
+            )
+            .join("")}
+        </select>
+        <button type="submit" class="ok">OK</button>
+      </form>`
     : `<span class="jrest none">—</span>`;
   return `
   <tr>
@@ -1579,18 +1617,18 @@ function announcementRow(a: StoredAnnouncement, latestRunId: number | null): str
       a.deadline_text ? `<div class="jdate">${esc(a.deadline_text)}</div>` : ""
     }</td>
     <td>
-      <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.objet)}</a>
+      <a class="objet" href="${fiche}">${esc(a.objet)}</a>
       ${isNew ? '<span class="badge">Nouveau</span>' : ""}${sourceBadges(a)}
-      <div class="meta">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department || "?")}${
-        a.type_avis ? ` — ${esc(a.type_avis)}` : ""
+      <div class="meta">${esc(a.acheteur ?? "?")} · dépt. ${esc(a.department || "?")}${
+        a.type_avis ? ` · ${esc(a.type_avis)}` : ""
       }${
-        a.published_at ? ` — publié le ${esc(a.published_at)}` : ""
-      } — <a class="comments-link" href="/avis/${encodeURIComponent(a.idweb)}">${
-        (a.comment_count ?? 0) > 0 ? `Commentaires (${a.comment_count})` : "Commenter"
+        a.published_at ? ` · publié le ${esc(a.published_at)}` : ""
+      } · <a class="lien-annonce" href="${esc(a.url)}" target="_blank" rel="noopener" title="Ouvrir l'annonce officielle sur le site source">Annonce ↗</a> · <a class="comments-link" href="${fiche}#commentaires">${
+        (a.comment_count ?? 0) > 0 ? `${a.comment_count} commentaire${(a.comment_count ?? 0) > 1 ? "s" : ""}` : "Commenter"
       }</a></div>
       ${a.reason ? `<div class="reason">${esc(a.reason)}</div>` : ""}
     </td>
-    <td class="statut-col">${statusBadge}</td>
+    <td class="statut-col">${statusControl}</td>
   </tr>`;
 }
 
@@ -1620,7 +1658,14 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: bo
 
 const DASHBOARD_CSS = `
     tbody tr:hover td { background: #f7faf8; }
-    .reason { color: var(--ambre); font-size: 12px; margin-top: 2px; }
+    td a.objet { display: inline-block; font-size: 14px; }
+    td a.objet:visited { color: var(--encre-2); }
+    td a.lien-annonce, td a.comments-link { font-weight: 500; }
+    .reason { color: var(--encre-2); font-size: 12px; margin-top: 2px; font-style: italic; }
+    .statut-form { display: flex; align-items: center; gap: 6px; margin: 0; }
+    .statut-select { padding: 4px 6px; border: 1px solid var(--ligne-forte); border-left-width: 4px; border-radius: 6px; font-family: inherit; font-size: 12.5px; background: var(--carte); color: var(--encre); max-width: 190px; }
+    .statut-form .ok { background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; font-family: inherit; }
+    .filtres input[type=search] { padding: 5px 8px; border: 1px solid var(--ligne-forte); border-radius: 6px; font-family: inherit; font-size: 13px; color: var(--encre); background: var(--carte); width: 220px; }
     .deadline { white-space: nowrap; width: 118px; }
     .jrest { font-family: var(--fonte-mono); font-weight: 600; font-size: 13px; }
     .jrest.soon { color: var(--ambre); }
@@ -1651,30 +1696,53 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const famille = (Object.keys(FAMILLE_LABELS) as Famille[]).includes(familleParam as Famille) ? familleParam : null;
   const sourceParam = url.searchParams.get("source") ?? "";
   const source = isSource(sourceParam) ? sourceParam : null;
+  const q = (url.searchParams.get("q") ?? "").trim().slice(0, 120);
+  const triParam = url.searchParams.get("tri");
+  const tri: CurrentSort = triParam === "recents" ? "recents" : "echeance";
+  const nouveaux = url.searchParams.get("nouveaux") === "1";
 
-  const [lastRun0, lastSuccess, statuts] = await Promise.all([
+  const [lastRun0, lastSuccess, statuts, prevSeen] = await Promise.all([
     getLastRun(),
     getLastSuccessfulRun(),
     listStatuses(false),
+    markDashboardVisit(user.id),
   ]);
   const inFlight = await runInFlight(lastRun0);
   const lastRun = inFlight || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
   const [items, sourceCounts] = lastSuccess
     ? await Promise.all([
-        getCurrent(dbCategory, lastSuccess.id, { statusId, hideRejet: masquer, famille, source }),
+        getCurrent(dbCategory, lastSuccess.id, {
+          statusId,
+          hideRejet: masquer,
+          famille,
+          source,
+          q: q || null,
+          // « Nouveaux » sans visite précédente : rien n'est nouveau pour moi.
+          newSince: nouveaux ? (prevSeen ?? new Date()) : null,
+          sort: tri,
+        }),
         countCurrentBySource(lastSuccess.id),
       ])
     : [[], []];
   // Compte par source pour la catégorie affichée (avant les autres filtres).
   const countFor = (id: string) => sourceCounts.find((c) => c.source === id && c.category === dbCategory)?.count ?? 0;
-  const latestRunId = lastSuccess?.id ?? null;
+  const filtresActifs = statusId !== null || masquer || famille !== null || source !== null || q !== "" || nouveaux;
+  // Chemin courant (avec filtres) : retour depuis la fiche, et onglets qui gardent les filtres.
+  const retour = `/${url.search}`;
+  const withCat = (c: string) => {
+    const p = new URLSearchParams(url.searchParams);
+    p.set("cat", c);
+    return `/?${p.toString()}`;
+  };
 
   const tabs = `
   <nav>
-    <a href="/?cat=pertinents" class="${cat === "pertinents" ? "active" : ""}">Avis pertinents (${
+    <a href="${esc(withCat("pertinents"))}" class="${cat === "pertinents" ? "active" : ""}">Avis pertinents (${
       cat === "pertinents" ? items.length : (lastSuccess?.relevant_count ?? "…")
     })</a>
-    <a href="/?cat=travaux" class="${cat === "travaux" ? "active" : ""}">Travaux — hors scope</a>
+    <a href="${esc(withCat("travaux"))}" class="${cat === "travaux" ? "active" : ""}">Travaux — hors scope (${
+      cat === "travaux" ? items.length : (lastSuccess?.travaux_count ?? "…")
+    })</a>
   </nav>`;
 
   const filtres =
@@ -1683,6 +1751,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
       : `
   <form class="filtres" method="get" action="/">
     <input type="hidden" name="cat" value="${cat}">
+    <input type="search" name="q" value="${esc(q)}" placeholder="Rechercher (objet, acheteur)" aria-label="Rechercher dans les avis" maxlength="120">
     <label for="f-statut">Statut</label>
     <select id="f-statut" name="statut">
       <option value="">Tous</option>
@@ -1707,20 +1776,28 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
         .map((f) => `<option value="${f}"${f === famille ? " selected" : ""}>${esc(FAMILLE_LABELS[f])}</option>`)
         .join("")}
     </select>
+    <label for="f-tri">Tri</label>
+    <select id="f-tri" name="tri">
+      <option value="echeance"${tri === "echeance" ? " selected" : ""}>Échéance la plus proche</option>
+      <option value="recents"${tri === "recents" ? " selected" : ""}>Repérés le plus récemment</option>
+    </select>
+    <label title="Avis apparus depuis votre visite précédente"><input type="checkbox" name="nouveaux" value="1"${nouveaux ? " checked" : ""}> Nouveaux depuis ma dernière visite</label>
     <label><input type="checkbox" name="masquer" value="1"${masquer ? " checked" : ""}> Masquer les avis abandonnés</label>
-    <button type="submit">Filtrer</button>
+    <button type="submit" id="f-bouton">Filtrer</button>
   </form>`;
 
   const table =
     items.length === 0
       ? `<p class="empty">${
-          statusId !== null || masquer || famille !== null || source !== null
-            ? "Aucun avis ne correspond à ce filtre."
+          filtresActifs
+            ? nouveaux && prevSeen === null
+              ? "Première visite : rien n'est encore « nouveau depuis votre dernière visite ». Revenez après la prochaine mise à jour."
+              : "Aucun avis ne correspond à ces filtres."
             : "Aucun avis en cours dans cette catégorie."
         }</p>`
       : `<table>
           <thead><tr><th>Échéance</th><th>Objet</th><th>Statut</th></tr></thead>
-          <tbody>${items.map((a) => announcementRow(a, latestRunId)).join("")}</tbody>
+          <tbody>${items.map((a) => announcementRow(a, { prevSeen, statuts, retour })).join("")}</tbody>
         </table>`;
 
   const body = `
@@ -1733,12 +1810,64 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     }
     ${tabs}
     ${filtres}
+    <div id="liste-erreur" class="banner error" aria-live="polite" hidden></div>
     ${table}
-    <footer>Mise à jour automatique chaque matin. Cliquez sur un avis pour ouvrir l'annonce officielle.</footer>
+    <footer>Mise à jour automatique chaque matin. Cliquez sur un avis pour ouvrir sa fiche (statut, commentaires, texte) ; « Annonce ↗ » ouvre le site source. « Nouveau » = apparu depuis votre visite précédente.</footer>
+    <script>${DASHBOARD_JS}</script>
   </main>`;
 
   return html(layout("Avis en cours — marchés publics mobilité", whoStrip(user), body));
 }
+
+// Script du tableau de bord, progressif : sans lui, les filtres passent par le
+// bouton « Filtrer » et les statuts par le bouton « OK » de chaque ligne.
+// - filtres : tout changement de sélecteur ou de case recharge la liste ;
+// - statut : le select poste en fetch (JSON), la couleur suit, l'erreur
+//   restaure la valeur et s'affiche au-dessus de la liste.
+// DOM manipulé sans innerHTML.
+const DASHBOARD_JS = String.raw`
+(function () {
+  const filtres = document.querySelector("form.filtres");
+  if (filtres) {
+    const bouton = document.getElementById("f-bouton");
+    if (bouton) bouton.hidden = true;
+    filtres.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "SELECT" || (t.tagName === "INPUT" && t.type === "checkbox"))) filtres.requestSubmit();
+    });
+  }
+  const erreur = document.getElementById("liste-erreur");
+  const montrer = (msg) => { if (erreur) { erreur.textContent = msg; erreur.hidden = false; } };
+  document.querySelectorAll('form[data-live="statut"]').forEach((f) => {
+    const select = f.querySelector("select");
+    const ok = f.querySelector("button.ok");
+    if (!select) return;
+    if (ok) ok.hidden = true;
+    let precedent = select.value;
+    const couleur = () => {
+      const opt = select.options[select.selectedIndex];
+      select.style.borderLeftColor = (opt && opt.dataset.color) || "#626d66";
+    };
+    select.addEventListener("change", async () => {
+      select.disabled = true;
+      try {
+        const res = await fetch(f.action, { method: "POST", body: new FormData(f), headers: { Accept: "application/json" } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Erreur " + res.status);
+        precedent = select.value;
+        couleur();
+        select.title = "Défini par vous à l'instant";
+        if (erreur) erreur.hidden = true;
+      } catch (err) {
+        select.value = precedent;
+        montrer("Le statut n'a pas pu être enregistré : " + (err && err.message ? err.message : "erreur réseau") + ".");
+      } finally {
+        select.disabled = false;
+      }
+    });
+  });
+})();
+`;
 
 function errorPage(msg: string): string {
   return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Avis en cours — erreur</title></head>
@@ -1928,7 +2057,7 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
   { method: "GET", path: "/profil", access: "user", handler: async (_req, _url, user) => profilePage(user!) },
   { method: "POST", path: "/profil", access: "user", handler: (req, url, user) => handleProfileUpdate(req, url, user!) },
   { method: "POST", path: "/profil/deconnexion-partout", access: "user", handler: (req, url, user) => handleLogoutEverywhere(req, url, user!) },
-  { method: "GET", path: "/avis/:idweb", access: "user", handler: (_req, _url, user, params) => avisPage(user!, params.idweb ?? "") },
+  { method: "GET", path: "/avis/:idweb", access: "user", handler: (_req, url, user, params) => avisPage(user!, params.idweb ?? "", url.searchParams.get("retour")) },
   { method: "POST", path: "/avis/:idweb/commenter", access: "user", handler: (req, url, user, params) => handleAddComment(req, url, user!, params) },
   { method: "GET", path: "/avis/:idweb/commentaires/flux", access: "user", handler: async (req, _url, user, params) => {
       if (!rateLimit(`flux:${user!.id}`, 30, 60_000)) return new Response("Trop de connexions", { status: 429 });

@@ -129,6 +129,18 @@ if (!TEST_URL) {
     expect(home.text).toContain('badge src">achatpublic.com');
     expect(home.text).toContain("Inondations — AMC");
     expect(home.text).toContain('value="achatpublic"');
+    // Clic principal = fiche interne (avec retour) ; l'annonce officielle en second, seul lien sortant.
+    expect(home.text).toContain('class="objet" href="/avis/B1?retour=%2F"');
+    expect(home.text).toContain('href="https://boamp/B1" target="_blank"');
+    expect(home.text).not.toContain('href="https://boamp/B1">Plan');
+    // Statut modifiable depuis la liste : option courante (statut par défaut) sélectionnée.
+    expect(home.text).toContain('data-live="statut"');
+    expect(home.text).toMatch(/<option value="\d+" data-color="#[0-9a-f]{6}" selected>à évaluer/);
+    // Première visite : rien de « nouveau pour moi ».
+    expect(home.text).not.toContain('class="badge">Nouveau');
+    // Les onglets gardent les filtres.
+    const tab = await get("/?source=achatpublic&q=PAPI");
+    expect(tab.text).toContain('href="/?source=achatpublic&amp;q=PAPI&amp;cat=travaux"');
 
     const filtered = await get("/?source=achatpublic");
     expect(filtered.text).toContain("Étude PAPI achatpublic");
@@ -137,6 +149,45 @@ if (!TEST_URL) {
     const fam = await get("/?famille=inondations");
     expect(fam.text).toContain("Étude PAPI achatpublic");
     expect(fam.text).not.toContain("Plan de mobilité BOAMP");
+
+    const q = await get("/?q=papi");
+    expect(q.text).toContain("Étude PAPI achatpublic");
+    expect(q.text).not.toContain("Plan de mobilité BOAMP");
+    expect(q.text).toContain('class="objet" href="/avis/CSL_1?retour=%2F%3Fq%3Dpapi"');
+
+    expect((await get("/?tri=recents")).text).toContain('value="recents" selected');
+    expect((await get("/?tri=x")).text).toContain('value="echeance" selected');
+    expect((await get("/?nouveaux=1")).text).toContain("Première visite");
+  });
+
+  test("« Nouveau » = apparu depuis ma visite précédente", async () => {
+    await control`UPDATE users SET dashboard_seen_at = now() - interval '2 hours', dashboard_prev_seen_at = NULL WHERE email = ${EMAIL}`;
+    await control`UPDATE announcements SET first_seen_at = now() - interval '3 hours' WHERE idweb = 'B1'`;
+    const home = await get("/"); // nouvelle visite : repère = il y a 2 h
+    expect(home.text).toMatch(/CSL_1[\s\S]*?<span class="badge">Nouveau/);
+    expect(home.text).not.toMatch(/B1[^\n]*\n[^\n]*Nouveau/);
+    const nouveaux = await get("/?nouveaux=1");
+    expect(nouveaux.text).toContain("Étude PAPI achatpublic");
+    expect(nouveaux.text).not.toContain("Plan de mobilité BOAMP");
+  });
+
+  test("statut depuis la liste sans JavaScript : POST classique puis retour à la liste", async () => {
+    const [s] = (await control`SELECT id FROM statuses WHERE label = 'répondu'`) as Array<{ id: string }>;
+    const res = await post("/avis/B1/statut", { statut: s!.id, retour: "/?source=boamp" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/?source=boamp");
+    const ev = (await control`SELECT status_id FROM status_events WHERE idweb = 'B1' ORDER BY id DESC LIMIT 1`) as Array<{ status_id: string }>;
+    expect(ev[0]!.status_id).toBe(s!.id);
+    expect((await get("/")).text).toMatch(/<option value="\d+" data-color="#[0-9a-f]{6}" selected>répondu/);
+    // Chemin de retour externe refusé.
+    const bad = await post("/avis/B1/statut", { statut: s!.id, retour: "https://evil.example" });
+    expect(bad.headers.get("location")).toBe("/");
+    // Fiche : retour vers la liste filtrée, bouton annonce, ancre commentaires.
+    const fiche = await get("/avis/B1?retour=%2F%3Fsource%3Dboamp");
+    expect(fiche.text).toContain('<a href="/?source=boamp">← Retour aux avis</a>');
+    expect(fiche.text).toContain("Annonce officielle ↗");
+    expect(fiche.text).toContain('id="commentaires"');
+    expect((await get("/avis/B1?retour=https%3A%2F%2Fevil")).text).toContain('<a href="/">← Retour aux avis</a>');
   });
 
   test("page configuration : onglet Résultats par défaut, onglet Moteur avec sources et LLM", async () => {

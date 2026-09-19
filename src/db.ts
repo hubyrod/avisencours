@@ -62,6 +62,9 @@ export async function migrate(): Promise<void> {
     )`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS receive_digest boolean NOT NULL DEFAULT false`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS can_configure boolean NOT NULL DEFAULT false`;
+  // Repères de visite du tableau de bord (« Nouveau » = apparu depuis la visite précédente).
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS dashboard_seen_at timestamptz`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS dashboard_prev_seen_at timestamptz`;
   await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS digest_sent boolean NOT NULL DEFAULT false`;
   // Classification via OpenRouter : coût/usage du run, avertissement non
   // bloquant (coupe-circuit, clé absente), et qui a classé chaque avis.
@@ -353,6 +356,7 @@ export type StoredAnnouncement = {
   source?: string | null;
   famille?: string | null;
   first_seen_run_id: number | null;
+  first_seen_at?: Date;
   comment_count?: number;
   status_id?: number | null;
   status_label?: string | null;
@@ -427,19 +431,54 @@ export async function getLastSuccessfulRun(): Promise<RunRow | null> {
   return toRunRow(rows[0] as Record<string, unknown> | undefined);
 }
 
+// Visite du tableau de bord : `dashboard_seen_at` = dernier affichage,
+// `dashboard_prev_seen_at` = fin de la visite précédente (une visite = des
+// affichages espacés de moins d'une heure). Renvoie le repère « précédent »,
+// stable pendant toute la visite courante, contre lequel « Nouveau » se calcule.
+export async function markDashboardVisit(userId: number): Promise<Date | null> {
+  const rows = await db()`
+    UPDATE users SET
+      dashboard_prev_seen_at = CASE
+        WHEN dashboard_seen_at IS NULL OR dashboard_seen_at < now() - interval '1 hour' THEN dashboard_seen_at
+        ELSE dashboard_prev_seen_at END,
+      dashboard_seen_at = now()
+    WHERE id = ${userId}
+    RETURNING dashboard_prev_seen_at`;
+  const v = (rows[0] as { dashboard_prev_seen_at: Date | null } | undefined)?.dashboard_prev_seen_at ?? null;
+  return v ? new Date(v) : null;
+}
+
+export type CurrentSort = "echeance" | "recents" | "nouveaute";
+
+export type CurrentFilter = {
+  statusId?: number | null;
+  hideRejet?: boolean;
+  famille?: string | null;
+  source?: string | null;
+  // Recherche texte sur l'objet et l'acheteur (ILIKE, sensible aux accents).
+  q?: string | null;
+  // Ne garder que les avis apparus après cette date (« nouveaux pour moi »).
+  newSince?: Date | null;
+  sort?: CurrentSort;
+};
+
 // Announcements still present in the latest successful run, deadline not passed
-// (or unknown), sorted by deadline ascending. Statut courant = dernier événement ;
-// aucun événement = statut par défaut (premier statut actif par position), d'où
-// le COALESCE — le filtre « à évaluer » doit aussi attraper les avis sans événement.
+// (or unknown). Statut courant = dernier événement ; aucun événement = statut
+// par défaut (premier statut actif par position), d'où le COALESCE — le filtre
+// « à évaluer » doit aussi attraper les avis sans événement. Le tri se fait en
+// mémoire (quelques milliers de lignes au plus) : échéance croissante par défaut,
+// ou avis vus le plus récemment en premier.
 export async function getCurrent(
   category: string,
   runId: number,
-  filter?: { statusId?: number | null; hideRejet?: boolean; famille?: string | null; source?: string | null },
+  filter?: CurrentFilter,
 ): Promise<StoredAnnouncement[]> {
   const statusId = filter?.statusId ?? null;
   const hideRejet = filter?.hideRejet ?? false;
   const famille = filter?.famille ?? null;
   const source = filter?.source ?? null;
+  const q = filter?.q?.trim() ? `%${filter.q.trim().replace(/[%_\\]/g, "\\$&")}%` : null;
+  const newSince = filter?.newSince ?? null;
   const defaultId = (await getDefaultStatus())?.id ?? null;
   const rows = await db()`
     SELECT a.*,
@@ -463,8 +502,22 @@ export async function getCurrent(
       AND (${hideRejet} = false OR COALESCE(s.is_rejet, false) = false)
       AND (${famille}::text IS NULL OR a.famille = ${famille})
       AND (${source}::text IS NULL OR a.source = ${source})
+      AND (${q}::text IS NULL OR a.objet ILIKE ${q} OR COALESCE(a.acheteur, '') ILIKE ${q})
+      AND (${newSince}::timestamptz IS NULL OR a.first_seen_at > ${newSince})
     ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
-  return rows as StoredAnnouncement[];
+  const items = rows as StoredAnnouncement[];
+  const sort = filter?.sort ?? "echeance";
+  if (sort === "recents" || sort === "nouveaute") {
+    items.sort((x, y) => {
+      const dx = x.first_seen_at ? new Date(x.first_seen_at).getTime() : 0;
+      const dy = y.first_seen_at ? new Date(y.first_seen_at).getTime() : 0;
+      if (dx !== dy) return dy - dx;
+      const ex = x.deadline ? new Date(x.deadline).getTime() : Number.MAX_SAFE_INTEGER;
+      const ey = y.deadline ? new Date(y.deadline).getTime() : Number.MAX_SAFE_INTEGER;
+      return ex - ey || x.idweb.localeCompare(y.idweb);
+    });
+  }
+  return items;
 }
 
 // Avis « en cours » (même définition que getCurrent, sans filtre) comptés par
