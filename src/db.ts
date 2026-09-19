@@ -1,5 +1,6 @@
 import { SQL } from "bun";
 import { normalizeProgress, type RunProgress } from "./progress.ts";
+import { deadlineDay, grouperDoublons, type Publication } from "./doublons.ts";
 import type { ClassifiedItem } from "./pipeline.ts";
 import { KEYWORDS } from "./defaults.ts";
 import type { LlmStats } from "./llm.ts";
@@ -79,6 +80,10 @@ export async function migrate(): Promise<void> {
   // Sources secondaires (achatpublic.com) et familles de veille (src/familles.ts).
   await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'boamp'`;
   await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS famille text NOT NULL DEFAULT 'mobilité'`;
+  // Doublons : même appel d'offres publié sur plusieurs plateformes (src/doublons.ts).
+  // NULL = principal (affiché, compté, porte statut et commentaires) ; sinon idweb du principal.
+  await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS doublon_de text REFERENCES announcements(idweb) ON DELETE SET NULL`;
+  await sql`CREATE INDEX IF NOT EXISTS announcements_doublon_de ON announcements (doublon_de)`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
@@ -357,6 +362,9 @@ export type StoredAnnouncement = {
   famille?: string | null;
   first_seen_run_id: number | null;
   first_seen_at?: Date;
+  doublon_de?: string | null;
+  // Principal + doublons (getCurrent) : toutes les plateformes où l'appel est paru.
+  publications?: PublicationLien[];
   comment_count?: number;
   status_id?: number | null;
   status_label?: string | null;
@@ -367,6 +375,8 @@ export type StoredAnnouncement = {
   status_set_by_name?: string | null;
   status_set_by_email?: string | null;
 };
+
+export type PublicationLien = { idweb: string; source: string; url: string; published_at: string | null };
 
 export type StatusRow = {
   id: number;
@@ -480,12 +490,15 @@ export async function getCurrent(
   const q = filter?.q?.trim() ? `%${filter.q.trim().replace(/[%_\\]/g, "\\$&")}%` : null;
   const newSince = filter?.newSince ?? null;
   const defaultId = (await getDefaultStatus())?.id ?? null;
+  // Seuls les principaux sont listés ; `pubs` = principal + doublons (toutes les
+  // plateformes), pour l'affichage, le filtre source et la recherche.
   const rows = await db()`
     SELECT a.*,
       (SELECT count(*)::int FROM comments c WHERE c.idweb = a.idweb) AS comment_count,
       s.id AS status_id, s.label AS status_label, s.color AS status_color, s.is_rejet AS status_is_rejet,
       cur.created_at AS status_set_at, cur.user_id AS status_set_by_id,
-      su.name AS status_set_by_name, su.email AS status_set_by_email
+      su.name AS status_set_by_name, su.email AS status_set_by_email,
+      pubs.publications
     FROM announcements a
     LEFT JOIN LATERAL (
       SELECT e.status_id, e.created_at, e.user_id FROM status_events e
@@ -495,17 +508,29 @@ export async function getCurrent(
     ) cur ON true
     LEFT JOIN statuses s ON s.id = COALESCE(cur.status_id, ${defaultId})
     LEFT JOIN users su ON su.id = cur.user_id
+    JOIN LATERAL (
+      SELECT json_agg(json_build_object('idweb', p.idweb, 'source', p.source, 'url', p.url, 'published_at', p.published_at)
+                      ORDER BY (p.idweb = a.idweb) DESC, p.first_seen_at, p.idweb) AS publications,
+             bool_or(${source}::text IS NOT NULL AND p.source = ${source}) AS sur_source,
+             bool_or(${q}::text IS NOT NULL AND (p.objet ILIKE ${q} OR COALESCE(p.acheteur, '') ILIKE ${q})) AS cherche
+      FROM announcements p
+      WHERE p.idweb = a.idweb OR p.doublon_de = a.idweb
+    ) pubs ON true
     WHERE a.last_seen_run_id = ${runId}
+      AND a.doublon_de IS NULL
       AND a.category = ${category}
       AND (a.deadline IS NULL OR a.deadline >= now())
       AND (${statusId}::bigint IS NULL OR COALESCE(cur.status_id, ${defaultId}) = ${statusId})
       AND (${hideRejet} = false OR COALESCE(s.is_rejet, false) = false)
       AND (${famille}::text IS NULL OR a.famille = ${famille})
-      AND (${source}::text IS NULL OR a.source = ${source})
-      AND (${q}::text IS NULL OR a.objet ILIKE ${q} OR COALESCE(a.acheteur, '') ILIKE ${q})
+      AND (${source}::text IS NULL OR pubs.sur_source)
+      AND (${q}::text IS NULL OR pubs.cherche)
       AND (${newSince}::timestamptz IS NULL OR a.first_seen_at > ${newSince})
     ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
-  const items = rows as StoredAnnouncement[];
+  const items = (rows as Array<StoredAnnouncement & { publications: unknown }>).map((r) => ({
+    ...r,
+    publications: normalizePublications(r.publications),
+  })) as StoredAnnouncement[];
   const sort = filter?.sort ?? "echeance";
   if (sort === "recents" || sort === "nouveaute") {
     items.sort((x, y) => {
@@ -525,14 +550,94 @@ export async function getCurrent(
 // configuration.
 export type SourceCount = { source: string; category: string; count: number };
 
+function normalizePublications(v: unknown): PublicationLien[] {
+  const arr = typeof v === "string" ? (JSON.parse(v) as unknown) : v;
+  return Array.isArray(arr) ? (arr as PublicationLien[]) : [];
+}
+
+// Appels d'offres (principaux) en cours ayant une publication sur la source :
+// un appel BOAMP + Marchés Online compte pour chacune des deux, une fois.
 export async function countCurrentBySource(runId: number): Promise<SourceCount[]> {
   const rows = await db()`
-    SELECT source, category, count(*)::int AS count
-    FROM announcements
-    WHERE last_seen_run_id = ${runId}
-      AND (deadline IS NULL OR deadline >= now())
-    GROUP BY source, category`;
+    SELECT p.source, a.category, count(DISTINCT a.idweb)::int AS count
+    FROM announcements a
+    JOIN announcements p ON p.idweb = a.idweb OR p.doublon_de = a.idweb
+    WHERE a.last_seen_run_id = ${runId}
+      AND a.doublon_de IS NULL
+      AND (a.deadline IS NULL OR a.deadline >= now())
+    GROUP BY p.source, a.category`;
   return rows as SourceCount[];
+}
+
+// Publications (principal + doublons) d'une liste de principaux, en une requête
+// — pour l'email et la fiche, qui ne passent pas par getCurrent.
+export async function loadPublications(idwebs: string[]): Promise<Map<string, PublicationLien[]>> {
+  const out = new Map<string, PublicationLien[]>();
+  if (idwebs.length === 0) return out;
+  const rows = (await db()`
+    SELECT COALESCE(p.doublon_de, p.idweb) AS principal, p.idweb, p.source, p.url, p.published_at, p.first_seen_at
+    FROM announcements p
+    WHERE p.idweb IN (SELECT jsonb_array_elements_text(${JSON.stringify(idwebs)}::text::jsonb))
+       OR p.doublon_de IN (SELECT jsonb_array_elements_text(${JSON.stringify(idwebs)}::text::jsonb))
+    ORDER BY (p.doublon_de IS NULL) DESC, p.first_seen_at, p.idweb`) as Array<PublicationLien & { principal: string }>;
+  for (const r of rows) {
+    if (!out.has(r.principal)) out.set(r.principal, []);
+    out.get(r.principal)!.push({ idweb: r.idweb, source: r.source, url: r.url, published_at: r.published_at });
+  }
+  return out;
+}
+
+export async function attachPublications(items: StoredAnnouncement[]): Promise<StoredAnnouncement[]> {
+  const pubs = await loadPublications(items.map((a) => a.idweb));
+  return items.map((a) => ({ ...a, publications: pubs.get(a.idweb) ?? [{ idweb: a.idweb, source: a.source ?? "boamp", url: a.url, published_at: a.published_at }] }));
+}
+
+// Comptes par catégorie du run, en appels d'offres (principaux) — pour
+// runs.relevant_count & co, après regroupement des doublons.
+export async function countByCategory(runId: number): Promise<Record<string, number>> {
+  const rows = (await db()`
+    SELECT category, count(*)::int AS count FROM announcements
+    WHERE last_seen_run_id = ${runId} AND doublon_de IS NULL
+    GROUP BY category`) as Array<{ category: string; count: number }>;
+  return Object.fromEntries(rows.map((r) => [r.category, Number(r.count)]));
+}
+
+// Regroupe les doublons parmi les avis du run (src/doublons.ts) et écrit
+// announcements.doublon_de. Réexamine tout le run : un principal désigné
+// reste principal, les nouvelles publications se rattachent, les groupes qui
+// se défont (avis disparu) sont défaits.
+export async function regrouperDoublons(runId: number): Promise<{ groupes: number; doublons: number }> {
+  const sql = db();
+  const rows = (await sql`
+    SELECT a.idweb, a.objet, a.acheteur, a.department, a.deadline, a.deadline_text, a.source, a.first_seen_at, a.doublon_de,
+      (SELECT count(*)::int FROM comments c WHERE c.idweb = a.idweb)
+      + (SELECT count(*)::int FROM status_events e WHERE e.idweb = a.idweb) AS activite
+    FROM announcements a
+    WHERE a.last_seen_run_id = ${runId}`) as Array<{
+    idweb: string; objet: string; acheteur: string | null; department: string | null; deadline: Date | null;
+    deadline_text: string | null; source: string; first_seen_at: Date; doublon_de: string | null; activite: number;
+  }>;
+  const pubs: Publication[] = rows.map((r) => ({
+    idweb: r.idweb,
+    objet: r.objet,
+    acheteur: r.acheteur,
+    department: r.department,
+    deadlineDay: deadlineDay(r.deadline_text) ?? deadlineDay(r.deadline),
+    source: r.source,
+    firstSeenAt: new Date(r.first_seen_at),
+    doublonDe: r.doublon_de,
+    activite: Number(r.activite),
+  }));
+  const groupes = grouperDoublons(pubs);
+  const principalDe = new Map<string, string>();
+  for (const g of groupes) for (const d of g.doublons) principalDe.set(d, g.principal);
+  await sql.begin(async (tx) => {
+    for (const r of rows) {
+      const cible = principalDe.get(r.idweb) ?? null;
+      if ((r.doublon_de ?? null) !== cible) await tx`UPDATE announcements SET doublon_de = ${cible} WHERE idweb = ${r.idweb}`;
+    }
+  });
+  return { groupes: groupes.length, doublons: principalDe.size };
 }
 
 export async function getAnnouncement(idweb: string): Promise<StoredAnnouncement | null> {
@@ -652,6 +757,7 @@ export async function getNewSinceLastDigest(runId: number, category: string): Pr
     WHERE first_seen_run_id > (SELECT COALESCE(max(id), 0) FROM runs WHERE digest_sent)
       AND first_seen_run_id <= ${runId}
       AND category = ${category}
+      AND doublon_de IS NULL
     ORDER BY deadline ASC NULLS LAST, idweb`;
   return rows as StoredAnnouncement[];
 }
@@ -665,6 +771,7 @@ export async function getUpcomingDeadlines(runId: number, days: number): Promise
     SELECT * FROM announcements
     WHERE last_seen_run_id = ${runId}
       AND category = 'relevant'
+      AND doublon_de IS NULL
       AND deadline >= now()
       AND deadline < now() + make_interval(days => ${days})
     ORDER BY deadline ASC, idweb`;

@@ -141,6 +141,58 @@ if (!TEST_URL) {
     });
   });
 
+  describe("doublons : même appel d'offres sur plusieurs plateformes", () => {
+    test("regroupement, affichage unique, comptes, email, stabilité", async () => {
+      await control`TRUNCATE comments, status_events, announcements RESTART IDENTITY CASCADE`;
+      const run = await db.startRun();
+      const objet = "Réalisation de prestations d'acquisitions de données (comptages et enquêtes) et réalisation de prestations d'études de circulation et de stationnement";
+      await db.upsertAnnouncements(run, [
+        avis("26-A", { objet, acheteur: "GRAND ANNECY", department: "74", deadline: "14/10/2026 à 10h00", publishedAt: "10 septembre 2026" }),
+        avis("MO-A", { objet: objet + ".", acheteur: "Grand Annecy", department: "74", deadline: "14/10/2026", source: "marchesonline", publishedAt: "12/09/2026" }),
+        avis("MO-B", { objet: "Fourniture de vélos", acheteur: "Grand Annecy", department: "74", deadline: "14/10/2026", source: "marchesonline" }),
+      ]);
+      await control`UPDATE announcements SET first_seen_at = now() - interval '2 days' WHERE idweb = '26-A'`;
+      expect(await db.regrouperDoublons(run)).toEqual({ groupes: 1, doublons: 1 });
+      expect((await db.getAnnouncement("MO-A"))?.doublon_de).toBe("26-A");
+      expect((await db.getAnnouncement("26-A"))?.doublon_de).toBeNull();
+      expect((await db.getAnnouncement("MO-B"))?.doublon_de).toBeNull();
+
+      const current = await db.getCurrent("relevant", run);
+      expect(current.map((a) => a.idweb).sort()).toEqual(["26-A", "MO-B"]);
+      const grp = current.find((a) => a.idweb === "26-A")!;
+      expect(grp.publications?.map((p) => `${p.source}:${p.idweb}`)).toEqual(["boamp:26-A", "marchesonline:MO-A"]);
+      // Filtre source : le groupe est trouvé par l'une ou l'autre plateforme ; recherche dans un doublon.
+      expect((await db.getCurrent("relevant", run, { source: "marchesonline" })).map((a) => a.idweb).sort()).toEqual(["26-A", "MO-B"]);
+      expect((await db.getCurrent("relevant", run, { source: "boamp" })).map((a) => a.idweb)).toEqual(["26-A"]);
+      expect((await db.getCurrent("relevant", run, { q: "stationnement." })).map((a) => a.idweb)).toEqual(["26-A"]);
+      const counts = await db.countCurrentBySource(run);
+      expect(counts.find((c) => c.source === "boamp")?.count).toBe(1);
+      expect(counts.find((c) => c.source === "marchesonline")?.count).toBe(2);
+      expect(await db.countByCategory(run)).toEqual({ relevant: 2 });
+      expect((await db.getNewSinceLastDigest(run, "relevant")).map((a) => a.idweb).sort()).toEqual(["26-A", "MO-B"]);
+      expect((await db.getUpcomingDeadlines(run, 60)).map((a) => a.idweb).sort()).toEqual(["26-A", "MO-B"]);
+      const pubs = await db.loadPublications(["26-A", "MO-B"]);
+      expect(pubs.get("26-A")?.length).toBe(2);
+      expect(pubs.get("MO-B")?.length).toBe(1);
+
+      // Run suivant : le principal reste, un doublon disparu est détaché, un
+      // second run ne réinitialise pas doublon_de.
+      const run2 = await db.startRun();
+      await db.upsertAnnouncements(run2, [
+        avis("26-A", { objet, acheteur: "GRAND ANNECY", department: "74", deadline: "14/10/2026 à 10h00" }),
+        avis("MO-A", { objet: objet + ".", acheteur: "Grand Annecy", department: "74", deadline: "14/10/2026", source: "marchesonline" }),
+      ]);
+      expect((await db.getAnnouncement("MO-A"))?.doublon_de).toBe("26-A");
+      await db.regrouperDoublons(run2);
+      expect((await db.getAnnouncement("MO-A"))?.doublon_de).toBe("26-A");
+      const run3 = await db.startRun();
+      await db.upsertAnnouncements(run3, [avis("MO-A", { objet: objet + ".", acheteur: "Grand Annecy", department: "74", deadline: "14/10/2026", source: "marchesonline" })]);
+      await db.regrouperDoublons(run3);
+      expect((await db.getAnnouncement("MO-A"))?.doublon_de).toBeNull();
+      await control`TRUNCATE comments, status_events, announcements RESTART IDENTITY CASCADE`;
+    });
+  });
+
   describe("announcements : filtres du tableau de bord", () => {
     test("upsert, sources, familles, comptes par source", async () => {
       const run = await db.startRun();

@@ -90,7 +90,9 @@ function esc(s: string): string {
 // Provenance hors BOAMP et famille hors mobilité, pour situer l'avis d'un coup d'œil.
 function sourceTag(a: StoredAnnouncement): string {
   const parts: string[] = [];
-  if (a.source && a.source !== "boamp") parts.push(sourceLabel(a.source));
+  if (a.publications && a.publications.length > 1) {
+    parts.push(`publié sur ${a.publications.map((p) => sourceLabel(p.source)).join(", ")}`);
+  } else if (a.source && a.source !== "boamp") parts.push(sourceLabel(a.source));
   if (a.famille && a.famille !== "mobilité") parts.push(FAMILLE_LABELS[a.famille as Famille] ?? a.famille);
   return parts.length ? ` — <span style="color:#0e6b51;">${esc(parts.join(" · "))}</span>` : "";
 }

@@ -5,6 +5,9 @@ import {
   startRun,
   finishRun,
   upsertAnnouncements,
+  regrouperDoublons,
+  countByCategory,
+  attachPublications,
   getNewSinceLastDigest,
   getUpcomingDeadlines,
   markDigestSent,
@@ -143,19 +146,26 @@ async function main() {
 
     const all = [...relevant, ...travaux, ...excluded];
     await upsertAnnouncements(runId, all);
+    // Même appel d'offres sur plusieurs plateformes : une seule ligne comptée.
+    const dbl = await regrouperDoublons(runId);
+    console.error(`doublons: ${dbl.groupes} groupe(s), ${dbl.doublons} publication(s) rattachée(s)`);
+    const comptes = await countByCategory(runId);
+    const nRelevant = comptes.relevant ?? 0;
+    const nTravaux = comptes.travaux ?? 0;
+    const nExcluded = comptes.excluded ?? 0;
     // Le dernier compteur a pu être retenu par la limitation : état final exact.
     await updateRunProgress(runId, progress.snapshot()).catch((e) => console.error(`progress write failed: ${e}`));
     await finishRun(runId, {
       status: "success",
       totalFetched: all.length,
-      relevant: relevant.length,
-      travaux: travaux.length,
-      excluded: excluded.length,
+      relevant: nRelevant,
+      travaux: nTravaux,
+      excluded: nExcluded,
       llmStats: llm ?? null,
       warning: warning ?? null,
     });
     console.error(
-      `run #${runId} done — relevant: ${relevant.length}, travaux: ${travaux.length}, excluded: ${excluded.length}`,
+      `run #${runId} done — relevant: ${nRelevant}, travaux: ${nTravaux}, excluded: ${nExcluded} (appels d'offres ; ${all.length} publications)`,
     );
 
     await cleanupAuth();
@@ -196,13 +206,13 @@ async function main() {
     }
     progress.start("digest");
 
-    const newRelevant = await getNewSinceLastDigest(runId, "relevant");
-    const upcoming = await getUpcomingDeadlines(runId, digestWindow);
+    const newRelevant = await attachPublications(await getNewSinceLastDigest(runId, "relevant"));
+    const upcoming = await attachPublications(await getUpcomingDeadlines(runId, digestWindow));
     const data = {
       newRelevant,
       upcoming,
-      totalRelevant: relevant.length,
-      totalTravaux: travaux.length,
+      totalRelevant: nRelevant,
+      totalTravaux: nTravaux,
       dashboardUrl: Bun.env.DASHBOARD_URL ?? null,
       dateStr: frDate(new Date()),
       llm: (llm ?? null) as LlmStats | null,

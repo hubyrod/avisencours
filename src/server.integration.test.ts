@@ -26,9 +26,9 @@ if (!TEST_URL) {
     costUsd: 0.0012, byModel: { "mistralai/mistral-nemo": 7 }, breakerTripped: false,
   };
 
-  async function get(path: string): Promise<{ status: number; text: string }> {
+  async function get(path: string): Promise<{ status: number; text: string; location: string | null }> {
     const res = await fetch(`${BASE}${path}`, { headers: { cookie }, redirect: "manual" });
-    return { status: res.status, text: await res.text() };
+    return { status: res.status, text: await res.text(), location: res.headers.get("location") };
   }
   async function post(path: string, form: Record<string, string>): Promise<Response> {
     return fetch(`${BASE}${path}`, {
@@ -59,6 +59,10 @@ if (!TEST_URL) {
       INSERT INTO announcements (idweb, url, objet, acheteur, department, deadline, deadline_text, category, source, famille, first_seen_run_id, last_seen_run_id)
       VALUES ('B1', 'https://boamp/B1', 'Plan de mobilité BOAMP', 'Ville', '75', '2030-12-31', '31/12/2030', 'relevant', 'boamp', 'mobilité', ${runId}, ${runId}),
              ('CSL_1', 'https://achatpublic/CSL_1', 'Étude PAPI achatpublic', 'Syndicat', '30', '2030-12-31', '31/12/2030', 'relevant', 'achatpublic', 'inondations', ${runId}, ${runId})`;
+    // Le même appel d'offres que B1, paru sur Marchés Online : doublon rattaché à B1.
+    await control`
+      INSERT INTO announcements (idweb, url, objet, acheteur, department, deadline, deadline_text, category, source, famille, first_seen_run_id, last_seen_run_id, doublon_de, published_at)
+      VALUES ('MO-B1', 'https://marchesonline/MO-B1', 'Plan de mobilité BOAMP.', 'VILLE', '75', '2030-12-31', '31/12/2030', 'relevant', 'marchesonline', 'mobilité', ${runId}, ${runId}, 'B1', '12/09/2026')`;
 
     proc = Bun.spawn(["bun", "src/server.ts"], {
       env: {
@@ -125,14 +129,20 @@ if (!TEST_URL) {
     expect(home.status).toBe(200);
     expect(home.text).toContain("Plan de mobilité BOAMP");
     expect(home.text).toContain("Étude PAPI achatpublic");
-    expect(home.text).toContain('badge src boamp">BOAMP');
     expect(home.text).toContain('badge src">achatpublic.com');
     expect(home.text).toContain("Inondations — AMC");
     expect(home.text).toContain('value="achatpublic"');
-    // Clic principal = fiche interne (avec retour) ; l'annonce officielle en second, seul lien sortant.
+    // Clic principal = fiche interne (avec retour) ; les publications en second, seuls liens sortants.
     expect(home.text).toContain('class="objet" href="/avis/B1?retour=%2F"');
     expect(home.text).toContain('href="https://boamp/B1" target="_blank"');
     expect(home.text).not.toContain('href="https://boamp/B1">Plan');
+    // Doublon : une seule ligne, les deux plateformes en liens, badge « 2 publications ».
+    expect(home.text).not.toContain('href="/avis/MO-B1');
+    expect(home.text).toContain("Publié sur</span> <a class=\"lien-annonce\" href=\"https://boamp/B1\"");
+    expect(home.text).toContain('href="https://marchesonline/MO-B1" target="_blank" rel="noopener" title="Ouvrir la publication sur Marchés Online (Le Moniteur) (12/09/2026)">Marchés Online (Le Moniteur) ↗</a>');
+    expect(home.text).toContain('>2 publications</span>');
+    expect(home.text).toContain("Avis pertinents (2)");
+    expect((await get("/?source=marchesonline")).text).toContain("Plan de mobilité BOAMP");
     // Statut modifiable depuis la liste : option courante (statut par défaut) sélectionnée.
     expect(home.text).toContain('data-live="statut"');
     expect(home.text).toMatch(/<option value="\d+" data-color="#[0-9a-f]{6}" selected>à évaluer/);
@@ -323,5 +333,13 @@ if (!TEST_URL) {
     expect(page.text).toContain("achatpublic.com");
     expect(page.text).toContain("Inondations — AMC");
     expect((await get("/avis/INCONNU")).status).toBe(404);
+    // Doublon → fiche du principal, avec la liste des publications.
+    const dbl = await get("/avis/MO-B1?retour=%2F%3Fq%3Dplan");
+    expect(dbl.status).toBe(302);
+    expect(dbl.location).toBe("/avis/B1?retour=%2F%3Fq%3Dplan");
+    const principal = await get("/avis/B1");
+    expect(principal.text).toContain("Publié sur 2 plateformes");
+    expect(principal.text).toContain("Marchés Online (Le Moniteur) ↗");
+    expect(principal.text).toContain("fiche de référence");
   });
 }

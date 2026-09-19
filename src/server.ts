@@ -8,6 +8,8 @@ import {
   getLastSuccessfulRun,
   getRun,
   countCurrentBySource,
+  loadPublications,
+  type PublicationLien,
   markDashboardVisit,
   type CurrentSort,
   isRunLockHeld,
@@ -1378,6 +1380,11 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
   const a = await getAnnouncement(idweb);
   if (!a) return html(errorPage("Avis introuvable"), 404);
   const retour = safeRetour(retourParam);
+  // Doublon : la fiche (statut, commentaires) est celle du principal.
+  if (a.doublon_de) {
+    return redirect(`/avis/${encodeURIComponent(a.doublon_de)}?retour=${encodeURIComponent(retour)}`, 302);
+  }
+  const publications: PublicationLien[] = (await loadPublications([idweb])).get(idweb) ?? [];
 
   // Statut courant rendu côté serveur : correct même sans moteur Skip (flux 503).
   const [statuts, currentEvent, defaultStatus] = await Promise.all([
@@ -1404,7 +1411,7 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
     .join("");
 
   const facts: Array<[string, string | null]> = [
-    ["Source", sourceLabel(a.source)],
+    ["Source", publications.length > 1 ? null : sourceLabel(a.source)],
     ["Famille", a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null],
     ["Acheteur", a.acheteur],
     ["Département", a.department],
@@ -1432,7 +1439,24 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
           <a class="bouton-annonce" href="${esc(a.url)}" target="_blank" rel="noopener">Annonce officielle ↗</a>
         </div>
         <table class="facts">${factRows}</table>
-        <p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-weight:600;">Voir l'annonce officielle →</a></p>
+        ${
+          publications.length > 1
+            ? `<div style="margin-top:14px;">
+          <strong style="font-size:13px;">Publié sur ${publications.length} plateformes</strong>
+          <ul style="margin:4px 0 0;padding-left:18px;font-size:13.5px;">
+            ${publications
+              .map(
+                (p) =>
+                  `<li><a href="${esc(p.url)}" target="_blank" rel="noopener" style="font-weight:600;">${esc(sourceLabel(p.source))} ↗</a>${
+                    p.published_at ? ` <span style="color:var(--encre-2);">— publié le ${esc(p.published_at)}</span>` : ""
+                  }${p.idweb === a.idweb ? ' <span style="color:var(--encre-2);">(fiche de référence)</span>' : ""}</li>`,
+              )
+              .join("")}
+          </ul>
+          <p style="margin:6px 0 0;">Regroupement automatique : même acheteur, même date limite, intitulé identique ou très proche. Statut et commentaires sont communs.</p>
+        </div>`
+            : `<p style="margin-top:14px;"><a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-weight:600;">Voir l'annonce officielle →</a></p>`
+        }
       </div>
       ${
         statuts.length > 0
@@ -1556,11 +1580,30 @@ function jChip(deadline: Date | null): string {
 
 // Provenance (toujours) et famille hors mobilité : badges discrets sur la ligne.
 function sourceBadges(a: StoredAnnouncement): string {
-  let out = `<span class="badge src${a.source === "boamp" || !a.source ? " boamp" : ""}">${esc(sourceLabel(a.source))}</span>`;
+  const pubs = a.publications ?? [];
+  let out =
+    pubs.length > 1
+      ? `<span class="badge src" title="${esc(pubs.map((p) => sourceLabel(p.source)).join(" · "))}">${pubs.length} publications</span>`
+      : `<span class="badge src${a.source === "boamp" || !a.source ? " boamp" : ""}">${esc(sourceLabel(a.source))}</span>`;
   if (a.famille && a.famille !== "mobilité") {
     out += `<span class="badge fam">${esc(FAMILLE_LABELS[a.famille as Famille] ?? a.famille)}</span>`;
   }
   return out;
+}
+
+// Liens sortants d'un appel d'offres : une seule publication → « Annonce ↗ » ;
+// plusieurs plateformes → « BOAMP ↗ · Marchés Online ↗ », principal en premier.
+function liensPublications(a: StoredAnnouncement): string {
+  const pubs = a.publications?.length ? a.publications : [{ idweb: a.idweb, source: a.source ?? "boamp", url: a.url, published_at: a.published_at }];
+  if (pubs.length === 1) {
+    return `<a class="lien-annonce" href="${esc(pubs[0]!.url)}" target="_blank" rel="noopener" title="Ouvrir l'annonce officielle sur le site source">Annonce ↗</a>`;
+  }
+  return `<span title="Même appel d'offres publié sur plusieurs plateformes">Publié sur</span> ${pubs
+    .map(
+      (p) =>
+        `<a class="lien-annonce" href="${esc(p.url)}" target="_blank" rel="noopener" title="Ouvrir la publication sur ${esc(sourceLabel(p.source))}${p.published_at ? ` (${esc(p.published_at)})` : ""}">${esc(sourceLabel(p.source))} ↗</a>`,
+    )
+    .join(" · ")}`;
 }
 
 // Chemin de retour vers la liste avec ses filtres : uniquement un chemin
@@ -1623,7 +1666,7 @@ function announcementRow(a: StoredAnnouncement, ctx: RowContext): string {
         a.type_avis ? ` · ${esc(a.type_avis)}` : ""
       }${
         a.published_at ? ` · publié le ${esc(a.published_at)}` : ""
-      } · <a class="lien-annonce" href="${esc(a.url)}" target="_blank" rel="noopener" title="Ouvrir l'annonce officielle sur le site source">Annonce ↗</a> · <a class="comments-link" href="${fiche}#commentaires">${
+      } · ${liensPublications(a)} · <a class="comments-link" href="${fiche}#commentaires">${
         (a.comment_count ?? 0) > 0 ? `${a.comment_count} commentaire${(a.comment_count ?? 0) > 1 ? "s" : ""}` : "Commenter"
       }</a></div>
       ${a.reason ? `<div class="reason">${esc(a.reason)}</div>` : ""}
