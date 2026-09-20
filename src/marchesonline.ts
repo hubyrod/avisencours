@@ -102,7 +102,13 @@ export function parseFiche(html: string): MoFiche {
     .replace(/^.*?Descriptif\s*(?:Source\s*:\s*\S+\s*)?/, "")
     .trim();
   const cpv = text.match(/(?:Nomenclature principale \(cpv\)|Code CPV principal|CPV)\s*:?\s*(\d{8}(?:[^0-9]{0,80})?)/)?.[1]?.trim() ?? "";
-  return { descriptif: text.slice(0, 3000), cpv };
+  // 12 000 caractères couvrent un avis complet ; au-delà, coupe à la fin d'une phrase.
+  let descriptif = text;
+  if (descriptif.length > 12_000) {
+    const cut = descriptif.lastIndexOf(". ", 12_000);
+    descriptif = descriptif.slice(0, cut > 6_000 ? cut + 1 : 12_000);
+  }
+  return { descriptif, cpv };
 }
 
 export type MarchesOnlineClient = {

@@ -58,3 +58,34 @@ describe("structurerTexte (eForms aplati)", () => {
     expect(estEforms("Lot 1 : études. Nom officiel: x")).toBe(false);
   });
 });
+
+describe("structurerTexte (avis national BOAMP aplati)", () => {
+  const texte =
+    "Avis de marché Département(s) de publication : 30 Annonce n° 26-76236 Services Section 1 - Identification de l'acheteur Nom complet de l'acheteur : Sm Eptb Vistre Vistrenque Numéro national d'indentification : SIRET N° National d'identification : 20009089200015 Ville : RODILHAN Code postal : 30230 Groupement de commandes : Non Section 2 - Communication Lien direct aux documents de la consultation : https://www.marches-publics.info/mpiaws/index.cfm?fuseaction=dematent.login&type=Dce&Idm=1856298 Identifiant interne de la consultation : 2026-10 Section 3 - Procédure Type de procédure : Procédure adaptée ouverte Technique d'achat : Accord-cadre Date et heure limite de réception des plis : 21/09/2026 à 12:00 Section 4 - Identification du marché Intitulé du marché : Etude de la vulnérabilité des infrastructures primaires d'alimentation en eau potable (AEP) - Action 5.6 du PAPI 3 Vistre Code CPV principal - Descripteur principal : 71335000 Type de marché : Services Description succincte du marché : L'accord-cadre sera exécuté par émission de bons de commande. Cette étude s'inscrit au PAPI 3 Vistre.";
+  test("sections « Section N - », champs « Libellé : valeur », résumé = description succincte", () => {
+    const s = structurerTexte(texte)!;
+    expect(s).not.toBeNull();
+    expect(s.sections.map((x) => `${x.numero}|${x.titre}`)).toEqual([
+      "|Avis de marché",
+      "1|Identification de l'acheteur",
+      "2|Communication",
+      "3|Procédure",
+      "4|Identification du marché",
+    ]);
+    expect(s.sections[0]!.champs[0]).toEqual({ label: "Département(s) de publication", valeur: "30 Annonce n° 26-76236 Services" });
+    // « Type de Numéro national… » n'est pas reconnu comme libellé (mot capitalisé
+    // au milieu) : « Type de » reste dans la valeur précédente — imperfection assumée.
+    expect(s.sections[1]!.champs.map((c) => c.label)).toEqual([
+      "Nom complet de l'acheteur", "Numéro national d'indentification", "N° National d'identification", "Ville", "Code postal", "Groupement de commandes",
+    ]);
+    expect(s.sections[1]!.champs[0]!.valeur).toBe("Sm Eptb Vistre Vistrenque Type de");
+    expect(s.sections[1]!.champs[2]!.valeur).toBe("20009089200015");
+    expect(s.sections[3]!.champs).toEqual([
+      { label: "Type de procédure", valeur: "Procédure adaptée ouverte" },
+      { label: "Technique d'achat", valeur: "Accord-cadre" },
+      { label: "Date et heure limite de réception des plis", valeur: "21/09/2026 à 12:00" },
+    ]);
+    expect(s.sections[4]!.champs.map((c) => c.label)).toEqual(["Intitulé du marché", "Code CPV principal - Descripteur principal", "Type de marché", "Description succincte du marché"]);
+    expect(s.resume).toBe("L'accord-cadre sera exécuté par émission de bons de commande. Cette étude s'inscrit au PAPI 3 Vistre.");
+  });
+});

@@ -31,21 +31,27 @@ export function decouperRaw(raw: string | null | undefined, objet: string): { de
 export type SectionAvis = { numero: string; titre: string; champs: Array<{ label: string; valeur: string }> };
 export type TexteStructure = { resume: string | null; sections: SectionAvis[] };
 
-// Numérotation eForms (« 1. », « 2.1 », « 5.1.11 ») suivie d'un titre en
+// Deux numérotations : eForms (« 1. », « 2.1 », « 5.1.11 ») et l'avis national
+// BOAMP (« Section 1 - Identification de l'acheteur »), suivies d'un titre en
 // capitale, et pas juste après un « : » (« TVA: 0 Euro » n'est pas une section).
-const SECTION = /(?:^|(?<=[^:\s]\s))(\d{1,2}(?:\.\d{1,2}){0,3}\.?)\s+(?=[A-ZÉÈÀÎÔ])/g;
+// La numérotation eForms comporte toujours un point (« 1. », « 2.1 ») : « PAPI 3
+// Vistre » n'ouvre pas de section.
+const SECTION = /(?:^|(?<=[^:\s]\s))(?:Section\s+(\d{1,2})\s*[-–]\s+|(\d{1,2}(?:\.\d{1,2}){1,3}\.?|\d{1,2}\.)\s+)(?=[A-ZÉÈÀÎÔ])/g;
 // Libellé de champ eForms : première lettre en capitale, puis des mots en
 // minuscules, un sigle court, une parenthèse ou une élision — jamais un autre
 // mot capitalisé (« IRCEM agirc-arrco Forme juridique » n'est pas un libellé,
 // « Forme juridique de l'acheteur » l'est), jamais de virgule, 72 caractères max.
 const MIN = "a-zàâäéèêëîïôöùûüç";
 const MOT = `(?:[${MIN}'’/-]+|[A-ZÉ]{2,5}|\\([^)]*\\)|[ld]'[${MIN}]+)`;
-const LABEL = `[A-ZÉÈÀÎÔ][${MIN}'’/-]*(?:\\s+${MOT})*`;
-const CHAMP = new RegExp(`(?<=\\S)\\s+(?=${LABEL}:\\s)`, "g");
-const TITRE_SECTION = new RegExp(`^([A-ZÉÈÀÎÔ][^:]*?)(?=\\s+${LABEL}:\\s|$)`, "s");
+const LABEL = `(?:N°(?:\\s+[A-ZÉÈÀÎÔ][${MIN}'’/-]*)?|[A-ZÉÈÀÎÔ][${MIN}'’/-]*(?:\\([^)]*\\))?)(?:\\s+${MOT})*`;
+// « Libellé: valeur » (eForms) ou « Libellé : valeur » (typographie française).
+const CHAMP = new RegExp(`(?<=\\S)\\s+(?=${LABEL}\\s?:\\s)`, "g");
+const TITRE_SECTION = new RegExp(`^([A-ZÉÈÀÎÔ][^:]*?)(?=\\s+${LABEL}\\s?:\\s|$)`, "s");
 
 export function estEforms(texte: string): boolean {
-  return /(?:^|\s)\d\.\s+[A-ZÉ]/.test(texte) && /\b(Nom officiel|Type de procédure|Nature principale du marché)\s*:/.test(texte);
+  const eforms = /(?:^|\s)\d\.\s+[A-ZÉ]/.test(texte) && /\b(Nom officiel|Type de procédure|Nature principale du marché)\s*:/.test(texte);
+  const national = /\bSection\s+1\s*[-–]\s*Identification/.test(texte);
+  return eforms || national;
 }
 
 function decouperChamps(corps: string): Array<{ label: string; valeur: string }> {
@@ -53,7 +59,7 @@ function decouperChamps(corps: string): Array<{ label: string; valeur: string }>
   for (const morceau of corps.split(CHAMP)) {
     const t = morceau.trim();
     if (!t) continue;
-    const m = t.match(/^([^:,]{1,110}):\s*(.*)$/s);
+    const m = t.match(/^([^:,]{1,110}?)\s?:\s*(.*)$/s);
     if (m) champs.push({ label: m[1]!.trim(), valeur: m[2]!.trim() });
     else if (champs.length) champs[champs.length - 1]!.valeur += ` ${t}`;
     else champs.push({ label: "", valeur: t });
@@ -64,11 +70,18 @@ function decouperChamps(corps: string): Array<{ label: string; valeur: string }>
 export function structurerTexte(texte: string): TexteStructure | null {
   if (!estEforms(texte)) return null;
   const parts = texte.split(SECTION);
-  // split avec groupe capturant : [avant, numero, reste, numero, reste, …]
+  // split avec deux groupes capturants : [avant, section, numero, reste, section, numero, reste, …]
   const sections: SectionAvis[] = [];
-  for (let i = 1; i < parts.length; i += 2) {
-    const numero = parts[i]!.replace(/\.$/, "");
-    const reste = (parts[i + 1] ?? "").trim();
+  // En-tête avant la première section (avis national : « Avis de marché
+  // Département(s) de publication : 30 Annonce n° … ») : une section sans numéro.
+  const avant = (parts[0] ?? "").trim();
+  if (avant) {
+    const m = avant.match(TITRE_SECTION);
+    sections.push({ numero: "", titre: m ? m[1]!.trim() : "", champs: decouperChamps(m ? avant.slice(m[0].length) : avant) });
+  }
+  for (let i = 1; i < parts.length; i += 3) {
+    const numero = (parts[i] ?? parts[i + 1] ?? "").replace(/\.$/, "");
+    const reste = (parts[i + 2] ?? "").trim();
     const m = reste.match(TITRE_SECTION);
     let titre = m ? m[1]!.trim() : reste.split(/\s+/).slice(0, 4).join(" ");
     let corps = m ? reste.slice(m[0].length) : "";
@@ -80,6 +93,10 @@ export function structurerTexte(texte: string): TexteStructure | null {
     sections.push({ numero, titre, champs: decouperChamps(corps) });
   }
   if (sections.length === 0) return null;
-  const description = sections.flatMap((s) => s.champs).find((c) => /^description$/i.test(c.label));
+  const champs = sections.flatMap((s) => s.champs);
+  const description =
+    champs.find((c) => /^description succincte/i.test(c.label)) ??
+    champs.find((c) => /^description$/i.test(c.label)) ??
+    champs.find((c) => /^objet du marché/i.test(c.label));
   return { resume: description?.valeur ?? null, sections };
 }

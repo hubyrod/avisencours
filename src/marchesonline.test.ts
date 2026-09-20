@@ -129,6 +129,13 @@ describe("Marchés Online parseFiche", () => {
     expect(f.descriptif).toBe("France: Services d'ingénierie Étude de circulation Avis de marché 2.1.1 Objet Nature principale du marché: Services Nomenclature principale (cpv): 71311200 Services de conseil en systèmes de transport 2.1.2 Lieu");
     expect(f.cpv).toBe("71311200 Services de conseil en systèmes de transport");
   });
+  test("descriptif long coupé à la fin d'une phrase", () => {
+    const phrase = "Une phrase de test qui fait un peu de longueur. ";
+    const long = `<div id="print_area">Descriptif ${phrase.repeat(400)}</div>`;
+    const { descriptif } = parseFiche(long);
+    expect(descriptif.length).toBeLessThanOrEqual(12_000);
+    expect(descriptif.endsWith(".")).toBe(true);
+  });
   test("fiche sans zone imprimable", () => {
     expect(parseFiche("<p>rien</p>")).toEqual({ descriptif: "", cpv: "" });
   });
