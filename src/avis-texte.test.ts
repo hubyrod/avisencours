@@ -73,12 +73,10 @@ describe("structurerTexte (avis national BOAMP aplati)", () => {
       "4|Identification du marché",
     ]);
     expect(s.sections[0]!.champs[0]).toEqual({ label: "Département(s) de publication", valeur: "30 Annonce n° 26-76236 Services" });
-    // « Type de Numéro national… » n'est pas reconnu comme libellé (mot capitalisé
-    // au milieu) : « Type de » reste dans la valeur précédente — imperfection assumée.
     expect(s.sections[1]!.champs.map((c) => c.label)).toEqual([
       "Nom complet de l'acheteur", "Numéro national d'indentification", "N° National d'identification", "Ville", "Code postal", "Groupement de commandes",
     ]);
-    expect(s.sections[1]!.champs[0]!.valeur).toBe("Sm Eptb Vistre Vistrenque Type de");
+    expect(s.sections[1]!.champs[0]!.valeur).toBe("Sm Eptb Vistre Vistrenque");
     expect(s.sections[1]!.champs[2]!.valeur).toBe("20009089200015");
     expect(s.sections[3]!.champs).toEqual([
       { label: "Type de procédure", valeur: "Procédure adaptée ouverte" },

@@ -42,10 +42,13 @@ const SECTION = /(?:^|(?<=[^:\s]\s))(?:Section\s+(\d{1,2})\s*[-–]\s+|(\d{1,2}(
 // mot capitalisé (« IRCEM agirc-arrco Forme juridique » n'est pas un libellé,
 // « Forme juridique de l'acheteur » l'est), jamais de virgule, 72 caractères max.
 const MIN = "a-zàâäéèêëîïôöùûüç";
-const MOT = `(?:[${MIN}'’/-]+|[A-ZÉ]{2,5}|\\([^)]*\\)|[ld]'[${MIN}]+)`;
+// Un mot capitalisé n'est admis qu'après un tiret (« Code CPV principal - Descripteur principal »).
+const MOT = `(?:[${MIN}'’/-]+|[A-ZÉ]{2,5}|\\([^)]*\\)|[ld]'[${MIN}]+|-\\s+[A-ZÉÈÀÎÔ][${MIN}'’/-]*)`;
 const LABEL = `(?:N°(?:\\s+[A-ZÉÈÀÎÔ][${MIN}'’/-]*)?|[A-ZÉÈÀÎÔ][${MIN}'’/-]*(?:\\([^)]*\\))?)(?:\\s+${MOT})*`;
 // « Libellé: valeur » (eForms) ou « Libellé : valeur » (typographie française).
-const CHAMP = new RegExp(`(?<=\\S)\\s+(?=${LABEL}\\s?:\\s)`, "g");
+// Jamais de coupe juste après « N° » ni après un tiret isolé : « N° National
+// d'identification » et « Code CPV principal - Descripteur principal » sont un seul libellé.
+const CHAMP = new RegExp(`(?<=[^\\s°-])\\s+(?=${LABEL}\\s?:\\s)`, "g");
 const TITRE_SECTION = new RegExp(`^([A-ZÉÈÀÎÔ][^:]*?)(?=\\s+${LABEL}\\s?:\\s|$)`, "s");
 
 export function estEforms(texte: string): boolean {
