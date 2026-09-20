@@ -13,6 +13,7 @@ import { matchKeywords, type FamilleSearch } from "./familles.ts";
 import { moisCode } from "./mois.ts";
 import type { Announcement, Source } from "./scraper.ts";
 import { errMessage } from "./http.ts";
+import { reusable, toAnnouncement as knownAnnouncement, type KnownLookup } from "./known.ts";
 
 export type MpeSite = {
   source: Source;
@@ -175,6 +176,8 @@ export type ScrapeMpeOptions = {
   log?: (msg: string) => void;
   // Avancement : pages de liste lues / pages annoncées.
   onPage?: (done: number, total: number | null) => void;
+  // Avis déjà connus : fiche non relue si la ligne est inchangée (src/known.ts).
+  known?: KnownLookup;
 };
 
 export type MpeItem = Announcement & { matchedQueries: string[] };
@@ -229,7 +232,14 @@ export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
   log(`  ${site.name}: ${count} consultations sur ${page} page(s)${total !== null ? ` (annoncées : ${total})` : ""}, ${matched.size} retenue(s)`);
 
   const out: MpeItem[] = [];
+  let reprises = 0;
   for (const { row, famille, keywords } of matched.values()) {
+    const known = opts.known?.(`${site.prefix}${row.id}`);
+    if (known && reusable(known, { url: ficheUrl(site, row), objet: row.intitule || row.objet, deadline: row.deadline })) {
+      out.push({ ...knownAnnouncement(known), source: site.source, famille, matchedQueries: keywords });
+      reprises++;
+      continue;
+    }
     let fiche: MxFiche = { typeAnnonce: "", cpv: "", objet: "" };
     try {
       fiche = parseFiche(await session.request(ficheUrl(site, row)));
@@ -238,6 +248,7 @@ export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
     }
     out.push({ ...toAnnouncement(row, fiche, famille, site), matchedQueries: keywords });
   }
+  log(`  ${site.name}: ${matched.size - reprises} fiche(s) lue(s), ${reprises} reprise(s) inchangée(s)`);
   return out;
 }
 

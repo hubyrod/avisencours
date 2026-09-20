@@ -4,6 +4,11 @@ import { deadlineDay, grouperDoublons, type Publication } from "./doublons.ts";
 import type { ClassifiedItem } from "./pipeline.ts";
 import { KEYWORDS } from "./defaults.ts";
 import type { LlmStats } from "./llm.ts";
+import type { LlmMemoEntry } from "./classify-llm.ts";
+import type { Category } from "./classify.ts";
+import type { Source } from "./scraper.ts";
+import type { Famille } from "./familles.ts";
+import type { KnownAnnouncement, KnownLookup } from "./known.ts";
 
 let client: SQL | null = null;
 
@@ -84,6 +89,14 @@ export async function migrate(): Promise<void> {
   // NULL = principal (affiché, compté, porte statut et commentaires) ; sinon idweb du principal.
   await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS doublon_de text REFERENCES announcements(idweb) ON DELETE SET NULL`;
   await sql`CREATE INDEX IF NOT EXISTS announcements_doublon_de ON announcements (doublon_de)`;
+  // Verdict LLM mémorisé (src/classify-llm.ts, llmKey) : réutilisé au run
+  // suivant tant que le texte, la chaîne de modèles et le prompt n'ont pas changé.
+  await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS llm_key text`;
+  // Toutes les requêtes « en cours » filtrent sur le dernier run (tableau de
+  // bord, comptes, doublons) et l'email sur le premier run vu : la table garde
+  // tout l'historique, sans index chaque page balayait tout.
+  await sql`CREATE INDEX IF NOT EXISTS announcements_last_seen_run ON announcements (last_seen_run_id, category)`;
+  await sql`CREATE INDEX IF NOT EXISTS announcements_first_seen_run ON announcements (first_seen_run_id)`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
@@ -306,23 +319,41 @@ export function parseDeadlineText(s: string | null): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// Lignes insérées par lots (une instruction multi-lignes par tranche) : ~3 700
+// avis par run, un aller-retour par ligne coûtait 10–20 s sous le verrou.
+const UPSERT_CHUNK = 500;
+
 export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]): Promise<void> {
   const sql = db();
+  // Un idweb répété dans la même instruction ferait échouer ON CONFLICT
+  // (« cannot affect row a second time ») : la dernière occurrence gagne.
+  const byId = new Map<string, ClassifiedItem>();
+  for (const it of items) if (it.idweb) byId.set(it.idweb, it);
+  const rows = [...byId.values()].map((it) => ({
+    idweb: it.idweb,
+    url: it.url,
+    objet: it.objet,
+    acheteur: it.acheteur,
+    department: it.department,
+    type_avis: it.typeAvis,
+    procedure: it.procedure,
+    published_at: it.publishedAt,
+    deadline: parseDeadlineText(it.deadline),
+    deadline_text: it.deadline,
+    category: it.category,
+    reason: it.reason ?? null,
+    classifier: it.classifier ?? null,
+    llm_key: it.llmKey ?? null,
+    raw: it.raw,
+    source: it.source,
+    famille: it.famille,
+    first_seen_run_id: runId,
+    last_seen_run_id: runId,
+  }));
   await sql.begin(async (tx) => {
-    for (const it of items) {
-      if (!it.idweb) continue;
+    for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
       await tx`
-        INSERT INTO announcements (
-          idweb, url, objet, acheteur, department, type_avis, procedure,
-          published_at, deadline, deadline_text, category, reason, classifier, raw,
-          source, famille, first_seen_run_id, last_seen_run_id
-        ) VALUES (
-          ${it.idweb}, ${it.url}, ${it.objet}, ${it.acheteur}, ${it.department},
-          ${it.typeAvis}, ${it.procedure}, ${it.publishedAt},
-          ${parseDeadlineText(it.deadline)}, ${it.deadline},
-          ${it.category}, ${it.reason ?? null}, ${it.classifier ?? null}, ${it.raw},
-          ${it.source}, ${it.famille}, ${runId}, ${runId}
-        )
+        INSERT INTO announcements ${tx(rows.slice(i, i + UPSERT_CHUNK))}
         ON CONFLICT (idweb) DO UPDATE SET
           url = EXCLUDED.url,
           objet = EXCLUDED.objet,
@@ -336,12 +367,60 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
           category = EXCLUDED.category,
           reason = EXCLUDED.reason,
           classifier = EXCLUDED.classifier,
+          llm_key = EXCLUDED.llm_key,
           raw = EXCLUDED.raw,
           source = EXCLUDED.source,
           famille = EXCLUDED.famille,
           last_seen_run_id = EXCLUDED.last_seen_run_id`;
     }
   });
+}
+
+// Verdicts LLM mémorisés (src/classify-llm.ts) : un par avis, celui du
+// dernier run qui l'a soumis à un modèle. Les verdicts regex / règle / erreur
+// ne sont pas des réponses de modèle et ne sont jamais repris.
+export async function loadLlmMemo(): Promise<Map<string, LlmMemoEntry>> {
+  const rows = (await db()`
+    SELECT idweb, llm_key, category, reason, classifier FROM announcements
+    WHERE llm_key IS NOT NULL AND classifier IS NOT NULL AND classifier NOT IN ('regex', 'regle', 'erreur')`) as Array<{
+    idweb: string; llm_key: string; category: Category; reason: string | null; classifier: string;
+  }>;
+  return new Map(rows.map((r) => [r.idweb, { llmKey: r.llm_key, category: r.category, reason: r.reason, classifier: r.classifier }]));
+}
+
+// Avis des sources secondaires tels que mémorisés (src/known.ts) : les
+// scrapers ne relisent pas la fiche d'une consultation inchangée. Date de
+// dernière vue = début du dernier run qui l'a listée.
+export async function loadKnownAnnouncements(): Promise<KnownLookup> {
+  const rows = (await db()`
+    SELECT a.idweb, a.url, a.published_at, a.deadline_text, a.objet, a.department, a.acheteur, a.type_avis, a.procedure,
+      a.raw, a.source, a.famille, r.started_at AS last_seen_at
+    FROM announcements a
+    LEFT JOIN runs r ON r.id = a.last_seen_run_id
+    WHERE a.source <> 'boamp'`) as Array<{
+    idweb: string; url: string; published_at: string | null; deadline_text: string | null; objet: string; department: string | null;
+    acheteur: string | null; type_avis: string | null; procedure: string | null; raw: string | null; source: Source; famille: Famille;
+    last_seen_at: Date | null;
+  }>;
+  const map = new Map<string, KnownAnnouncement>();
+  for (const r of rows) {
+    map.set(r.idweb, {
+      idweb: r.idweb,
+      url: r.url,
+      publishedAt: r.published_at ?? "",
+      deadline: r.deadline_text,
+      objet: r.objet,
+      department: r.department ?? "",
+      acheteur: r.acheteur ?? "",
+      typeAvis: r.type_avis ?? "",
+      procedure: r.procedure ?? "",
+      raw: r.raw ?? "",
+      source: r.source,
+      famille: r.famille,
+      lastSeenAt: r.last_seen_at ? new Date(r.last_seen_at) : null,
+    });
+  }
+  return (idweb) => map.get(idweb);
 }
 
 export type StoredAnnouncement = {
@@ -632,12 +711,17 @@ export async function regrouperDoublons(runId: number): Promise<{ groupes: numbe
   const groupes = grouperDoublons(pubs);
   const principalDe = new Map<string, string>();
   for (const g of groupes) for (const d of g.doublons) principalDe.set(d, g.principal);
-  await sql.begin(async (tx) => {
-    for (const r of rows) {
-      const cible = principalDe.get(r.idweb) ?? null;
-      if ((r.doublon_de ?? null) !== cible) await tx`UPDATE announcements SET doublon_de = ${cible} WHERE idweb = ${r.idweb}`;
-    }
-  });
+  // Seules les lignes dont le rattachement change sont écrites, en une instruction.
+  const changes = rows
+    .map((r) => ({ idweb: r.idweb, avant: r.doublon_de ?? null, cible: principalDe.get(r.idweb) ?? null }))
+    .filter((c) => c.avant !== c.cible)
+    .map(({ idweb, cible }) => ({ idweb, cible }));
+  if (changes.length > 0) {
+    await sql`
+      UPDATE announcements a SET doublon_de = v.cible
+      FROM jsonb_to_recordset(${JSON.stringify(changes)}::text::jsonb) AS v(idweb text, cible text)
+      WHERE a.idweb = v.idweb`;
+  }
   return { groupes: groupes.length, doublons: principalDe.size };
 }
 

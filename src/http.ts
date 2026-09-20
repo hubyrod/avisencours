@@ -1,7 +1,8 @@
-// POST avec nouvelles tentatives, partagé par llm.ts (OpenRouter) et email.ts
-// (MailPace). Réessaie les statuts listés ET les erreurs réseau / délai
-// dépassé (AbortSignal.timeout rejette avec un TimeoutError, pas un statut).
-// Un signal externe (coupe-circuit) abandonne immédiatement, sans réessai.
+// Requête HTTP avec nouvelles tentatives, partagée par llm.ts (OpenRouter),
+// email.ts (MailPace) et scraper.ts (API BOAMP). Réessaie les statuts listés
+// ET les erreurs réseau / délai dépassé (AbortSignal.timeout rejette avec un
+// TimeoutError, pas un statut). Un signal externe (coupe-circuit) abandonne
+// immédiatement, sans réessai.
 
 export const DEFAULT_RETRYABLE: ReadonlySet<number> = new Set([408, 429, 500, 502, 503, 504]);
 
@@ -41,15 +42,17 @@ function combineSignals(timeoutMs: number, external?: AbortSignal): AbortSignal 
   return external ? AbortSignal.any([timeout, external]) : timeout;
 }
 
+export type RetryResult = { res: Response; text: string; retries: number };
+
 // Le corps est lu ici, dans la boucle : le délai (AbortSignal.timeout) couvre
 // aussi le flux de réponse, et une coupure pendant sa lecture est réessayée
-// comme une erreur réseau.
-export async function postWithRetry(
+// comme une erreur réseau. La méthode vient de `init` (GET par défaut).
+export async function fetchWithRetry(
   label: string,
   url: string,
   init: RequestInit,
   opts: RetryOptions = {},
-): Promise<{ res: Response; text: string; retries: number }> {
+): Promise<RetryResult> {
   const retryable = opts.retryable ?? DEFAULT_RETRYABLE;
   const maxAttempts = opts.attempts ?? 4;
   const timeoutMs = opts.timeoutMs ?? 30_000;
@@ -61,7 +64,7 @@ export async function postWithRetry(
     let res: Response;
     let text: string;
     try {
-      res = await fetchImpl(url, { ...init, method: "POST", signal: combineSignals(timeoutMs, opts.signal) });
+      res = await fetchImpl(url, { ...init, signal: combineSignals(timeoutMs, opts.signal) });
       text = await res.text();
     } catch (err) {
       if (opts.signal?.aborted) throw abortError(opts.signal);
@@ -80,6 +83,10 @@ export async function postWithRetry(
     }
     throw new HttpError(label, res.status, text);
   }
+}
+
+export function postWithRetry(label: string, url: string, init: RequestInit, opts: RetryOptions = {}): Promise<RetryResult> {
+  return fetchWithRetry(label, url, { ...init, method: "POST" }, opts);
 }
 
 function abortError(signal: AbortSignal): Error {

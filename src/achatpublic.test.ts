@@ -235,3 +235,53 @@ describe("classifyFamille", () => {
     expect(classifyFamille("inondations", { ...base, objet: "Travaux de protection contre les inondations (PAPI)", raw: "", famille: "inondations" })?.category).toBe("travaux");
   });
 });
+
+// --- scrapeAchatPublic : fiches reprises quand la consultation est déjà connue --
+
+import { scrapeAchatPublic } from "./achatpublic.ts";
+import type { KnownAnnouncement } from "./known.ts";
+
+const FICHE_HTML = `<html><body>Description : Étude de plan de mobilité simplifié pour la métropole. Code CPV recherché : 71311200 Date d'ouverture de la salle : 27 juillet 2026 16:23 (heure de Paris)</body></html>`;
+// Une seule page de résultats (le fixture annonce « Page 2 / 4 » : on le neutralise).
+const LISTE = CARD.replace("Page 2 / 4", "Page 1 / 1");
+const RECHERCHE = [{ famille: "mobilité" as const, marche: "services" as const, keywords: ["mobilité"] }];
+
+function fakeSite() {
+  const fiches: string[] = [];
+  return {
+    fiches,
+    client: {
+      sleep: async () => {},
+      fetch: async (url: string, init: RequestInit) => {
+        if (init.method === "GET") fiches.push(url);
+        return new Response(init.method === "GET" ? FICHE_HTML : LISTE);
+      },
+    },
+  };
+}
+
+describe("scrapeAchatPublic + consultations connues", () => {
+  test("sans mémoire : fiche lue pour la consultation retenue", async () => {
+    const site = fakeSite();
+    const out = await scrapeAchatPublic({ searches: RECHERCHE, client: site.client });
+    expect(out.map((a) => a.idweb)).toEqual(["CSL_2026_Oqt4Bl1MGt"]);
+    expect(out[0]!.raw).toContain("pour la métropole");
+    expect(site.fiches).toHaveLength(1);
+  });
+  test("consultation connue, même intitulé et date limite : reprise sans requête", async () => {
+    const site = fakeSite();
+    const card = parseCards(CARD)[1]!;
+    const known: KnownAnnouncement = { ...toAnnouncement(card, { description: "Hier.", cpv: "", ouverture: "" }, "mobilité"), lastSeenAt: new Date() };
+    const out = await scrapeAchatPublic({ searches: RECHERCHE, client: site.client, known: (id) => (id === card.pcslid ? known : undefined) });
+    expect(out[0]!.raw).toContain("Hier.");
+    expect(site.fiches).toHaveLength(0);
+  });
+  test("date limite modifiée : fiche relue", async () => {
+    const site = fakeSite();
+    const card = parseCards(CARD)[1]!;
+    const known: KnownAnnouncement = { ...toAnnouncement({ ...card, deadline: "01/10/2026 à 12h00" }, { description: "Hier.", cpv: "", ouverture: "" }, "mobilité"), lastSeenAt: new Date() };
+    const out = await scrapeAchatPublic({ searches: RECHERCHE, client: site.client, known: () => known });
+    expect(out[0]!.raw).toContain("pour la métropole");
+    expect(site.fiches).toHaveLength(1);
+  });
+});

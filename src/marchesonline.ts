@@ -12,6 +12,7 @@ import { matchKeywords, type FamilleSearch } from "./familles.ts";
 import { classify } from "./classify.ts";
 import type { Announcement } from "./scraper.ts";
 import { errMessage } from "./http.ts";
+import { reusable, toAnnouncement as knownAnnouncement, type KnownLookup } from "./known.ts";
 
 export const MARCHESONLINE_BASE = "https://www.marchesonline.com";
 const USER_AGENT = "avis-en-cours (veille marchés publics)";
@@ -169,6 +170,9 @@ export type ScrapeMarchesOnlineOptions = {
   // Avancement : mots-clés parcourus / mots-clés (le nombre de pages n'est
   // connu qu'au fil de l'eau).
   onPage?: (done: number, total: number | null) => void;
+  // Avis déjà connus : fiche non relue si la carte est inchangée — le lien
+  // porte le numéro de version de l'avis (src/known.ts).
+  known?: KnownLookup;
 };
 
 export type MarchesOnlineItem = Announcement & { matchedQueries: string[] };
@@ -222,7 +226,14 @@ export async function scrapeMarchesOnline(opts: ScrapeMarchesOnlineOptions): Pro
   // final redonnera le même verdict sur ce texte réduit.
   const out: MarchesOnlineItem[] = [];
   let fiches = 0;
+  let reprises = 0;
   for (const { card, famille, keywords } of matched.values()) {
+    const known = opts.known?.(`MO-${card.id}`);
+    if (known && reusable(known, { url: `${MARCHESONLINE_BASE}${card.path}`, objet: card.objet, deadline: card.deadline })) {
+      out.push({ ...knownAnnouncement(known), source: "marchesonline", famille, matchedQueries: keywords });
+      reprises++;
+      continue;
+    }
     let fiche: MoFiche = { descriptif: "", cpv: "" };
     const titleOnly = toAnnouncement(card, fiche, famille);
     if (famille !== "mobilité" || classify(titleOnly).category !== "excluded") {
@@ -235,7 +246,7 @@ export async function scrapeMarchesOnline(opts: ScrapeMarchesOnlineOptions): Pro
     }
     out.push({ ...toAnnouncement(card, fiche, famille), matchedQueries: keywords });
   }
-  log(`  Marchés Online: ${fiches} fiche(s) lue(s)`);
+  log(`  Marchés Online: ${fiches} fiche(s) lue(s), ${reprises} reprise(s) inchangée(s)`);
   return out;
 }
 

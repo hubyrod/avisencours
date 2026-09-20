@@ -1,13 +1,33 @@
 import { runPipeline } from "./pipeline.ts";
 import { renderMarkdown } from "./report.ts";
 import { llmStatsSummary } from "./llm.ts";
+import { knownIndex, type KnownLookup } from "./known.ts";
+import type { Announcement } from "./scraper.ts";
+
+const CACHE_PATH = ".cache/scrape.json";
+
+// Le cache du run précédent sert d'« avis connus » : les sources secondaires
+// ne relisent pas les fiches inchangées (date de référence = celle du fichier).
+async function knownFromCache(): Promise<KnownLookup | undefined> {
+  const f = Bun.file(CACHE_PATH);
+  if (!(await f.exists())) return undefined;
+  try {
+    const items = (await f.json()) as Announcement[];
+    return knownIndex(items.filter((it) => it.source && it.source !== "boamp"), new Date(f.lastModified));
+  } catch {
+    return undefined;
+  }
+}
 
 async function main() {
+  const useCache = Bun.env.USE_CACHE === "1";
   const { relevant, travaux, excluded, llm, warning } = await runPipeline({
     query: Bun.argv.slice(2).join(" ").trim() || undefined,
     maxPages: Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : undefined,
-    useCache: Bun.env.USE_CACHE === "1",
+    useCache,
+    cachePath: CACHE_PATH,
     classifier: Bun.env.CLASSIFIER,
+    known: useCache ? undefined : await knownFromCache(),
   });
 
   const now = new Date();

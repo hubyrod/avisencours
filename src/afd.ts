@@ -12,6 +12,7 @@
 import type { Announcement } from "./scraper.ts";
 import { errMessage } from "./http.ts";
 import { moisCode } from "./mois.ts";
+import { reusable, toAnnouncement as knownAnnouncement, type KnownLookup } from "./known.ts";
 
 export const AFD_BASE = "https://afd.dgmarket.com";
 const LIST_URL = `${AFD_BASE}/tenders/brandedNoticeList.do`;
@@ -194,6 +195,9 @@ export type ScrapeAfdOptions = {
   log?: (msg: string) => void;
   // Avancement : pages de liste lues (le total n'est pas annoncé).
   onPage?: (done: number, total: number | null) => void;
+  // Avis déjà connus : fiche non relue si la ligne de liste est inchangée
+  // (même URL, date limite de la liste = jour de celle mémorisée).
+  known?: KnownLookup;
 };
 
 export async function scrapeAfd(opts: ScrapeAfdOptions = {}): Promise<Announcement[]> {
@@ -228,7 +232,15 @@ export async function scrapeAfd(opts: ScrapeAfdOptions = {}): Promise<Announceme
   log(`  AFD transports: ${rows.length} avis en cours${total !== null ? ` (annoncés : ${total})` : ""}`);
 
   const out: Announcement[] = [];
+  let reprises = 0;
   for (const row of rows) {
+    const known = opts.known?.(`AFD-${row.id}`);
+    const rowDay = parseAfdDate(row.deadline)?.slice(0, 10);
+    if (known && reusable(known, { url: `${AFD_BASE}/tender/${row.id}` }) && (!rowDay || (known.deadline ?? "").startsWith(rowDay))) {
+      out.push({ ...knownAnnouncement(known), source: "afd", famille: "mobilité" });
+      reprises++;
+      continue;
+    }
     let notice: AfdNotice | null = null;
     try {
       notice = parseNotice(await session.request(`${AFD_BASE}/tender/${row.id}`));
@@ -237,6 +249,7 @@ export async function scrapeAfd(opts: ScrapeAfdOptions = {}): Promise<Announceme
     }
     out.push(toAnnouncement(row, notice));
   }
+  if (reprises) log(`  AFD transports: ${rows.length - reprises} avis lu(s), ${reprises} reprise(s) inchangée(s)`);
   return out;
 }
 

@@ -11,6 +11,7 @@
 import { classifyLLM, type LlmContext } from "./classify-llm.ts";
 import { Breaker, defaultModelChain, formatUsd, llmConfigured, newLlmStats } from "./llm.ts";
 import { errMessage } from "./http.ts";
+import { mapConcurrent } from "./concurrent.ts";
 import type { Announcement } from "./scraper.ts";
 import type { Category } from "./classify.ts";
 
@@ -77,21 +78,6 @@ async function exportCandidates(): Promise<void> {
   );
   await Bun.write(CANDIDATES_PATH, lines.join("\n") + "\n");
   console.error(`${lines.length} candidats écrits dans ${CANDIDATES_PATH} — remplir "expected" puis copier dans ${CASES_PATH}`);
-}
-
-async function mapConcurrent<T, R>(items: T[], fn: (t: T) => Promise<R>, n: number): Promise<R[]> {
-  // oxlint-disable-next-line no-new-array -- slots filled by index
-  const out = new Array<R>(items.length);
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(n, items.length) }, async () => {
-      while (next < items.length) {
-        const i = next++;
-        out[i] = await fn(items[i]!);
-      }
-    }),
-  );
-  return out;
 }
 
 type Outcome = { c: EvalCase; predicted: Category | null; reason?: string; ms: number; error?: string };

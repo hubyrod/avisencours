@@ -239,4 +239,57 @@ if (!TEST_URL) {
       expect((await db.getCurrent("relevant", run2)).map((a) => a.idweb)).toEqual(["B1"]);
     });
   });
+  describe("mémoire du run précédent", () => {
+    test("llm_key stockée, verdicts LLM relus, jamais les verdicts regex / règle / erreur", async () => {
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [
+        avis("M1", { classifier: "mistralai/mistral-nemo", llmKey: "k1", reason: "plan" }),
+        avis("M2", { classifier: "regex", llmKey: undefined }),
+        avis("M3", { classifier: "regle", llmKey: "k3" }),
+        avis("M4", { classifier: "erreur", llmKey: "k4" }),
+        avis("M5", { classifier: "mistralai/mistral-nemo", llmKey: "k5", category: "excluded", reason: null as unknown as undefined }),
+      ]);
+      const memo = await db.loadLlmMemo();
+      expect(memo.get("M1")).toEqual({ llmKey: "k1", category: "relevant", reason: "plan", classifier: "mistralai/mistral-nemo" });
+      expect(memo.get("M5")).toEqual({ llmKey: "k5", category: "excluded", reason: null, classifier: "mistralai/mistral-nemo" });
+      expect(memo.has("M2")).toBe(false);
+      expect(memo.has("M3")).toBe(false);
+      expect(memo.has("M4")).toBe(false);
+      // Un run suivant qui classe par regex efface la clé (pas de verdict LLM à reprendre).
+      const run2 = await db.startRun();
+      await db.upsertAnnouncements(run2, [avis("M1", { classifier: "regex" })]);
+      expect((await db.loadLlmMemo()).has("M1")).toBe(false);
+    });
+
+    test("avis connus des sources secondaires, datés du dernier run qui les a vus", async () => {
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [
+        avis("K-BOAMP"),
+        avis("MO-K1", { source: "marchesonline", raw: "texte complet", deadline: "09/10/2026" }),
+        avis("AMPA-K2", { source: "ampa", publishedAt: "" }),
+      ]);
+      const known = await db.loadKnownAnnouncements();
+      expect(known("K-BOAMP")).toBeUndefined();
+      const k1 = known("MO-K1")!;
+      expect(k1).toMatchObject({ idweb: "MO-K1", source: "marchesonline", famille: "mobilité", raw: "texte complet", deadline: "09/10/2026", objet: "Objet MO-K1" });
+      expect(k1.lastSeenAt).toBeInstanceOf(Date);
+      expect(Math.abs(k1.lastSeenAt!.getTime() - Date.now())).toBeLessThan(60_000);
+      expect(known("AMPA-K2")?.publishedAt).toBe("");
+    });
+
+    test("un lot de plus d'une tranche et un idweb répété passent en un upsert", async () => {
+      const run = await db.startRun();
+      const many = Array.from({ length: 1203 }, (_, i) => avis(`LOT-${i}`));
+      await db.upsertAnnouncements(run, [...many, avis("LOT-0", { objet: "dernier gagne" })]);
+      expect((await db.countByCategory(run)).relevant).toBe(1203);
+      expect((await db.getAnnouncement("LOT-0"))?.objet).toBe("dernier gagne");
+    });
+
+    test("index sur last_seen_run_id et first_seen_run_id", async () => {
+      const idx = (await control`SELECT indexname FROM pg_indexes WHERE tablename = 'announcements'`) as Array<{ indexname: string }>;
+      const names = idx.map((i) => i.indexname);
+      expect(names).toContain("announcements_last_seen_run");
+      expect(names).toContain("announcements_first_seen_run");
+    });
+  });
 }

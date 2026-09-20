@@ -12,8 +12,8 @@ import {
   type ChatDeps,
   type Msg,
 } from "./llm.ts";
-import { HttpError, postWithRetry } from "./http.ts";
-import { classifyLLM, parseClassification, type LlmContext } from "./classify-llm.ts";
+import { HttpError, fetchWithRetry, postWithRetry } from "./http.ts";
+import { classifyLLM, llmKey, parseClassification, PROMPT_HASH, type LlmContext } from "./classify-llm.ts";
 import type { Announcement } from "./scraper.ts";
 
 // --- fake fetch -----------------------------------------------------------------
@@ -326,6 +326,20 @@ describe("postWithRetry", () => {
     expect((err as HttpError).status).toBe(403);
     expect((err as HttpError).body).toBe("forbidden");
   });
+
+  test("fetchWithRetry : GET par défaut, 429 puis 200 réessayé ; postWithRetry force POST", async () => {
+    const methods: string[] = [];
+    let n = 0;
+    const fetchImpl = async (_u: string, init: RequestInit) => {
+      methods.push(init.method ?? "GET");
+      return ++n === 1 ? status(429, "slow down") : new Response("ok");
+    };
+    const r = await fetchWithRetry("X", "http://x", {}, { fetchImpl, sleep: async () => {} });
+    expect(r.text).toBe("ok");
+    expect(r.retries).toBe(1);
+    await postWithRetry("X", "http://x", {}, { fetchImpl, sleep: async () => {} });
+    expect(methods).toEqual(["GET", "GET", "POST"]);
+  });
 });
 
 // --- stats + coupe-circuit ---------------------------------------------------------
@@ -403,10 +417,42 @@ describe("classifyLLM", () => {
     const { deps } = fakeFetch([completion('{"category":"relevant","reason":"plan"}', { model: "b/two" })]);
     ctx.deps = deps;
     const r = await classifyLLM(avis, ctx);
-    expect(r).toEqual({ category: "relevant", reason: "plan", classifier: "b/two" });
+    expect(r).toEqual({ category: "relevant", reason: "plan", classifier: "b/two", llmKey: llmKey(avis, CHAIN) });
     expect(ctx.stats.calls).toBe(1);
     expect(ctx.stats.fallbacks).toBe(1);
     expect(ctx.stats.errors).toBe(0);
+  });
+
+  test("verdict mémorisé (même clé) : repris sans appel, compté", async () => {
+    const { deps, calls } = fakeFetch([]);
+    ctx.deps = deps;
+    ctx.memo = new Map([[avis.idweb, { llmKey: llmKey(avis, CHAIN), category: "travaux", reason: "hier", classifier: "a/one" }]]);
+    const r = await classifyLLM(avis, ctx);
+    expect(r).toEqual({ category: "travaux", reason: "hier", classifier: "a/one", llmKey: llmKey(avis, CHAIN) });
+    expect(calls.length).toBe(0);
+    expect(ctx.stats.calls).toBe(0);
+    expect(ctx.stats.memoHits).toBe(1);
+  });
+
+  test("verdict mémorisé sous une autre clé (texte, chaîne ou prompt changé) : nouvel appel", async () => {
+    const { deps, calls } = fakeFetch([completion('{"category":"relevant","reason":"plan"}')]);
+    ctx.deps = deps;
+    ctx.memo = new Map([[avis.idweb, { llmKey: llmKey({ ...avis, raw: "autre texte" }, CHAIN), category: "excluded", reason: null, classifier: "a/one" }]]);
+    const r = await classifyLLM(avis, ctx);
+    expect(r.category).toBe("relevant");
+    expect(calls.length).toBe(1);
+    expect(ctx.stats.memoHits ?? 0).toBe(0);
+  });
+
+  test("llmKey : dépend du texte soumis, de la chaîne et du prompt", () => {
+    const k = llmKey(avis, CHAIN);
+    expect(k).toMatch(/^[0-9a-f]{64}$/);
+    expect(llmKey(avis, CHAIN)).toBe(k);
+    expect(llmKey({ ...avis, objet: "Autre" }, CHAIN)).not.toBe(k);
+    expect(llmKey(avis, ["a/one"])).not.toBe(k);
+    // Au-delà des 1 200 premiers caractères du contexte, le texte n'est pas soumis : même clé.
+    expect(llmKey({ ...avis, raw: avis.raw.padEnd(1300, ".") + "x" }, CHAIN)).toBe(llmKey({ ...avis, raw: avis.raw.padEnd(1300, ".") + "y" }, CHAIN));
+    expect(PROMPT_HASH).toMatch(/^[0-9a-f]{16}$/);
   });
 
   test("catégorie invalide -> rotation vers le modèle suivant", async () => {

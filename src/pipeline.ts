@@ -9,11 +9,13 @@ import type { ProgressTracker } from "./progress.ts";
 import type { Source } from "./scraper.ts";
 import { classifyFamille } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
-import { classifyLLM, type LlmContext } from "./classify-llm.ts";
+import { classifyLLM, type LlmContext, type LlmMemoEntry } from "./classify-llm.ts";
 import { classifyHybrid } from "./classify-hybrid.ts";
 import { applyScopeRules, type ScopeRules } from "./rules.ts";
 import { Breaker, defaultModelChain, llmConfigured, llmStatsSummary, newLlmStats, type LlmStats } from "./llm.ts";
 import { errMessage } from "./http.ts";
+import { mapConcurrent } from "./concurrent.ts";
+import type { KnownLookup } from "./known.ts";
 
 const EXCLUDE_TYPE_AVIS = [/attribution/i, /résultat/i, /annulation/i];
 
@@ -26,6 +28,8 @@ export type ClassifiedItem = Announcement & {
   category: Category;
   reason?: string;
   classifier?: string;
+  // Verdict LLM : clé de mémorisation, écrite en base (announcements.llm_key).
+  llmKey?: string;
 };
 
 export type ClassifierMode = "regex" | "llm" | "hybrid";
@@ -51,6 +55,11 @@ export type PipelineOptions = {
   // Suivi d'avancement (jalons par source + classement), alimenté si fourni.
   // Les identifiants d'étape sont ceux des sources (src/sources.ts) et « classify ».
   progress?: ProgressTracker;
+  // Avis déjà connus (src/known.ts) : les sources secondaires ne relisent pas
+  // la fiche d'une consultation inchangée.
+  known?: KnownLookup;
+  // Verdicts LLM des runs précédents par idweb (src/classify-llm.ts, memoized).
+  llmMemo?: ReadonlyMap<string, LlmMemoEntry>;
 };
 
 export type PipelineResult = {
@@ -78,13 +87,13 @@ async function scrapeBoamp(
   const params = buildDefaultParams(query);
   if (codeDepartement?.length) params.codeDepartement = codeDepartement;
 
-  log(`query: ${query.length > 120 ? query.slice(0, 120) + "…" : query}`);
+  log(`BOAMP query: ${query.length > 120 ? query.slice(0, 120) + "…" : query}`);
 
   const items = await scrapeAll(params, {
     maxPages,
     pageSize: 100,
     onPage: (n, batch, totalPages) => {
-      log(`  page ${n}: ${batch.length} items`);
+      log(`  BOAMP page ${n}/${totalPages}: ${batch.length} items`);
       progress?.advance("boamp", n, totalPages);
     },
   });
@@ -101,42 +110,41 @@ async function scrapeBoamp(
   return arr;
 }
 
-// Sources secondaires (achatpublic.com, AFD/dgMarket) : non bloquantes — une
-// panne d'un site (ou un changement de sa page) ne doit pas faire échouer la
-// veille BOAMP ; elle remonte en avertissement (email d'alerte, page
-// configuration) et ses avis ne sont simplement pas revus ce jour-là.
+// Sources secondaires (achatpublic.com, AFD/dgMarket, MPE, Marchés Online) :
+// non bloquantes — une panne d'un site (ou un changement de sa page) ne doit
+// pas faire échouer la veille BOAMP ; elle remonte en avertissement (email
+// d'alerte, page configuration) et ses avis ne sont simplement pas revus ce
+// jour-là. Chaque source est lue sur son propre site : elles tournent toutes
+// en parallèle (avec BOAMP), la durée de lecture est celle de la plus lente.
 type OnPage = (done: number, total: number | null) => void;
 type SecondarySource = { id: Source; name: string; run: (onPage: OnPage) => Promise<Announcement[]> };
 
-async function scrapeSecondary(
-  sources: SecondarySource[],
+async function scrapeOne(
+  src: SecondarySource,
   codeDepartement: string[] | undefined,
   log: (msg: string) => void,
   progress?: ProgressTracker,
-): Promise<{ items: CachedItem[]; warnings: string[] }> {
+): Promise<{ items: CachedItem[]; warning?: string }> {
   const items: CachedItem[] = [];
-  const warnings: string[] = [];
-  for (const src of sources) {
-    log(`${src.name}: lecture des avis en cours…`);
-    progress?.start(src.id);
-    try {
-      const found = (await src.run((done, total) => progress?.advance(src.id, done, total))).filter(keep);
-      progress?.finish(src.id, `${found.length} avis retenu${found.length > 1 ? "s" : ""}`);
-      for (const it of found) {
-        // Filtre départements : ne s'applique qu'aux avis dont on connaît le code
-        // (une consultation « France entière » ou un pays étranger passe).
-        const codes = it.department.split(",").map((c) => c.trim()).filter((c) => /^(\d{2,3}|2A|2B)$/.test(c));
-        if (codeDepartement?.length && codes.length > 0 && !codes.some((c) => codeDepartement.includes(c))) continue;
-        items.push({ ...it, matchedQueries: (it as Partial<CachedItem>).matchedQueries ?? [] });
-      }
-    } catch (err) {
-      const warning = `${src.name} indisponible — ${errMessage(err)} — ses avis ne sont pas mis à jour ce run`;
-      log(warning);
-      warnings.push(warning);
-      progress?.fail(src.id, `indisponible : ${errMessage(err).slice(0, 120)}`);
+  log(`${src.name}: lecture des avis en cours…`);
+  progress?.start(src.id);
+  try {
+    const found = (await src.run((done, total) => progress?.advance(src.id, done, total))).filter(keep);
+    progress?.finish(src.id, `${found.length} avis retenu${found.length > 1 ? "s" : ""}`);
+    for (const it of found) {
+      // Filtre départements : ne s'applique qu'aux avis dont on connaît le code
+      // (une consultation « France entière » ou un pays étranger passe).
+      const codes = it.department.split(",").map((c) => c.trim()).filter((c) => /^(\d{2,3}|2A|2B)$/.test(c));
+      if (codeDepartement?.length && codes.length > 0 && !codes.some((c) => codeDepartement.includes(c))) continue;
+      items.push({ ...it, matchedQueries: (it as Partial<CachedItem>).matchedQueries ?? [] });
     }
+    return { items };
+  } catch (err) {
+    const warning = `${src.name} indisponible — ${errMessage(err)} — ses avis ne sont pas mis à jour ce run`;
+    log(warning);
+    progress?.fail(src.id, `indisponible : ${errMessage(err).slice(0, 120)}`);
+    return { items, warning };
   }
-  return { items, warnings };
 }
 
 async function loadAll(
@@ -169,21 +177,22 @@ async function loadAll(
   // source (src/sources.ts — même registre que la page de configuration).
   // Déterminée avant BOAMP pour que les sources désactivées apparaissent
   // « sautées » dès le début de la progression.
+  const known = opts.known;
   const sources: SecondarySource[] = [];
   if (opts.achatPublic ?? isSourceEnabled("achatpublic")) {
     sources.push({
       id: "achatpublic",
       name: sourceLabel("achatpublic"),
-      run: (onPage) => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log, onPage }),
+      run: (onPage) => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log, onPage, known }),
     });
   }
-  if (opts.afd ?? isSourceEnabled("afd")) sources.push({ id: "afd", name: sourceLabel("afd"), run: (onPage) => scrapeAfd({ log, onPage }) });
+  if (opts.afd ?? isSourceEnabled("afd")) sources.push({ id: "afd", name: sourceLabel("afd"), run: (onPage) => scrapeAfd({ log, onPage, known }) });
   for (const site of MPE_SITES) {
     if (opts.mpe ?? isSourceEnabled(site.source)) {
       sources.push({
         id: site.source,
         name: sourceLabel(site.source),
-        run: (onPage) => scrapeMpe({ site, searches: MPE_SEARCHES, log, onPage }),
+        run: (onPage) => scrapeMpe({ site, searches: MPE_SEARCHES, log, onPage, known }),
       });
     }
   }
@@ -191,41 +200,24 @@ async function loadAll(
     sources.push({
       id: "marchesonline",
       name: sourceLabel("marchesonline"),
-      run: (onPage) => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log, onPage }),
+      run: (onPage) => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log, onPage, known }),
     });
   }
   for (const s of SOURCES) {
     if (s.id !== "boamp" && !sources.some((x) => x.id === s.id)) progress?.skip(s.id, "désactivée");
   }
-  const boamp = await scrapeBoamp(query, maxPages, opts.codeDepartement, log, progress);
-  const secondary = await scrapeSecondary(sources, opts.codeDepartement, log, progress);
+  // Toutes les sources en même temps ; BOAMP reste bloquant (son échec fait
+  // échouer le run), les autres se replient en avertissement dans scrapeOne.
+  const [boamp, ...secondary] = await Promise.all([
+    scrapeBoamp(query, maxPages, opts.codeDepartement, log, progress),
+    ...sources.map((src) => scrapeOne(src, opts.codeDepartement, log, progress)),
+  ]);
   const ids = new Set(boamp.map((it) => it.idweb));
-  const items = [...boamp, ...secondary.items.filter((it) => !ids.has(it.idweb))];
+  const items = [...boamp, ...secondary.flatMap((s) => s.items).filter((it) => !ids.has(it.idweb))];
   await Bun.write(cachePath, JSON.stringify(items, null, 2));
   log(`cached ${items.length} unique avis (${boamp.length} BOAMP, ${items.length - boamp.length} sources secondaires) -> ${cachePath}`);
-  return { items, warning: secondary.warnings.join(" ; ") || undefined };
-}
-
-async function mapConcurrent<T, R>(
-  items: T[],
-  fn: (t: T) => Promise<R>,
-  concurrency: number,
-): Promise<R[]> {
-  // oxlint-disable-next-line no-new-array -- length-init; slots are filled by index below
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, items.length) },
-    async () => {
-      while (true) {
-        const i = next++;
-        if (i >= items.length) return;
-        results[i] = await fn(items[i]!);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
+  const warnings = secondary.map((s) => s.warning).filter((w): w is string => Boolean(w));
+  return { items, warning: warnings.join(" ; ") || undefined };
 }
 
 function resolveMode(
@@ -266,8 +258,9 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
           models: opts.llmModels?.length ? opts.llmModels : defaultModelChain(),
           stats: newLlmStats(),
           breaker: new Breaker(),
+          memo: opts.llmMemo,
         };
-  if (ctx) log(`modèles: ${ctx.models.join(" → ")}`);
+  if (ctx) log(`modèles: ${ctx.models.join(" → ")}${ctx.memo ? ` — ${ctx.memo.size} verdict(s) mémorisé(s)` : ""}`);
 
   const baseClassify = !ctx
     ? async (it: Announcement): Promise<Classification> => classify(it)
@@ -336,6 +329,7 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
       category: cls.category,
       reason: cls.reason,
       classifier: cls.classifier,
+      llmKey: cls.llmKey,
     };
     if (cls.category === "relevant") relevant.push(enriched);
     else if (cls.category === "travaux") travaux.push(enriched);

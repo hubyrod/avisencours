@@ -18,6 +18,8 @@ import {
   getLastRun,
   heartbeatStale,
   terminateRunLockHolders,
+  loadLlmMemo,
+  loadKnownAnnouncements,
 } from "./db.ts";
 import {
   buildQueryFromKeywords,
@@ -132,6 +134,16 @@ async function main() {
     const digestWindow =
       windowSetting && validateDigestWindow(windowSetting).ok ? Number(windowSetting) : 14;
 
+    // Ce que la veille sait déjà : fiches des sources secondaires (non relues
+    // si inchangées) et verdicts LLM (repris si le texte, la chaîne et le
+    // prompt sont les mêmes ; LLM_MEMO=0 force une reclassification complète).
+    const [known, llmMemo] = await Promise.all([
+      loadKnownAnnouncements(),
+      Bun.env.LLM_MEMO === "0" ? Promise.resolve(undefined) : loadLlmMemo(),
+    ]);
+    if (llmMemo) console.error(`${llmMemo.size} verdict(s) LLM mémorisé(s)`);
+    else console.error("LLM_MEMO=0 — aucun verdict repris");
+
     const { relevant, travaux, excluded, llm, warning } = await runPipeline({
       maxPages: Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : undefined,
       // Table vide = repli sur la liste par défaut (defaults.ts).
@@ -142,6 +154,8 @@ async function main() {
       scopeRules,
       codeDepartement: dep.ok ? dep.codes : [],
       progress,
+      known,
+      llmMemo,
     });
 
     const all = [...relevant, ...travaux, ...excluded];

@@ -141,16 +141,16 @@ export function formatDuration(ms: number): string {
   return `${h} h ${String(m % 60).padStart(2, "0")}`;
 }
 
-// Une ligne pour le bandeau du tableau de bord :
-// « BOAMP, achatpublic.com terminés · Maximilien 8 / 22 pages · démarrée il y a 12 min »
+// Une ligne pour le bandeau du tableau de bord (les sources sont lues en
+// parallèle : plusieurs étapes peuvent être en cours) :
+// « BOAMP terminé · Maximilien 8 / 22 pages · Marchés Online 3 / 47 mots-clés · démarrée il y a 12 min »
 export function summarizeProgress(p: RunProgress, startedAt: Date, now: Date = new Date()): string {
   const parts: string[] = [];
   const done = p.steps.filter((s) => s.status === "done").map((s) => s.label);
   const failed = p.steps.filter((s) => s.status === "failed").map((s) => s.label);
   if (done.length) parts.push(`${done.join(", ")} terminé${done.length > 1 ? "s" : ""}`);
   if (failed.length) parts.push(`${failed.join(", ")} en échec`);
-  const running = p.steps.find((s) => s.status === "running");
-  if (running) {
+  for (const running of p.steps.filter((s) => s.status === "running")) {
     const counter = formatCounter(running);
     parts.push(counter ? `${running.label} ${counter}` : `${running.label} en cours`);
   }

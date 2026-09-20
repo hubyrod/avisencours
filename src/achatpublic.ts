@@ -14,6 +14,7 @@ import { departementCodes } from "./departements.ts";
 import type { Announcement } from "./scraper.ts";
 import { errMessage } from "./http.ts";
 import { moisCode } from "./mois.ts";
+import { reusable, toAnnouncement as knownAnnouncement, type KnownLookup } from "./known.ts";
 
 export const ACHATPUBLIC_BASE = "https://www.achatpublic.com";
 const SEARCH_URL = `${ACHATPUBLIC_BASE}/sdm/ent2/gen/rechercheCsl.action`;
@@ -214,9 +215,15 @@ export type ScrapeAchatPublicOptions = {
   log?: (msg: string) => void;
   // Avancement : pages de liste lues / pages annoncées (toutes natures cumulées).
   onPage?: (done: number, total: number | null) => void;
+  // Avis déjà connus : fiche non relue si la carte est inchangée (src/known.ts).
+  known?: KnownLookup;
 };
 
 export type AchatPublicItem = Announcement & { matchedQueries: string[] };
+
+function ficheUrl(pcslid: string): string {
+  return `${FICHE_URL}${pcslid}&ongletActif=2`;
+}
 
 // Liste toutes les consultations ouvertes d'une nature de marché (une passe de
 // pagination), puis les répartit dans les familles de cette nature.
@@ -267,15 +274,23 @@ export async function scrapeAchatPublic(opts: ScrapeAchatPublicOptions): Promise
     }
     log(`  achatpublic ${marche}: ${total} consultations sur ${page} page(s), ${matched.size} retenue(s)`);
 
+    let reprises = 0;
     for (const { card, famille, keywords } of matched.values()) {
+      const known = opts.known?.(card.pcslid);
+      if (known && reusable(known, { url: ficheUrl(card.pcslid), objet: card.objet, deadline: card.deadline })) {
+        out.push({ ...knownAnnouncement(known), source: "achatpublic", famille, matchedQueries: keywords });
+        reprises++;
+        continue;
+      }
       let fiche: Fiche = { description: "", cpv: "", ouverture: "" };
       try {
-        fiche = parseFiche(await session.get(`${FICHE_URL}${card.pcslid}&ongletActif=2`));
+        fiche = parseFiche(await session.get(ficheUrl(card.pcslid)));
       } catch (err) {
         log(`  fiche ${card.pcslid} illisible : ${errMessage(err)}`);
       }
       out.push({ ...toAnnouncement(card, fiche, famille), matchedQueries: keywords });
     }
+    log(`  achatpublic ${marche}: ${matched.size - reprises} fiche(s) lue(s), ${reprises} reprise(s) inchangée(s)`);
   }
   return out;
 }
@@ -302,7 +317,7 @@ export function toAnnouncement(card: Card, fiche: Fiche, famille: FamilleSearch[
     .join(" — ");
   return {
     idweb: card.pcslid,
-    url: `${FICHE_URL}${card.pcslid}&ongletActif=2`,
+    url: ficheUrl(card.pcslid),
     publishedAt: fiche.ouverture,
     deadline: card.deadline,
     objet: card.objet,

@@ -258,6 +258,9 @@ export type LlmStats = {
   retries: number;
   // Réponses données par un autre modèle que la tête de chaîne.
   fallbacks: number;
+  // Avis classés par un verdict mémorisé d'un run précédent (aucun appel).
+  // Optionnel : absent des runs enregistrés avant l'introduction du memo.
+  memoHits?: number;
   promptTokens: number;
   completionTokens: number;
   costUsd: number;
@@ -272,6 +275,7 @@ export function newLlmStats(): LlmStats {
     errors: 0,
     retries: 0,
     fallbacks: 0,
+    memoHits: 0,
     promptTokens: 0,
     completionTokens: 0,
     costUsd: 0,
@@ -342,7 +346,7 @@ export function formatUsd(n: number): string {
   return `${n.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: max })} $`;
 }
 
-// « 37 appels, 0,004 $ (mistral-nemo ×35, mistral-small-3.2 ×2) »
+// « 37 appels, 0,004 $ (mistral-nemo ×35, mistral-small-3.2 ×2) — 1 900 verdicts repris »
 export function llmStatsSummary(s: LlmStats): string {
   const models = Object.entries(s.byModel)
     .sort((a, b) => b[1] - a[1])
@@ -351,6 +355,7 @@ export function llmStatsSummary(s: LlmStats): string {
   const parts = [`${s.calls} appel${s.calls > 1 ? "s" : ""}`, formatUsd(s.costUsd)];
   if (models) parts.push(`(${models})`);
   const extra: string[] = [];
+  if (s.memoHits) extra.push(`${s.memoHits.toLocaleString("fr-FR").replace(/[  ]/g, " ")} verdict${s.memoHits > 1 ? "s" : ""} repris`);
   if (s.errors) extra.push(`${s.errors} erreur${s.errors > 1 ? "s" : ""}`);
   if (s.retries) extra.push(`${s.retries} réessai${s.retries > 1 ? "s" : ""}`);
   if (s.fallbacks) extra.push(`${s.fallbacks} repli${s.fallbacks > 1 ? "s" : ""}`);

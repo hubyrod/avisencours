@@ -157,3 +157,57 @@ describe("Marchés Online toAnnouncement", () => {
     expect(a.raw).toContain("Lieu: 93 - SNCF");
   });
 });
+
+// --- scrapeMarchesOnline : fiches reprises quand l'avis est déjà connu ----------
+
+import { scrapeMarchesOnline } from "./marchesonline.ts";
+import type { KnownAnnouncement } from "./known.ts";
+
+const FICHE = `<html><div id="print_area">Descriptif Plan de mobilité employeur du site. Nomenclature principale (cpv) : 71311200 Services</div><footer/></html>`;
+const SEARCH = [{ famille: "mobilité" as const, marche: "services" as const, keywords: ["mobilité"] }];
+
+function fakeSite() {
+  const urls: string[] = [];
+  return {
+    urls,
+    client: {
+      sleep: async () => {},
+      fetch: async (url: string) => {
+        urls.push(url);
+        return new Response(url.includes("/appels-offres/avis/") ? FICHE : PAGE);
+      },
+    },
+  };
+}
+
+describe("scrapeMarchesOnline + avis connus", () => {
+  test("sans mémoire : la fiche de l'avis retenu est lue", async () => {
+    const site = fakeSite();
+    const out = await scrapeMarchesOnline({ searches: SEARCH, client: site.client, maxPagesPerKeyword: 1 });
+    expect(out.map((a) => a.idweb)).toEqual(["MO-4325932"]);
+    expect(out[0]!.raw).toContain("Plan de mobilité employeur du site.");
+    expect(site.urls.filter((u) => u.includes("/appels-offres/avis/"))).toHaveLength(1);
+  });
+  test("avis connu et inchangé (même version) : fiche reprise, aucune requête", async () => {
+    const site = fakeSite();
+    const known: KnownAnnouncement = {
+      ...toAnnouncement(parseCards(PAGE)[1]!, { descriptif: "Descriptif d'hier.", cpv: "71311200" }, "mobilité"),
+      lastSeenAt: new Date(),
+    };
+    const out = await scrapeMarchesOnline({ searches: SEARCH, client: site.client, maxPagesPerKeyword: 1, known: (id) => (id === "MO-4325932" ? known : undefined) });
+    expect(out[0]!.raw).toContain("Descriptif d'hier.");
+    expect(out[0]!.matchedQueries).toEqual(["mobilité"]);
+    expect(site.urls.filter((u) => u.includes("/appels-offres/avis/"))).toHaveLength(0);
+  });
+  test("avis connu sous une autre version : fiche relue", async () => {
+    const site = fakeSite();
+    const known: KnownAnnouncement = {
+      ...toAnnouncement(parseCards(PAGE)[1]!, { descriptif: "Descriptif d'hier.", cpv: "" }, "mobilité"),
+      url: "https://www.marchesonline.com/appels-offres/avis/etude-de-plan-de-mobilite/ao-4325932-1",
+      lastSeenAt: new Date(),
+    };
+    const out = await scrapeMarchesOnline({ searches: SEARCH, client: site.client, maxPagesPerKeyword: 1, known: () => known });
+    expect(out[0]!.raw).toContain("Plan de mobilité employeur du site.");
+    expect(site.urls.filter((u) => u.includes("/appels-offres/avis/"))).toHaveLength(1);
+  });
+});

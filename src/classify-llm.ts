@@ -100,7 +100,7 @@ const FEW_SHOT: Msg[] = [
   },
 ];
 
-function formatUser(a: Announcement): string {
+export function formatUser(a: Announcement): string {
   return [
     `Objet: ${a.objet}`,
     `Type d'avis: ${a.typeAvis}`,
@@ -110,6 +110,33 @@ function formatUser(a: Announcement): string {
   ].join("\n");
 }
 
+// Empreinte du prompt (système + exemples) : toute retouche invalide les
+// verdicts mémorisés en base (announcements.llm_key) au run suivant.
+export const PROMPT_HASH = sha256(`${SYSTEM}\n${JSON.stringify(FEW_SHOT)}`).slice(0, 16);
+
+function sha256(s: string): string {
+  return new Bun.CryptoHasher("sha256").update(s).digest("hex");
+}
+
+// Clé sous laquelle un verdict LLM est mémorisé : le texte exactement soumis
+// au modèle, la chaîne de modèles et l'empreinte du prompt. Même clé au run
+// suivant = même question posée hier ; on réutilise la réponse sans appel.
+export function llmKey(a: Announcement, models: readonly string[]): string {
+  return sha256(`${formatUser(a)}\n${models.join(",")}\n${PROMPT_HASH}`);
+}
+
+export type LlmMemoEntry = { llmKey: string; category: Classification["category"]; reason: string | null; classifier: string };
+
+// Verdict mémorisé réutilisable pour cet avis (même clé), sinon null.
+export function memoized(a: Announcement, ctx: LlmContext): Classification | null {
+  const m = ctx.memo?.get(a.idweb);
+  if (!m) return null;
+  const key = llmKey(a, ctx.models);
+  if (m.llmKey !== key) return null;
+  ctx.stats.memoHits = (ctx.stats.memoHits ?? 0) + 1;
+  return { category: m.category, reason: m.reason ?? undefined, classifier: m.classifier, llmKey: key };
+}
+
 // Contexte partagé par tous les appels d'un run : chaîne de modèles, compteurs
 // et coupe-circuit (construit une fois dans pipeline.ts).
 export type LlmContext = {
@@ -117,6 +144,9 @@ export type LlmContext = {
   stats: LlmStats;
   breaker: Breaker;
   deps?: ChatDeps;
+  // Verdicts des runs précédents par idweb (run.ts les lit en base) ; absent
+  // en CLI ou avec LLM_MEMO=0.
+  memo?: ReadonlyMap<string, LlmMemoEntry>;
 };
 
 export function buildMessages(a: Announcement): Msg[] {
@@ -136,6 +166,8 @@ export function parseClassification(content: string): { category: Classification
 }
 
 export async function classifyLLM(a: Announcement, ctx: LlmContext): Promise<Classification> {
+  const hit = memoized(a, ctx);
+  if (hit) return hit;
   try {
     const r = await chatJSON(
       { messages: buildMessages(a), models: ctx.models, parse: parseClassification, signal: ctx.breaker.signal },
@@ -143,7 +175,7 @@ export async function classifyLLM(a: Announcement, ctx: LlmContext): Promise<Cla
     );
     recordCall(ctx.stats, r, ctx.models);
     ctx.breaker.success();
-    return { ...r.value, classifier: r.model };
+    return { ...r.value, classifier: r.model, llmKey: llmKey(a, ctx.models) };
   } catch (err) {
     ctx.stats.errors++;
     ctx.breaker.failure(err);

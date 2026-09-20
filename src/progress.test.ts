@@ -113,6 +113,18 @@ describe("formats et résumé", () => {
     expect(summarizeProgress(progress, start, now)).toBe(
       "BOAMP, achatpublic.com terminés · AFD en échec · Maximilien 8 / 22 pages · démarrée il y a 12 min",
     );
+    // Sources lues en parallèle : toutes les étapes en cours sont citées.
+    const parallel: RunProgress = {
+      updatedAt: "",
+      steps: [
+        { id: "boamp", label: "BOAMP", status: "running", done: 12, total: 30, unit: "pages" },
+        { id: "marchesonline", label: "Marchés Online", status: "running", done: 3, total: 47, unit: "mots-clés" },
+        { id: "afd", label: "AFD", status: "running" },
+      ],
+    };
+    expect(summarizeProgress(parallel, start, now)).toBe(
+      "BOAMP 12 / 30 pages · Marchés Online 3 / 47 mots-clés · AFD en cours · démarrée il y a 12 min",
+    );
     expect(summarizeProgress({ steps: [], updatedAt: "" }, start, now)).toBe("démarrée il y a 12 min");
   });
   test("normalisation d'une valeur lue en base", () => {

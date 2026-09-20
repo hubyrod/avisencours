@@ -8,6 +8,9 @@ export type Classification = {
   // Qui a tranché : "regex", "regle" (règle personnalisée), un identifiant de
   // modèle OpenRouter, ou "erreur" (défaut « revue manuelle »).
   classifier?: string;
+  // Verdict LLM : clé de mémorisation (src/classify-llm.ts, llmKey) — texte
+  // soumis + chaîne de modèles + empreinte du prompt.
+  llmKey?: string;
 };
 
 export function normalize(s: string): string {

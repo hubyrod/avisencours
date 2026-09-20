@@ -1,5 +1,7 @@
 import { buildApiUrl, type SearchParams } from "./params.ts";
 import type { Famille } from "./familles.ts";
+import { mapConcurrent } from "./concurrent.ts";
+import { fetchWithRetry, type FetchLike } from "./http.ts";
 
 export type Announcement = {
   idweb: string;
@@ -42,42 +44,58 @@ type OdsResponse = { total_count: number; results: OdsRecord[] };
 export type ScrapeOptions = {
   maxPages?: number;
   pageSize?: number;
-  onPage?: (pageNum: number, items: Announcement[], totalPages: number) => void;
+  // Pages lues en parallèle après la première (qui donne le total). L'API
+  // ODS accepte quelques requêtes simultanées ; un 429 est réessayé avec
+  // attente (fetchWithRetry), pas abandonné.
+  concurrency?: number;
+  fetchImpl?: FetchLike;
+  sleep?: (ms: number) => Promise<void>;
+  // Appelé à chaque page reçue (dans l'ordre d'arrivée, pas de numéro) : le
+  // premier argument compte les pages lues, le dernier le total annoncé.
+  onPage?: (pagesDone: number, items: Announcement[], totalPages: number) => void;
 };
 
+const DEFAULT_CONCURRENCY = 4;
+
+async function fetchPage(params: SearchParams, start: number, rows: number, opts: ScrapeOptions): Promise<OdsResponse> {
+  const url = buildApiUrl({ ...params, start, rows });
+  const { text } = await fetchWithRetry("API", url, { method: "GET" }, { fetchImpl: opts.fetchImpl, sleep: opts.sleep, timeoutMs: 60_000 });
+  return JSON.parse(text) as OdsResponse;
+}
+
+// Première page en séquence (elle annonce total_count), puis les suivantes en
+// parallèle borné ; les avis sont restitués dans l'ordre des pages.
 export async function scrapeAll(
   params: SearchParams,
   opts: ScrapeOptions = {},
 ): Promise<Announcement[]> {
   const maxPages = opts.maxPages ?? Number.POSITIVE_INFINITY;
   const pageSize = opts.pageSize ?? 100;
+  const concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY;
 
-  const all: Announcement[] = [];
-  let pageNum = 1;
-  let start = 0;
+  if (maxPages < 1) return [];
+  const first = await fetchPage(params, 0, pageSize, opts);
+  const firstItems = (first.results ?? []).map(toAnnouncement);
+  if (firstItems.length === 0) return [];
+  const totalPages = Math.max(1, Math.ceil(first.total_count / pageSize));
+  let pagesDone = 1;
+  opts.onPage?.(pagesDone, firstItems, totalPages);
 
-  while (pageNum <= maxPages) {
-    const url = buildApiUrl({ ...params, start, rows: pageSize });
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`API ${res.status} ${res.statusText}: ${await res.text()}`);
-    }
-    const data = (await res.json()) as OdsResponse;
-    const items = (data.results ?? []).map(toAnnouncement);
-    if (items.length === 0) break;
-
-    all.push(...items);
-    opts.onPage?.(pageNum, items, Math.max(1, Math.ceil(data.total_count / pageSize)));
-
-    if (start + items.length >= data.total_count) break;
-    if (items.length < pageSize) break;
-    start += pageSize;
-    pageNum++;
-  }
-
-  return all;
+  // Dernière page atteinte : total annoncé couvert, ou page incomplète.
+  const remaining = firstItems.length < pageSize ? 0 : Math.min(totalPages, maxPages) - 1;
+  const starts = Array.from({ length: Math.max(0, remaining) }, (_, i) => (i + 1) * pageSize);
+  const pages = await mapConcurrent(
+    starts,
+    async (start) => {
+      const data = await fetchPage(params, start, pageSize, opts);
+      const items = (data.results ?? []).map(toAnnouncement);
+      opts.onPage?.(++pagesDone, items, totalPages);
+      return items;
+    },
+    concurrency,
+  );
+  return [...firstItems, ...pages.flat()];
 }
-
 function toAnnouncement(f: OdsRecord): Announcement {
   const idweb = f.idweb ?? "";
 
