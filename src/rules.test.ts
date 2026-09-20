@@ -12,6 +12,13 @@ import {
 } from "./rules.ts";
 import { buildApiUrl } from "./params.ts";
 
+// Remettre une variable d'environnement : « = undefined » peut laisser la
+// chaîne « undefined » selon la version de Bun, d'où « Invalid URL » en CI.
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete Bun.env[name];
+  else Bun.env[name] = value;
+}
+
 const avis = (objet: string, raw = "") => ({ objet, raw });
 
 describe("applyScopeRules", () => {
@@ -64,8 +71,8 @@ describe("buildQueryFromKeywords", () => {
     Bun.env.PORTAL_DATASET = "boamp";
   });
   afterAll(() => {
-    Bun.env.PORTAL_API_URL = saved.url;
-    Bun.env.PORTAL_DATASET = saved.dataset;
+    restoreEnv("PORTAL_API_URL", saved.url);
+    restoreEnv("PORTAL_DATASET", saved.dataset);
   });
 
   test("aller-retour à travers buildApiUrl", () => {

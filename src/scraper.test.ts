@@ -1,11 +1,24 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { scrapeAll } from "./scraper.ts";
 import type { FetchLike } from "./http.ts";
 
 // L'URL du portail est construite depuis l'environnement (params.ts) : en CI
-// il n'y a pas de .env, et le faux fetch ignore l'URL de toute façon.
-Bun.env.PORTAL_API_URL ??= "https://portail.test";
-Bun.env.PORTAL_DATASET ??= "boamp";
+// il n'y a pas de .env, et le faux fetch ne regarde que les paramètres.
+// Remettre une variable d'environnement : « = undefined » peut laisser la
+// chaîne « undefined » selon la version de Bun, d'où « Invalid URL » en CI.
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete Bun.env[name];
+  else Bun.env[name] = value;
+}
+const saved = { url: Bun.env.PORTAL_API_URL, dataset: Bun.env.PORTAL_DATASET };
+beforeAll(() => {
+  Bun.env.PORTAL_API_URL = "https://portail.test/api/explore/v2.1/catalog/datasets";
+  Bun.env.PORTAL_DATASET = "boamp";
+});
+afterAll(() => {
+  restoreEnv("PORTAL_API_URL", saved.url);
+  restoreEnv("PORTAL_DATASET", saved.dataset);
+});
 
 const params = { query: "mobilité", codeDepartement: [] as string[] };
 
