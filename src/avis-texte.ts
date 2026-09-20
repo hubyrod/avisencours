@@ -48,12 +48,22 @@ const LABEL = `(?:N°(?:\\s+[A-ZÉÈÀÎÔ][${MIN}'’/-]*)?|[A-ZÉÈÀÎÔ][${M
 // « Libellé: valeur » (eForms) ou « Libellé : valeur » (typographie française).
 // Jamais de coupe juste après « N° » ni après un tiret isolé : « N° National
 // d'identification » et « Code CPV principal - Descripteur principal » sont un seul libellé.
-const CHAMP = new RegExp(`(?<=[^\\s°-])\\s+(?=${LABEL}\\s?:\\s)`, "g");
-const TITRE_SECTION = new RegExp(`^([A-ZÉÈÀÎÔ][^:]*?)(?=\\s+${LABEL}\\s?:\\s|$)`, "s");
+// Le « : » est suivi d'une espace, ou collé à un nombre (« publication :75 »).
+const DEUX_POINTS = `\\s?:(?:\\s|(?=\\d))`;
+const CHAMP = new RegExp(`(?<=[^\\s°-])\\s+(?=${LABEL}${DEUX_POINTS})`, "g");
+const TITRE_SECTION = new RegExp(`^([A-ZÉÈÀÎÔ][^:]*?)(?=\\s+${LABEL}${DEUX_POINTS}|$)`, "s");
+// Section qui commence directement par un champ (« 5.1 Identifiant technique du
+// lot : LOT-0001 ») : pas de titre. Titre court de repli : la suite de mots
+// qui ressemble à un libellé (« Informations générales » avant « Si la … »).
+const CHAMP_EN_TETE = new RegExp(`^${LABEL}${DEUX_POINTS}`);
+const TITRE_COURT = new RegExp(`^${LABEL}`);
 
 export function estEforms(texte: string): boolean {
-  const eforms = /(?:^|\s)\d\.\s+[A-ZÉ]/.test(texte) && /\b(Nom officiel|Type de procédure|Nature principale du marché)\s*:/.test(texte);
-  const national = /\bSection\s+1\s*[-–]\s*Identification/.test(texte);
+  // Numérotation « 1. » ou « 1.1 » (Marchés Online recopie l'eForms sans le
+  // niveau « 1. » : « Section 1 - Acheteur 1.1 Acheteur Nom officiel : … »).
+  const numerote = /(?:^|\s)\d{1,2}(?:\.\d{1,2})*\.?\s+[A-ZÉ]/.test(texte) && /\d\./.test(texte);
+  const eforms = numerote && /\b(Nom officiel|Type de procédure|Nature principale du marché|Nature du marché)\s*:/.test(texte);
+  const national = /\bSection\s+1\s*[-–]\s*(?:Identification|Acheteur)/.test(texte);
   return eforms || national;
 }
 
@@ -70,6 +80,21 @@ function decouperChamps(corps: string): Array<{ label: string; valeur: string }>
   return champs;
 }
 
+function titreEtCorps(reste: string): { titre: string; champs: Array<{ label: string; valeur: string }> } {
+  if (CHAMP_EN_TETE.test(reste)) return { titre: "", champs: decouperChamps(reste) };
+  const m = reste.match(TITRE_SECTION);
+  let titre = m ? m[1]!.trim() : "";
+  let corps = m ? reste.slice(m[0].length) : reste;
+  // Titre trop long (« Informations générales Si la procédure est annulée… ») :
+  // on garde le début qui ressemble à un titre, le reste devient du texte.
+  if (!m || titre.length > 60) {
+    const c = reste.match(TITRE_COURT);
+    titre = c ? c[0] : "";
+    corps = reste.slice(titre.length);
+  }
+  return { titre, champs: decouperChamps(corps) };
+}
+
 export function structurerTexte(texte: string): TexteStructure | null {
   if (!estEforms(texte)) return null;
   const parts = texte.split(SECTION);
@@ -79,21 +104,12 @@ export function structurerTexte(texte: string): TexteStructure | null {
   // Département(s) de publication : 30 Annonce n° … ») : une section sans numéro.
   const avant = (parts[0] ?? "").trim();
   if (avant) {
-    const m = avant.match(TITRE_SECTION);
-    sections.push({ numero: "", titre: m ? m[1]!.trim() : "", champs: decouperChamps(m ? avant.slice(m[0].length) : avant) });
+    sections.push({ numero: "", ...titreEtCorps(avant) });
   }
   for (let i = 1; i < parts.length; i += 3) {
     const numero = (parts[i] ?? parts[i + 1] ?? "").replace(/\.$/, "");
     const reste = (parts[i + 2] ?? "").trim();
-    const m = reste.match(TITRE_SECTION);
-    let titre = m ? m[1]!.trim() : reste.split(/\s+/).slice(0, 4).join(" ");
-    let corps = m ? reste.slice(m[0].length) : "";
-    // Titre trop long = pas de titre, tout est corps (rare).
-    if (titre.length > 60) {
-      titre = "";
-      corps = reste;
-    }
-    sections.push({ numero, titre, champs: decouperChamps(corps) });
+    sections.push({ numero, ...titreEtCorps(reste) });
   }
   if (sections.length === 0) return null;
   const champs = sections.flatMap((s) => s.champs);

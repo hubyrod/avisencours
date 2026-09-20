@@ -1398,6 +1398,7 @@ const AVIS_CSS = `
     .section-avis h3 .num { font-family: var(--fonte-mono); font-weight: 500; margin-right: 6px; }
     .section-avis dl { margin: 0; display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 3px 12px; font-size: 13px; }
     .section-avis dt { color: var(--encre-2); }
+    .section-avis dt.groupe { grid-column: 1 / -1; font-weight: 600; margin-top: 4px; }
     .section-avis dd { margin: 0; overflow-wrap: anywhere; }
     .section-avis dd.long { grid-column: 1 / -1; white-space: pre-wrap; }
     .echeance { background: var(--panneau); color: #fff; border-radius: 8px; padding: 16px 18px; }
@@ -1435,9 +1436,10 @@ function renderTexteStructure(s: TexteStructure): string {
       const rows = x.champs
         .map((c) => {
           const long = c.valeur.length > 90 || /^(description|titre)$/i.test(c.label);
-          return c.label
-            ? `<dt>${esc(c.label)}</dt><dd${long ? ' class="long"' : ""}>${esc(c.valeur)}</dd>`
-            : `<dd class="long">${esc(c.valeur)}</dd>`;
+          if (!c.label) return `<dd class="long">${esc(c.valeur)}</dd>`;
+          // Libellé sans valeur (« Options : » avant « Description des options : ») : sous-titre.
+          if (!c.valeur) return `<dt class="groupe">${esc(c.label)}</dt>`;
+          return `<dt>${esc(c.label)}</dt><dd${long ? ' class="long"' : ""}>${esc(c.valeur)}</dd>`;
         })
         .join("");
       return `<div class="section-avis"><h3><span class="num">${esc(x.numero)}</span>${esc(x.titre)}</h3>${rows ? `<dl>${rows}</dl>` : ""}</div>`;

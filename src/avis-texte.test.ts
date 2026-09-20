@@ -87,3 +87,31 @@ describe("structurerTexte (avis national BOAMP aplati)", () => {
     expect(s.resume).toBe("L'accord-cadre sera exécuté par émission de bons de commande. Cette étude s'inscrit au PAPI 3 Vistre.");
   });
 });
+
+describe("structurerTexte (eForms recopié par Marchés Online : « Section N - » + « 1.1 », deux-points français)", () => {
+  const texte = "Avis de marché Département(s) de publication :75 Annonce n° 26-77042 Section 1 - Acheteur 1.1 Acheteur Nom officiel : Ile de France Mobilités Forme juridique de l'acheteur : Autorité régionale Activité du pouvoir adjudicateur : Services d'administration générale Section 2 - Procédure 2.1 Procédure Titre : 2025-092 _ Agent foncier pour les projets d'Île-de-France Mobilités Description : Le présent accord-cadre 2025-092 porte sur la réalisation de l'ensemble des démarches et formalités visant à la régularisation foncière et la libération des biens nécessaires dans le cadre de projets de maitrise foncière liés à des projets d'infrastructures ou des projets de pôles multimodaux ou de gares routières. Identifiant de la procédure : 5f3b1ed0-1410-4e7e-921c-28ef2ee90fda Identifiant interne : 2025-092 Type de procédure : Ouverte La procédure est accélérée : non Principales caractéristiques de la procédure : La présente consultation est passée selon la procédure d'appel d'offres ouvert en application de l'article L2124-2 et R2124-2 1° du code de la commande publique. 2.1.1 Objet Nature du marché : Services Nomenclature principale ( cpv ): 70330000 Services de gestion de biens immobiliers pour le compte de tiers 2.1.2 Lieu d'exécution Ville : Paris Subdivision pays (NUTS) : Paris ( FR101 ) Pays : France 2.1.3 Valeur Valeur estimée hors TVA : 0 Euro Valeur maximale de l'accord-cadre : 800,000 Euro 2.1.4 Informations générales Si la procédure est annulée ou infructueuse, elle sera relancée Base juridique : Directive 2014/24/UE Section 5 - Lot 5.1 Identifiant technique du lot : LOT-0001 Titre : 2025-092 _ Agent foncier pour les projets d'Île-de-France Mobilités Description : Le présent accord-cadre 2025-092 porte sur la réalisation de l'ensemble des démarches et formalités visant à la régularisation foncière et la libération des biens nécessaires dans le cadre de projets de maitrise foncière liés à des projets d'infrastructures ou des projets de pôles multimodaux ou de gares routières. L'accord-cadre est passé sous la forme d'un accord-cadre multi-attributaires qui donnera lieu à l'émission de bons de commande. Le nombre d'attributaire est fixé à deux (2) sous réserve d'un nombre suffisant d'offres conformes. L'accord-cadre est conclu sans montant minimum et avec un montant maximum de 400 000Euros HT par période contractuelle de 24 mois. Identifiant interne : 1 5.1.1 Objet Nature du marché : Services Nomenclature principale ( cpv ): 79212000 Services d'audit Options : Description des options : La durée de l'accord-cadre est de 24 mois à compter de sa notification.";
+  test("en-tête, sections, section commençant par un champ, titre long, deux-points collé", () => {
+    expect(estEforms(texte)).toBe(true);
+    const s = structurerTexte(texte)!;
+    expect(s).not.toBeNull();
+    expect(s.sections[0]).toEqual({
+      numero: "",
+      titre: "Avis de marché",
+      champs: [{ label: "Département(s) de publication", valeur: "75 Annonce n° 26-77042" }],
+    });
+    expect(s.sections.map((x) => `${x.numero} ${x.titre}`.trim())).toEqual([
+      "Avis de marché", "1 Acheteur", "1.1 Acheteur", "2 Procédure", "2.1 Procédure", "2.1.1 Objet", "2.1.2 Lieu d'exécution",
+      "2.1.3 Valeur", "2.1.4 Informations générales", "5 Lot", "5.1", "5.1.1 Objet",
+    ]);
+    expect(s.sections[8]!.champs).toEqual([
+      { label: "", valeur: "Si la procédure est annulée ou infructueuse, elle sera relancée" },
+      { label: "Base juridique", valeur: "Directive 2014/24/UE" },
+    ]);
+    expect(s.sections[10]!.champs.map((c) => c.label)).toEqual(["Identifiant technique du lot", "Titre", "Description", "Identifiant interne"]);
+    expect(s.sections[10]!.champs[0]!.valeur).toBe("LOT-0001");
+    expect(s.sections[11]!.champs.map((c) => [c.label, c.valeur.slice(0, 12)])).toEqual([
+      ["Nature du marché", "Services"], ["Nomenclature principale ( cpv )", "79212000 Ser"], ["Options", ""], ["Description des options", "La durée de "],
+    ]);
+    expect(s.resume).toMatch(/^Le présent accord-cadre 2025-092 porte/);
+  });
+});
