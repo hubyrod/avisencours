@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { scrapeAll } from "./scraper.ts";
 import type { FetchLike } from "./http.ts";
 
+// L'URL du portail est construite depuis l'environnement (params.ts) : en CI
+// il n'y a pas de .env, et le faux fetch ignore l'URL de toute façon.
+Bun.env.PORTAL_API_URL ??= "https://portail.test";
+Bun.env.PORTAL_DATASET ??= "boamp";
+
 const params = { query: "mobilité", codeDepartement: [] as string[] };
 
 function record(i: number) {
