@@ -3,6 +3,88 @@
 // validation des saisies. Aucun accès DB/env ici — testable avec `bun test`,
 // importable aussi bien par run.ts que par server.ts.
 import { normalize, type Classification } from "./classify.ts";
+import { FAMILLES, FAMILLE_MARCHE, type Famille, type FamilleSearch } from "./familles.ts";
+import type { Source } from "./scraper.ts";
+
+// Listes de mots-clés : une par moteur de recherche. BOAMP interroge l'API
+// (une requête OR, sans famille) ; les autres listent toutes les consultations
+// ouvertes puis filtrent l'intitulé en début de mot (src/familles.ts,
+// keywordRegex), famille par famille. Maximilien et AMPA (même logiciel atexo)
+// partagent la liste « mpe ». AFD n'a pas de liste (catégorie « Transports »
+// du site).
+export type Liste = "boamp" | "achatpublic" | "mpe" | "marchesonline";
+
+export type ListeInfo = {
+  id: Liste;
+  label: string;
+  // Sources alimentées par la liste (identifiants du registre src/sources.ts).
+  sources: readonly Source[];
+  // Familles éditables ; BOAMP n'en a qu'une (la requête n'a pas de famille).
+  familles: boolean;
+  // Comment les termes sont appliqués, pour la page de configuration.
+  description: string;
+};
+
+export const LISTES: readonly ListeInfo[] = [
+  {
+    id: "boamp",
+    label: "BOAMP",
+    sources: ["boamp"],
+    familles: false,
+    description:
+      "Requête de l'API : un avis de services est récupéré s'il contient au moins un de ces termes, cherchés tels quels (les expressions de plusieurs mots aussi).",
+  },
+  {
+    id: "achatpublic",
+    label: "achatpublic.com",
+    sources: ["achatpublic"],
+    familles: true,
+    description:
+      "Toutes les consultations ouvertes (services et fournitures) sont listées puis filtrées : un terme retient une consultation s'il commence un mot de son intitulé.",
+  },
+  {
+    id: "mpe",
+    label: "Maximilien et Marchés publics d'Aquitaine",
+    sources: ["maximilien", "ampa"],
+    familles: true,
+    description:
+      "Même filtre en début de mot, sur l'intitulé et l'objet des consultations de services des deux plateformes atexo.",
+  },
+  {
+    id: "marchesonline",
+    label: "Marchés Online",
+    sources: ["marchesonline"],
+    familles: true,
+    description:
+      "Chaque terme est une recherche du site (ses 8 pages les plus récentes au plus), dont les cartes sont refiltrées en début de mot : un terme très large coûte des pages et du temps.",
+  },
+];
+
+export function isListe(v: string | null | undefined): v is Liste {
+  return LISTES.some((l) => l.id === v);
+}
+
+export function isFamille(v: string | null | undefined): v is Famille {
+  return FAMILLES.includes(v as Famille);
+}
+
+export type KeywordLike = { liste: Liste; famille: Famille; term: string };
+
+// Lignes de search_keywords -> recherches par liste, dans l'ordre des familles
+// (une liste absente de la table n'apparaît pas : le pipeline se replie sur
+// defaults.ts ; une famille sans terme n'est pas cherchée).
+export function searchesByListe(rows: readonly KeywordLike[]): Partial<Record<Liste, FamilleSearch[]>> {
+  const out: Partial<Record<Liste, FamilleSearch[]>> = {};
+  for (const l of LISTES) {
+    const mine = rows.filter((r) => r.liste === l.id);
+    if (mine.length === 0) continue;
+    out[l.id] = FAMILLES.flatMap((famille) => {
+      const keywords = mine.filter((r) => r.famille === famille).map((r) => r.term);
+      return keywords.length > 0 ? [{ famille, marche: FAMILLE_MARCHE[famille], keywords }] : [];
+    });
+  }
+  return out;
+}
 
 export type ScopeRules = { keep: string[]; exclude: string[] };
 

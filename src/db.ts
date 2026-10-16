@@ -2,7 +2,8 @@ import { SQL } from "bun";
 import { normalizeProgress, type RunProgress } from "./progress.ts";
 import { deadlineDay, grouperDoublons, type Publication } from "./doublons.ts";
 import type { ClassifiedItem } from "./pipeline.ts";
-import { KEYWORDS } from "./defaults.ts";
+import { DEFAULT_LISTES } from "./defaults.ts";
+import { LISTES, type Liste } from "./rules.ts";
 import type { LlmStats } from "./llm.ts";
 import type { LlmMemoEntry } from "./classify-llm.ts";
 import type { Category } from "./classify.ts";
@@ -162,11 +163,19 @@ export async function migrate(): Promise<void> {
   await sql`
     CREATE TABLE IF NOT EXISTS search_keywords (
       id         bigserial PRIMARY KEY,
-      term       text NOT NULL UNIQUE,
+      term       text NOT NULL,
       position   int NOT NULL,
+      liste      text NOT NULL DEFAULT 'boamp',
+      famille    text NOT NULL DEFAULT 'mobilité',
       created_by bigint REFERENCES users(id) ON DELETE SET NULL,
       created_at timestamptz NOT NULL DEFAULT now()
     )`;
+  // Une liste par moteur de recherche (src/rules.ts : LISTES) et une famille
+  // par terme ; avant ces colonnes, la table ne tenait que la requête BOAMP.
+  await sql`ALTER TABLE search_keywords ADD COLUMN IF NOT EXISTS liste text NOT NULL DEFAULT 'boamp'`;
+  await sql`ALTER TABLE search_keywords ADD COLUMN IF NOT EXISTS famille text NOT NULL DEFAULT 'mobilité'`;
+  await sql`ALTER TABLE search_keywords DROP CONSTRAINT IF EXISTS search_keywords_term_key`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS search_keywords_liste_famille_term ON search_keywords (liste, famille, term)`;
   await sql`
     CREATE TABLE IF NOT EXISTS scope_rules (
       id         bigserial PRIMARY KEY,
@@ -183,17 +192,25 @@ export async function migrate(): Promise<void> {
       updated_by bigint REFERENCES users(id) ON DELETE SET NULL,
       updated_at timestamptz NOT NULL DEFAULT now()
     )`;
-  // Mots-clés de départ, uniquement si la table est vide (la liste vit ensuite
-  // dans /configuration). Stockés sans guillemets ; le requêtage les recolle.
-  const hasKeywords = await sql`SELECT 1 FROM search_keywords LIMIT 1`;
-  if (hasKeywords.length === 0) {
+  // Mots-clés de départ, liste par liste, uniquement pour une liste encore
+  // absente de la table (chaque liste vit ensuite dans /configuration ; une
+  // base d'avant les listes secondaires reçoit ainsi les leurs). Stockés sans
+  // guillemets ; le requêtage BOAMP les recolle.
+  const present = new Set(
+    ((await sql`SELECT DISTINCT liste FROM search_keywords`) as Array<{ liste: string }>).map((r) => r.liste),
+  );
+  for (const l of LISTES) {
+    if (present.has(l.id)) continue;
     await sql.begin(async (tx) => {
-      for (let i = 0; i < KEYWORDS.length; i++) {
-        const term = KEYWORDS[i]!.replace(/^"([^"]*)"$/, "$1");
-        await tx`
-          INSERT INTO search_keywords (term, position)
-          VALUES (${term}, ${(i + 1) * 10})
-          ON CONFLICT (term) DO NOTHING`;
+      let position = 0;
+      for (const s of DEFAULT_LISTES[l.id]) {
+        for (const term of s.keywords) {
+          position += 10;
+          await tx`
+            INSERT INTO search_keywords (term, position, liste, famille)
+            VALUES (${term}, ${position}, ${l.id}, ${s.famille})
+            ON CONFLICT (liste, famille, term) DO NOTHING`;
+        }
       }
     });
   }
@@ -867,33 +884,37 @@ export async function getUpcomingDeadlines(runId: number, days: number): Promise
 // Même philosophie que les statuts : lignes éditables par petites actions POST,
 // lues par le job quotidien (src/run.ts) au démarrage de chaque run.
 
-export type KeywordRow = { id: number; term: string; position: number };
+export type KeywordRow = { id: number; term: string; position: number; liste: Liste; famille: Famille };
 export type ScopeRuleRow = { id: number; kind: "keep" | "exclude"; term: string };
 
 export async function listKeywords(): Promise<KeywordRow[]> {
-  const rows = await db()`SELECT id, term, position FROM search_keywords ORDER BY position, id`;
-  return rows.map((r: { id: unknown; term: string; position: number }) => ({
+  const rows = await db()`SELECT id, term, position, liste, famille FROM search_keywords ORDER BY liste, famille, position, id`;
+  return rows.map((r: { id: unknown; term: string; position: number; liste: Liste; famille: Famille }) => ({
     id: Number(r.id),
     term: r.term,
     position: r.position,
+    liste: r.liste,
+    famille: r.famille,
   }));
 }
 
-export async function addKeyword(term: string, userId: number): Promise<boolean> {
+export async function addKeyword(term: string, userId: number, liste: Liste = "boamp", famille: Famille = "mobilité"): Promise<boolean> {
   const rows = await db()`
-    INSERT INTO search_keywords (term, position, created_by)
-    VALUES (${term}, (SELECT COALESCE(max(position), 0) + 10 FROM search_keywords), ${userId})
-    ON CONFLICT (term) DO NOTHING
+    INSERT INTO search_keywords (term, position, liste, famille, created_by)
+    VALUES (${term}, (SELECT COALESCE(max(position), 0) + 10 FROM search_keywords WHERE liste = ${liste}), ${liste}, ${famille}, ${userId})
+    ON CONFLICT (liste, famille, term) DO NOTHING
     RETURNING id`;
   return rows.length > 0;
 }
 
-// Refuse de supprimer le dernier mot-clé : une liste vide reviendrait à
-// récupérer tous les avis ouverts (le filtre ne porterait plus que sur la date).
+// Refuse de supprimer le dernier mot-clé d'une liste : pour BOAMP, une requête
+// vide reviendrait à récupérer tous les avis ouverts ; pour les autres, la
+// liste serait resemée au prochain démarrage. Couper une source se fait depuis
+// la carte des sources.
 export async function deleteKeyword(id: number): Promise<boolean> {
   const rows = await db()`
-    DELETE FROM search_keywords
-    WHERE id = ${id} AND (SELECT count(*) FROM search_keywords) > 1
+    DELETE FROM search_keywords k
+    WHERE k.id = ${id} AND (SELECT count(*) FROM search_keywords WHERE liste = k.liste) > 1
     RETURNING id`;
   return rows.length > 0;
 }

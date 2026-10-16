@@ -227,6 +227,30 @@ if (!TEST_URL) {
     expect(moteur.text).not.toContain("Mots-clés de recherche");
   });
 
+  test("mots-clés par liste : sections, ajout dans une famille, dernier terme protégé", async () => {
+    const page = await get("/configuration");
+    expect(page.text).toContain('id="carte-mots-cles-boamp"');
+    expect(page.text).toContain('id="carte-mots-cles-marchesonline"');
+    expect(page.text).toContain("Maximilien et Marchés publics d'Aquitaine");
+    let res = await post("/configuration/mots-cles/ajouter", { liste: "mpe", famille: "inondations", terme: "crue" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/configuration?onglet=resultats#carte-mots-cles-mpe");
+    const rows = (await control`SELECT liste, famille FROM search_keywords WHERE term = 'crue'`) as Array<{ liste: string; famille: string }>;
+    expect(rows).toEqual([{ liste: "mpe", famille: "inondations" }]);
+    // BOAMP n'a pas de famille ; liste inconnue refusée.
+    expect((await post("/configuration/mots-cles/ajouter", { liste: "boamp", famille: "kiomda", terme: "crue" })).status).toBe(200);
+    expect((await post("/configuration/mots-cles/ajouter", { liste: "afd", famille: "mobilité", terme: "crue" })).status).toBe(200);
+    const crue = ((await control`SELECT id FROM search_keywords WHERE term = 'crue'`) as Array<{ id: string }>)[0]!;
+    res = await post("/configuration/mots-cles/supprimer", { id: crue.id });
+    expect(res.headers.get("location")).toBe("/configuration?onglet=resultats#carte-mots-cles-mpe");
+    await control`DELETE FROM search_keywords WHERE liste = 'boamp' AND term <> 'mobilité'`;
+    const last = ((await control`SELECT id FROM search_keywords WHERE liste = 'boamp'`) as Array<{ id: string }>)[0]!;
+    res = await post("/configuration/mots-cles/supprimer", { id: last.id });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("dernier terme");
+    await control`TRUNCATE search_keywords RESTART IDENTITY`;
+  });
+
   test("réglages : chaque carte n'écrit que ses champs et revient sur son onglet", async () => {
     let res = await post("/configuration/reglages", { fenetre: "21" });
     expect(res.status).toBe(303);

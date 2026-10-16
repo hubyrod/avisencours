@@ -288,6 +288,35 @@ if (!TEST_URL) {
       expect((await db.getAnnouncement("LOT-0"))?.objet).toBe("dernier gagne");
     });
 
+    test("mots-clés : une liste par moteur, semée si absente, dernier terme d'une liste protégé", async () => {
+      await control`TRUNCATE search_keywords RESTART IDENTITY`;
+      await db.migrate();
+      const parListe = (await control`SELECT liste, count(*)::int AS n FROM search_keywords GROUP BY liste ORDER BY liste`) as Array<{ liste: string; n: number }>;
+      expect(parListe.map((r) => r.liste)).toEqual(["achatpublic", "boamp", "marchesonline", "mpe"]);
+      expect(parListe.find((r) => r.liste === "boamp")?.n).toBe(14);
+      // Les familles non mobilité sont semées avec leur famille.
+      const kiomda = (await db.listKeywords()).filter((k) => k.liste === "marchesonline" && k.famille === "kiomda");
+      expect(kiomda.map((k) => k.term)).toContain("compteur");
+
+      // Une liste gardée par l'administrateur n'est pas resemée ; une liste absente l'est.
+      await control`DELETE FROM search_keywords WHERE liste = 'mpe'`;
+      await control`DELETE FROM search_keywords WHERE liste = 'achatpublic' AND NOT (term = 'vélo' AND famille = 'mobilité')`;
+      await db.migrate();
+      expect((await db.listKeywords()).filter((k) => k.liste === "achatpublic").map((k) => k.term)).toEqual(["vélo"]);
+      expect((await db.listKeywords()).filter((k) => k.liste === "mpe").length).toBeGreaterThan(10);
+
+      // Dernier terme d'une liste : refusé, même si d'autres listes sont pleines.
+      const velo = (await db.listKeywords()).find((k) => k.liste === "achatpublic")!;
+      expect(await db.deleteKeyword(velo.id)).toBe(false);
+      // Même terme dans deux familles ou deux listes : autorisé ; doublon exact : refusé.
+      expect(await db.addKeyword("vélo", 1, "achatpublic", "kiomda")).toBe(true);
+      expect(await db.addKeyword("vélo", 1, "achatpublic", "kiomda")).toBe(false);
+      const velo2 = (await db.listKeywords()).find((k) => k.liste === "achatpublic" && k.famille === "kiomda")!;
+      expect(await db.deleteKeyword(velo2.id)).toBe(true);
+      await control`TRUNCATE search_keywords RESTART IDENTITY`;
+      await db.migrate();
+    });
+
     test("index sur last_seen_run_id et first_seen_run_id", async () => {
       const idx = (await control`SELECT indexname FROM pg_indexes WHERE tablename = 'announcements'`) as Array<{ indexname: string }>;
       const names = idx.map((i) => i.indexname);

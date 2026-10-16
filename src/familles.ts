@@ -21,6 +21,18 @@ export const FAMILLE_LABELS: Record<Famille, string> = {
   inondations: "Inondations — AMC",
 };
 
+// Ordre de priorité des familles : une consultation qui répond à plusieurs
+// listes est rangée dans la première (mobilité avant kiomda avant inondations).
+export const FAMILLES: readonly Famille[] = ["mobilité", "kiomda", "inondations"];
+
+// Nature de marché cherchée par famille : Kiomda est une veille de fournitures
+// (compteurs, capteurs), les deux autres des services (études).
+export const FAMILLE_MARCHE: Record<Famille, NatureMarche> = {
+  mobilité: "services",
+  kiomda: "fournitures",
+  inondations: "services",
+};
+
 // Correspondance d'un mot-clé sur texte normalisé, toujours en début de mot
 // (« vélo » attrape « vélos » mais pas « développement »). Les sigles (écrits
 // en majuscules : PDM, AMC, ZFE, PAPI…) et les mots très courts n'acceptent

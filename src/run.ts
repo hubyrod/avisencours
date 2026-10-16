@@ -23,6 +23,7 @@ import {
 } from "./db.ts";
 import {
   buildQueryFromKeywords,
+  searchesByListe,
   validateDigestWindow,
   parseDepartements,
   parseModelChain,
@@ -144,10 +145,14 @@ async function main() {
     if (llmMemo) console.error(`${llmMemo.size} verdict(s) LLM mémorisé(s)`);
     else console.error("LLM_MEMO=0 — aucun verdict repris");
 
+    // Mots-clés par liste (/configuration) ; une liste absente de la table
+    // = repli sur defaults.ts (BOAMP : la requête par défaut).
+    const boampKeywords = keywords.filter((k) => k.liste === "boamp");
+    const { boamp: _boamp, ...searches } = searchesByListe(keywords);
     const { relevant, travaux, excluded, llm, warning } = await runPipeline({
       maxPages: Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : undefined,
-      // Table vide = repli sur la liste par défaut (defaults.ts).
-      query: keywords.length > 0 ? buildQueryFromKeywords(keywords.map((k) => k.term)) : undefined,
+      query: boampKeywords.length > 0 ? buildQueryFromKeywords(boampKeywords.map((k) => k.term)) : undefined,
+      searches,
       // Un réglage en base l'emporte sur la variable d'environnement.
       classifier: classifierSetting ?? Bun.env.CLASSIFIER,
       llmModels: chainFromSetting(modelsSetting),

@@ -1,4 +1,4 @@
-import { FAMILLE_LABELS, type Famille } from "./familles.ts";
+import { FAMILLES, FAMILLE_LABELS, type Famille } from "./familles.ts";
 import { SOURCES, isSource, isSourceEnabled, sourceLabel, type SourceInfo } from "./sources.ts";
 import { decouperRaw, structurerTexte, type TexteStructure } from "./avis-texte.ts";
 import { errMessage } from "./http.ts";
@@ -45,6 +45,7 @@ import {
   type RunRow,
   type StatusRow,
   type ScopeRuleRow,
+  type KeywordRow,
 } from "./db.ts";
 import { startLive, isLiveReady, liveAdapterState, commentStream, runStream } from "./live.ts";
 import { frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
@@ -80,6 +81,10 @@ import {
 import { sendLoginCode } from "./email.ts";
 import {
   validateKeyword,
+  isListe,
+  isFamille,
+  LISTES,
+  type Liste,
   validateRuleTerm,
   validateDigestWindow,
   validateClassifierMode,
@@ -187,6 +192,13 @@ const BASE_CSS = `
     nav a:hover { color: var(--encre); }
     nav a.active { color: var(--encre); font-weight: 600; border-bottom-color: var(--panneau); }
     .meta { color: var(--encre-2); font-size: 12.5px; margin-top: 2px; }
+    .mots { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; padding: 0; list-style: none; }
+    .mot { display: inline-flex; align-items: center; gap: 6px; background: #f1f3f0; border: 1px solid var(--ligne); border-radius: 999px; padding: 3px 6px 3px 10px; font-size: 13px; }
+    .mot form { margin: 0; display: inline-flex; }
+    .mot button.subtle { text-decoration: none; font-size: 14px; line-height: 1; color: var(--encre-2); }
+    .mot button.subtle:hover { color: var(--rouge, #b3261e); }
+    .liste-mots { border-top: 1px solid var(--ligne); padding-top: 10px; margin-top: 12px; }
+    .liste-mots h3 { margin: 0 0 2px; font-size: 14px; }
     .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
     .comment { border-top: 1px solid var(--ligne); padding: 10px 0; }
     .comment-head { display: flex; align-items: baseline; gap: 12px; font-size: 13px; color: var(--encre-2); }
@@ -766,6 +778,53 @@ function llmRunLine(run: RunRow): string {
   return parts.join("");
 }
 
+// Une liste de mots-clés (BOAMP, achatpublic, MPE, Marchés Online) : termes
+// par famille sous forme de pastilles supprimables, puis le formulaire d'ajout.
+function keywordListe(l: (typeof LISTES)[number], keywords: KeywordRow[]): string {
+  const mine = keywords.filter((k) => k.liste === l.id);
+  const chips = (rows: KeywordRow[]) =>
+    rows.length === 0
+      ? `<p style="color:var(--encre-2);font-size:13px;margin:4px 0 8px;">Aucun terme.</p>`
+      : `<ul class="mots">${rows
+          .map(
+            (k) => `
+          <li class="mot"><span>${esc(k.term)}</span>
+            <form method="post" action="/configuration/mots-cles/supprimer">
+              <input type="hidden" name="id" value="${k.id}">
+              <button class="subtle" type="submit" title="Supprimer « ${esc(k.term)} »" aria-label="Supprimer ${esc(k.term)}">×</button>
+            </form></li>`,
+          )
+          .join("")}</ul>`;
+  const parFamille = l.familles
+    ? FAMILLES.map(
+        (f) => `
+        <h4 style="margin:8px 0 0;font-size:13px;color:var(--encre-2);">${esc(FAMILLE_LABELS[f])}</h4>
+        ${chips(mine.filter((k) => k.famille === f))}`,
+      ).join("")
+    : chips(mine);
+  const familleSelect = l.familles
+    ? `<select name="famille" ${SELECT_STYLE} aria-label="Famille">${FAMILLES.map(
+        (f) => `<option value="${f}">${esc(FAMILLE_LABELS[f])}</option>`,
+      ).join("")}</select>`
+    : `<input type="hidden" name="famille" value="mobilité">`;
+  return `
+      <div class="liste-mots" id="carte-mots-cles-${l.id}">
+        <h3>${esc(l.label)}</h3>
+        <p class="meta">${esc(l.description)} Alimente : ${l.sources.map((s) => esc(sourceLabel(s))).join(", ")}.</p>
+        ${parFamille}
+        <form method="post" action="/configuration/mots-cles/ajouter" style="margin-top:8px;">
+          <input type="hidden" name="liste" value="${l.id}">
+          <label for="kw-terme-${l.id}">Nouveau terme — ${esc(l.label)}</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${familleSelect}
+            <input type="text" id="kw-terme-${l.id}" name="terme" required maxlength="80"
+                   placeholder="ex. covoiturage" style="flex:1;min-width:160px;">
+            <button class="primary" type="submit">Ajouter</button>
+          </div>
+        </form>
+      </div>`;
+}
+
 function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude"): string {
   const rows = rules
     .filter((r) => r.kind === kind)
@@ -861,21 +920,6 @@ function renderOngletResultats(d: {
   departements: string | null;
   running: boolean;
 }): string {
-  const keywordRows = d.keywords
-    .map(
-      (k) => `
-      <tr>
-        <td>${esc(k.term)}</td>
-        <td style="text-align:right;">
-          <form method="post" action="/configuration/mots-cles/supprimer" style="margin:0;">
-            <input type="hidden" name="id" value="${k.id}">
-            <button class="subtle" type="submit">Supprimer</button>
-          </form>
-        </td>
-      </tr>`,
-    )
-    .join("");
-
   return `
       <p class="onglet-intro">
         Ce qui décide des avis retenus et de ce que l'équipe reçoit.
@@ -891,21 +935,15 @@ function renderOngletResultats(d: {
         <h2>Mots-clés de recherche</h2>
         <p class="effet">Change les avis trouvés</p>
         <p>
-          Un avis BOAMP est récupéré s'il contient au moins un de ces termes.
-          Les expressions de plusieurs mots sont recherchées telles quelles.
-          Les autres sources ont leurs listes propres, tenues dans le code.
+          Une liste par moteur de recherche. Sur les sites sans API, un terme est cherché en début de mot
+          (majuscules et accents ignorés) : « vélo » retient « vélos » mais pas « développement » ;
+          un sigle en majuscules (PDM, AMC) ou un mot de quatre lettres au plus vaut mot entier,
+          les autres termes valent comme préfixe (« modél » retient « modélisation »).
+          Chaque terme appartient à une famille : <strong>Mobilité</strong> passe par le classement
+          habituel, <strong>Kiomda</strong> (fournitures de compteurs) et <strong>Inondations</strong>
+          (études AMC / PAPI / GEMAPI) ont leur règle propre, sans LLM.
         </p>
-        <table>
-          <tbody>${keywordRows}</tbody>
-        </table>
-        <form method="post" action="/configuration/mots-cles/ajouter" style="margin-top:12px;">
-          <label for="kw-terme">Nouveau mot-clé</label>
-          <div style="display:flex;gap:8px;">
-            <input type="text" id="kw-terme" name="terme" required maxlength="80"
-                   placeholder="ex. covoiturage" style="flex:1;">
-            <button class="primary" type="submit">Ajouter</button>
-          </div>
-        </form>
+        ${LISTES.map((l) => keywordListe(l, d.keywords)).join("")}
       </div>
 
       <div class="card large" id="carte-regles">
@@ -1044,26 +1082,31 @@ async function handleConfigHome(_req: Request, url: URL, user: AuthUser): Promis
 }
 
 async function handleKeywordAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { terme = "" } = await form(req);
+  const { terme = "", liste = "boamp", famille = "mobilité" } = await form(req);
+  const fail = (text: string) => configPage(user, "resultats", { kind: "error", text });
+  if (!isListe(liste) || !isFamille(famille)) return fail("Requête invalide.");
+  const info = LISTES.find((l) => l.id === liste)!;
+  if (!info.familles && famille !== "mobilité") return fail("Requête invalide.");
   const v = validateKeyword(terme);
-  if (!v.ok) return configPage(user, "resultats", { kind: "error", text: v.error });
-  const added = await addKeyword(v.value, user.id);
-  if (!added) return configPage(user, "resultats", { kind: "error", text: "Ce mot-clé existe déjà." });
-  return redirect(configUrl("resultats", "mots-cles"), 303);
+  if (!v.ok) return fail(v.error);
+  const added = await addKeyword(v.value, user.id, liste, famille);
+  if (!added) return fail(`Ce terme figure déjà dans la liste ${info.label} (${FAMILLE_LABELS[famille]}).`);
+  return redirect(configUrl("resultats", `mots-cles-${liste}`), 303);
 }
 
 async function handleKeywordDelete(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { id = "" } = await form(req);
   const kid = Number(id);
   if (!Number.isInteger(kid)) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
+  const liste: Liste = (await listKeywords()).find((k) => k.id === kid)?.liste ?? "boamp";
   const deleted = await deleteKeyword(kid);
   if (!deleted) {
     return configPage(user, "resultats", {
       kind: "error",
-      text: "Impossible de supprimer le dernier mot-clé : la liste ne peut pas être vide.",
+      text: "Impossible de supprimer le dernier terme d'une liste : pour ne plus lire une source, désactivez-la dans l'onglet Moteur.",
     });
   }
-  return redirect(configUrl("resultats", "mots-cles"), 303);
+  return redirect(configUrl("resultats", `mots-cles-${liste}`), 303);
 }
 
 async function handleRuleAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {

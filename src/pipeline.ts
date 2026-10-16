@@ -1,4 +1,4 @@
-import { ACHATPUBLIC_SEARCHES, MARCHESONLINE_SEARCHES, MPE_SEARCHES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
+import { DEFAULT_LISTES, buildDefaultParams, DEFAULT_QUERY } from "./defaults.ts";
 import { scrapeAll, type Announcement } from "./scraper.ts";
 import { scrapeAchatPublic } from "./achatpublic.ts";
 import { scrapeAfd } from "./afd.ts";
@@ -7,11 +7,11 @@ import { scrapeMarchesOnline } from "./marchesonline.ts";
 import { SOURCES, isSourceEnabled, sourceLabel } from "./sources.ts";
 import type { ProgressTracker } from "./progress.ts";
 import type { Source } from "./scraper.ts";
-import { classifyFamille } from "./familles.ts";
+import { classifyFamille, type FamilleSearch } from "./familles.ts";
 import { classify, type Category, type Classification } from "./classify.ts";
 import { classifyLLM, type LlmContext, type LlmMemoEntry } from "./classify-llm.ts";
 import { classifyHybrid } from "./classify-hybrid.ts";
-import { applyScopeRules, type ScopeRules } from "./rules.ts";
+import { applyScopeRules, type Liste, type ScopeRules } from "./rules.ts";
 import { Breaker, defaultModelChain, llmConfigured, llmStatsSummary, newLlmStats, type LlmStats } from "./llm.ts";
 import { errMessage } from "./http.ts";
 import { mapConcurrent } from "./concurrent.ts";
@@ -44,6 +44,9 @@ export type PipelineOptions = {
   // (env) puis DEFAULT_LLM_MODELS.
   llmModels?: string[];
   scopeRules?: ScopeRules;
+  // Mots-clés des sources secondaires par liste (src/rules.ts : LISTES), lus
+  // en base par run.ts ; liste absente = defaults.ts (ce que fait le CLI).
+  searches?: Partial<Record<Exclude<Liste, "boamp">, readonly FamilleSearch[]>>;
   codeDepartement?: string[];
   // Sources secondaires (défaut : activées sauf ACHATPUBLIC=0 / AFD=0, et par
   // site MPE : MAXIMILIEN=0 / AMPA=0 — voir MPE_SITES).
@@ -183,7 +186,7 @@ async function loadAll(
     sources.push({
       id: "achatpublic",
       name: sourceLabel("achatpublic"),
-      run: (onPage) => scrapeAchatPublic({ searches: ACHATPUBLIC_SEARCHES, log, onPage, known }),
+      run: (onPage) => scrapeAchatPublic({ searches: opts.searches?.achatpublic ?? DEFAULT_LISTES.achatpublic, log, onPage, known }),
     });
   }
   if (opts.afd ?? isSourceEnabled("afd")) sources.push({ id: "afd", name: sourceLabel("afd"), run: (onPage) => scrapeAfd({ log, onPage, known }) });
@@ -192,7 +195,7 @@ async function loadAll(
       sources.push({
         id: site.source,
         name: sourceLabel(site.source),
-        run: (onPage) => scrapeMpe({ site, searches: MPE_SEARCHES, log, onPage, known }),
+        run: (onPage) => scrapeMpe({ site, searches: opts.searches?.mpe ?? DEFAULT_LISTES.mpe, log, onPage, known }),
       });
     }
   }
@@ -200,7 +203,7 @@ async function loadAll(
     sources.push({
       id: "marchesonline",
       name: sourceLabel("marchesonline"),
-      run: (onPage) => scrapeMarchesOnline({ searches: MARCHESONLINE_SEARCHES, log, onPage, known }),
+      run: (onPage) => scrapeMarchesOnline({ searches: opts.searches?.marchesonline ?? DEFAULT_LISTES.marchesonline, log, onPage, known }),
     });
   }
   for (const s of SOURCES) {

@@ -135,6 +135,17 @@ export const MARCHESONLINE_SEARCHES: readonly FamilleSearch[] = [
   { famille: "inondations", marche: "services", keywords: MPE_INONDATIONS },
 ];
 
+// Listes de mots-clés par moteur de recherche (src/rules.ts : LISTES), telles
+// qu'elles sont semées dans la table search_keywords au premier démarrage ;
+// ensuite la table fait foi (/configuration) et ces constantes ne servent plus
+// qu'au CLI et comme repli d'une liste absente.
+export const DEFAULT_LISTES: Record<"boamp" | "achatpublic" | "mpe" | "marchesonline", readonly FamilleSearch[]> = {
+  boamp: [{ famille: "mobilité", marche: "services", keywords: KEYWORDS.map((k) => k.replace(/^"([^"]*)"$/, "$1")) }],
+  achatpublic: ACHATPUBLIC_SEARCHES,
+  mpe: MPE_SEARCHES,
+  marchesonline: MARCHESONLINE_SEARCHES,
+};
+
 export function today(): string {
   return new Date().toISOString().slice(0, 10);
 }

@@ -9,8 +9,14 @@ import {
   validateModelChain,
   parseModelChain,
   parseDepartements,
+  searchesByListe,
+  isListe,
+  isFamille,
+  LISTES,
 } from "./rules.ts";
 import { buildApiUrl } from "./params.ts";
+import { DEFAULT_LISTES } from "./defaults.ts";
+import { SOURCES } from "./sources.ts";
 
 // Remettre une variable d'environnement : « = undefined » peut laisser la
 // chaîne « undefined » selon la version de Bun, d'où « Invalid URL » en CI.
@@ -57,6 +63,39 @@ describe("applyScopeRules", () => {
     const excl = applyScopeRules(avis("Réseau fibre"), { keep: [], exclude: ["fibre"] });
     expect(excl?.reason).toContain("règle personnalisée");
     expect(excl?.reason).toContain("fibre");
+  });
+});
+
+describe("listes de mots-clés", () => {
+  test("une recherche par famille présente, dans l'ordre des familles, nature déduite", () => {
+    const rows = [
+      { liste: "mpe" as const, famille: "inondations" as const, term: "PAPI" },
+      { liste: "mpe" as const, famille: "mobilité" as const, term: "vélo" },
+      { liste: "mpe" as const, famille: "mobilité" as const, term: "trafic" },
+      { liste: "boamp" as const, famille: "mobilité" as const, term: "mobilité" },
+    ];
+    const out = searchesByListe(rows);
+    expect(out.mpe).toEqual([
+      { famille: "mobilité", marche: "services", keywords: ["vélo", "trafic"] },
+      { famille: "inondations", marche: "services", keywords: ["PAPI"] },
+    ]);
+    expect(out.boamp).toEqual([{ famille: "mobilité", marche: "services", keywords: ["mobilité"] }]);
+    // Liste absente : pas de clé (le pipeline se replie sur defaults.ts).
+    expect(out.achatpublic).toBeUndefined();
+    expect(out.marchesonline).toBeUndefined();
+  });
+  test("les listes par défaut se reconstruisent à l'identique depuis leurs lignes", () => {
+    for (const l of LISTES) {
+      const rows = DEFAULT_LISTES[l.id].flatMap((s) => s.keywords.map((term) => ({ liste: l.id, famille: s.famille, term })));
+      expect(searchesByListe(rows)[l.id]).toEqual(DEFAULT_LISTES[l.id].map((s) => ({ ...s, keywords: [...s.keywords] })));
+    }
+  });
+  test("chaque liste alimente des sources du registre ; validation des identifiants", () => {
+    for (const l of LISTES) for (const s of l.sources) expect(SOURCES.some((x) => x.id === s)).toBe(true);
+    expect(isListe("mpe")).toBe(true);
+    expect(isListe("maximilien")).toBe(false);
+    expect(isFamille("kiomda")).toBe(true);
+    expect(isFamille("x")).toBe(false);
   });
 });
 
