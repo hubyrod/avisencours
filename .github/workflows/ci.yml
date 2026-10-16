@@ -45,7 +45,7 @@ jobs:
       # node_modules entries that left the lockfile, so a restored node_modules
       # can ship packages the lockfile no longer has.
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-cache-${{ hashFiles('bun.lock') }}
