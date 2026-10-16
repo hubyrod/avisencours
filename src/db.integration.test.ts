@@ -338,6 +338,37 @@ if (!TEST_URL) {
       await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
     });
 
+    test("pause d'un terme : jamais le dernier actif d'une liste ; journal qui survit à l'auteur", async () => {
+      await control`TRUNCATE search_keywords RESTART IDENTITY`;
+      await db.migrate();
+      const boamp = (await db.listKeywords()).filter((k) => k.liste === "boamp");
+      for (const k of boamp.slice(1)) expect(await db.setKeywordEnabled(k.id, false)).toBe(true);
+      expect(await db.setKeywordEnabled(boamp[0]!.id, false)).toBe(false);
+      expect(await db.deleteKeyword(boamp[0]!.id)).toBe(false); // les autres sont en pause
+      expect(await db.deleteKeyword(boamp[1]!.id)).toBe(true); // un terme en pause se supprime
+      expect(await db.setKeywordEnabled(boamp[2]!.id, true)).toBe(true);
+      expect(await db.setKeywordEnabled(boamp[0]!.id, false)).toBe(true);
+      expect((await db.listKeywords()).filter((k) => k.liste === "boamp" && k.enabled).map((k) => k.id)).toEqual([boamp[2]!.id]);
+      // Note à la création, relue.
+      expect(await db.addKeyword("crue", 1, "mpe", "inondations", "demandé par la direction")).toBe(true);
+      expect((await db.listKeywords()).find((k) => k.term === "crue")?.note).toBe("demandé par la direction");
+
+      await control`TRUNCATE config_events RESTART IDENTITY`;
+      const [u] = (await control`INSERT INTO users (email) VALUES ('ephemere@example.org') RETURNING id`) as Array<{ id: string }>;
+      const user = { id: Number(u!.id), email: "ephemere@example.org" };
+      await db.logConfigEvent(user, "regle", "ajout", "Règle ajoutée : toujours exclure « fibre »");
+      await db.logConfigEvent(user, "mot-cle", "pause", "Mot-clé mis en pause : « vélo » (BOAMP)");
+      let events = await db.listConfigEvents(1);
+      expect(events.map((e) => e.detail)).toEqual(["Mot-clé mis en pause : « vélo » (BOAMP)"]);
+      await control`DELETE FROM users WHERE id = ${user.id}`;
+      events = await db.listConfigEvents();
+      expect(events.length).toBe(2);
+      expect(events[1]?.user_email).toBe("ephemere@example.org");
+      expect(events[1]?.user_name).toBeNull();
+      await control`TRUNCATE search_keywords, config_events RESTART IDENTITY`;
+      await db.migrate();
+    });
+
     test("index sur last_seen_run_id et first_seen_run_id", async () => {
       const idx = (await control`SELECT indexname FROM pg_indexes WHERE tablename = 'announcements'`) as Array<{ indexname: string }>;
       const names = idx.map((i) => i.indexname);

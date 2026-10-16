@@ -39,6 +39,11 @@ import {
   listKeywords,
   addKeyword,
   deleteKeyword,
+  setKeywordEnabled,
+  setScopeRuleEnabled,
+  logConfigEvent,
+  listConfigEvents,
+  type ConfigEvent,
   listScopeRules,
   addScopeRule,
   deleteScopeRule,
@@ -203,6 +208,18 @@ const BASE_CSS = `
     .mot form { margin: 0; display: inline-flex; }
     .mot button.subtle { text-decoration: none; font-size: 14px; line-height: 1; color: var(--encre-2); }
     .mot button.subtle:hover { color: var(--rouge, #b3261e); }
+    .mot .terme { background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+    .mot .terme:hover { text-decoration: underline; text-underline-offset: 3px; }
+    .mot.inactif { opacity: .55; }
+    .mot.inactif .terme { text-decoration: line-through; }
+    .mot.inactif .terme:hover { text-decoration: line-through underline; }
+    .mot .a-note { border-bottom: 1px dotted var(--encre-2); }
+    li.inactif { color: var(--encre-2); }
+    li.inactif > span:first-child { text-decoration: line-through; }
+    .journal { list-style: none; padding: 0; margin: 8px 0 0; font-size: 13px; }
+    .journal li { display: flex; gap: 10px; padding: 5px 0; border-top: 1px solid var(--ligne); flex-wrap: wrap; }
+    .journal .quand { font-family: var(--fonte-mono); font-size: 11.5px; color: var(--encre-2); white-space: nowrap; }
+    .journal .qui { color: var(--encre-2); }
     .liste-mots { border-top: 1px solid var(--ligne); padding-top: 10px; margin-top: 12px; }
     .liste-mots h3 { margin: 0 0 2px; font-size: 14px; }
     .badge-statut { display: inline-flex; align-items: center; gap: 5px; background: #f1f3f0; border: 1px solid var(--ligne); color: var(--encre-2); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
@@ -808,7 +825,13 @@ function keywordListe(l: (typeof LISTES)[number], keywords: KeywordRow[]): strin
       : `<ul class="mots">${rows
           .map(
             (k) => `
-          <li class="mot"><span>${esc(k.term)}</span>
+          <li class="mot${k.enabled ? "" : " inactif"}">
+            <form method="post" action="/configuration/mots-cles/activer">
+              <input type="hidden" name="id" value="${k.id}">
+              <input type="hidden" name="valeur" value="${k.enabled ? "0" : "1"}">
+              <button class="terme${k.note ? " a-note" : ""}" type="submit"
+                title="${esc(k.note ? `${k.note} — ` : "")}${k.enabled ? "Actif : cliquer pour mettre en pause" : "En pause : cliquer pour réactiver"}">${esc(k.term)}</button>
+            </form>
             <form method="post" action="/configuration/mots-cles/supprimer">
               <input type="hidden" name="id" value="${k.id}">
               <button class="subtle" type="submit" title="Supprimer « ${esc(k.term)} »" aria-label="Supprimer ${esc(k.term)}">×</button>
@@ -832,6 +855,7 @@ function keywordListe(l: (typeof LISTES)[number], keywords: KeywordRow[]): strin
         <h3>${esc(l.label)}</h3>
         <p class="meta">${esc(l.description)} Alimente : ${l.sources.map((s) => esc(sourceLabel(s))).join(", ")}.</p>
         ${parFamille}
+        <p class="meta" style="margin:0 0 4px;">Cliquer un terme le met en pause (barré) ou le réactive ; × le supprime.</p>
         <form method="post" action="/configuration/mots-cles/ajouter" style="margin-top:8px;">
           <input type="hidden" name="liste" value="${l.id}">
           <label for="kw-terme-${l.id}">Nouveau terme — ${esc(l.label)}</label>
@@ -839,9 +863,30 @@ function keywordListe(l: (typeof LISTES)[number], keywords: KeywordRow[]): strin
             ${familleSelect}
             <input type="text" id="kw-terme-${l.id}" name="terme" required maxlength="80"
                    placeholder="ex. covoiturage" style="flex:1;min-width:160px;">
+            <input type="text" name="note" maxlength="200" placeholder="note (facultatif)" style="flex:1;min-width:160px;"
+                   aria-label="Note">
             <button class="primary" type="submit">Ajouter</button>
           </div>
         </form>
+      </div>`;
+}
+
+// Journal des modifications de la configuration (config_events), les plus
+// récentes d'abord, sous les deux onglets.
+function renderJournalCard(events: ConfigEvent[]): string {
+  const rows = events
+    .map(
+      (e) => `
+        <li><span class="quand">${esc(frDateTime(new Date(e.created_at)))}</span>
+          <span class="qui">${esc(e.user_name || e.user_email)}</span>
+          <span>${esc(e.detail)}</span></li>`,
+    )
+    .join("");
+  return `
+      <div class="card large" id="carte-journal">
+        <h2>Journal des modifications</h2>
+        <p class="effet">Qui a changé quoi</p>
+        ${rows ? `<ul class="journal">${rows}</ul>` : `<p>Aucune modification enregistrée pour l'instant.</p>`}
       </div>`;
 }
 
@@ -854,13 +899,20 @@ function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude", hits: Map<num
     .filter((r) => r.kind === kind)
     .map(
       (r) => `
-        <li style="display:flex;align-items:center;gap:8px;margin:4px 0;">
+        <li class="${r.enabled ? "" : "inactif"}" style="display:flex;align-items:center;gap:8px;margin:4px 0;flex-wrap:wrap;">
           <span>${esc(r.term)}</span>
+          ${r.note ? `<span class="meta" style="margin:0;">— ${esc(r.note)}</span>` : ""}
+          ${r.enabled ? "" : `<span class="meta" style="margin:0;">(en pause)</span>`}
           ${
             hasRun
               ? `<a class="meta" href="${esc(essaiUrl(kind, r.term))}" style="margin:0;">${hits.get(r.id) ?? 0} avis en cours</a>`
               : ""
           }
+          <form method="post" action="/configuration/regles/activer" style="margin:0;">
+            <input type="hidden" name="id" value="${r.id}">
+            <input type="hidden" name="valeur" value="${r.enabled ? "0" : "1"}">
+            <button class="subtle" type="submit">${r.enabled ? "mettre en pause" : "réactiver"}</button>
+          </form>
           <form method="post" action="/configuration/regles/supprimer" style="margin:0;">
             <input type="hidden" name="id" value="${r.id}">
             <button class="subtle" type="submit">Supprimer</button>
@@ -893,7 +945,7 @@ async function configPage(
   onglet: Onglet,
   notice?: { kind: "ok" | "error"; text: string },
 ): Promise<Response> {
-  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun0, lastSuccess, catalog, credit, settings] =
+  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun0, lastSuccess, catalog, credit, settings, journal] =
     await Promise.all([
       listKeywords(),
       listScopeRules(),
@@ -906,6 +958,7 @@ async function configPage(
       onglet === "moteur" ? fetchCatalog() : Promise.resolve(null),
       onglet === "moteur" ? fetchKeyCredit() : Promise.resolve(null),
       onglet === "moteur" ? listSettings() : Promise.resolve({} as Record<string, string>),
+      listConfigEvents(30),
     ]);
   const sourceCounts = onglet === "moteur" && lastSuccess ? await countCurrentBySource(lastSuccess.id) : [];
   // Onglet Résultats : combien d'avis en cours chaque règle touche (estimation SQL).
@@ -944,6 +997,7 @@ async function configPage(
       ${tabs}
       ${banner}
       ${contenu}
+      ${renderJournalCard(journal)}
     </main>`,
     ),
   );
@@ -1010,6 +1064,8 @@ function renderOngletResultats(d: {
             </select>
             <input type="text" id="regle-terme" name="terme" required maxlength="120"
                    placeholder="ex. fibre optique" style="flex:1;min-width:160px;">
+            <input type="text" name="note" maxlength="200" placeholder="note (facultatif)" style="flex:1;min-width:160px;"
+                   aria-label="Note">
             ${d.hasRun ? `<button type="submit" formmethod="get" formaction="/configuration/essai">Tester</button>` : ""}
             <button class="primary" type="submit">Ajouter</button>
           </div>
@@ -1127,42 +1183,95 @@ async function handleConfigHome(_req: Request, url: URL, user: AuthUser): Promis
 }
 
 async function handleKeywordAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { terme = "", liste = "boamp", famille = "mobilité" } = await form(req);
+  const { terme = "", liste = "boamp", famille = "mobilité", note = "" } = await form(req);
   const fail = (text: string) => configPage(user, "resultats", { kind: "error", text });
   if (!isListe(liste) || !isFamille(famille)) return fail("Requête invalide.");
   const info = LISTES.find((l) => l.id === liste)!;
   if (!info.familles && famille !== "mobilité") return fail("Requête invalide.");
   const v = validateKeyword(terme);
   if (!v.ok) return fail(v.error);
-  const added = await addKeyword(v.value, user.id, liste, famille);
+  const added = await addKeyword(v.value, user.id, liste, famille, noteValue(note));
   if (!added) return fail(`Ce terme figure déjà dans la liste ${info.label} (${FAMILLE_LABELS[famille]}).`);
+  await logConfigEvent(user, "mot-cle", "ajout", `Mot-clé ajouté : « ${v.value} » (${info.label}${info.familles ? `, ${FAMILLE_LABELS[famille]}` : ""})${noteValue(note) ? ` — ${noteValue(note)}` : ""}`);
   return redirect(configUrl("resultats", `mots-cles-${liste}`), 303);
+}
+
+// Note facultative d'un terme ou d'une règle : vide = aucune.
+function noteValue(raw: string): string | null {
+  const n = raw.trim().slice(0, 200);
+  return n.length > 0 ? n : null;
+}
+
+function keywordLabel(k: KeywordRow): string {
+  const info = LISTES.find((l) => l.id === k.liste);
+  return `« ${k.term} » (${info?.label ?? k.liste}${info?.familles ? `, ${FAMILLE_LABELS[k.famille]}` : ""})`;
+}
+
+async function handleKeywordToggle(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { id = "", valeur = "" } = await form(req);
+  const kid = Number(id);
+  if (!Number.isInteger(kid) || (valeur !== "0" && valeur !== "1")) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
+  const row = (await listKeywords()).find((k) => k.id === kid);
+  if (!row) return configPage(user, "resultats", { kind: "error", text: "Mot-clé introuvable." });
+  const enabled = valeur === "1";
+  if (row.enabled !== enabled) {
+    const ok = await setKeywordEnabled(kid, enabled);
+    if (!ok) {
+      return configPage(user, "resultats", {
+        kind: "error",
+        text: "Impossible de mettre en pause le dernier terme actif d'une liste : pour ne plus lire une source, désactivez-la dans l'onglet Moteur.",
+      });
+    }
+    await logConfigEvent(user, "mot-cle", enabled ? "activation" : "pause", `Mot-clé ${enabled ? "réactivé" : "mis en pause"} : ${keywordLabel(row)}`);
+  }
+  return redirect(configUrl("resultats", `mots-cles-${row.liste}`), 303);
 }
 
 async function handleKeywordDelete(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { id = "" } = await form(req);
   const kid = Number(id);
   if (!Number.isInteger(kid)) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
-  const liste: Liste = (await listKeywords()).find((k) => k.id === kid)?.liste ?? "boamp";
+  const row = (await listKeywords()).find((k) => k.id === kid);
+  const liste: Liste = row?.liste ?? "boamp";
   const deleted = await deleteKeyword(kid);
   if (!deleted) {
     return configPage(user, "resultats", {
       kind: "error",
-      text: "Impossible de supprimer le dernier terme d'une liste : pour ne plus lire une source, désactivez-la dans l'onglet Moteur.",
+      text: "Impossible de supprimer le dernier terme actif d'une liste : pour ne plus lire une source, désactivez-la dans l'onglet Moteur.",
     });
   }
+  if (row) await logConfigEvent(user, "mot-cle", "suppression", `Mot-clé supprimé : ${keywordLabel(row)}`);
   return redirect(configUrl("resultats", `mots-cles-${liste}`), 303);
 }
 
 async function handleRuleAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { kind = "", terme = "" } = await form(req);
+  const { kind = "", terme = "", note = "" } = await form(req);
   if (kind !== "keep" && kind !== "exclude") {
     return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
   }
   const v = validateRuleTerm(terme);
   if (!v.ok) return configPage(user, "resultats", { kind: "error", text: v.error });
-  const added = await addScopeRule(kind, v.value, user.id);
+  const added = await addScopeRule(kind, v.value, user.id, noteValue(note));
   if (!added) return configPage(user, "resultats", { kind: "error", text: "Cette règle existe déjà." });
+  await logConfigEvent(user, "regle", "ajout", `Règle ajoutée : ${ruleLabel(kind, v.value)}${noteValue(note) ? ` — ${noteValue(note)}` : ""}`);
+  return redirect(configUrl("resultats", "regles"), 303);
+}
+
+function ruleLabel(kind: "keep" | "exclude", term: string): string {
+  return `${kind === "keep" ? "toujours garder" : "toujours exclure"} « ${term} »`;
+}
+
+async function handleRuleToggle(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { id = "", valeur = "" } = await form(req);
+  const rid = Number(id);
+  if (!Number.isInteger(rid) || (valeur !== "0" && valeur !== "1")) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
+  const row = (await listScopeRules()).find((r) => r.id === rid);
+  if (!row) return configPage(user, "resultats", { kind: "error", text: "Règle introuvable." });
+  const enabled = valeur === "1";
+  if (row.enabled !== enabled) {
+    await setScopeRuleEnabled(rid, enabled);
+    await logConfigEvent(user, "regle", enabled ? "activation" : "pause", `Règle ${enabled ? "réactivée" : "mise en pause"} : ${ruleLabel(row.kind, row.term)}`);
+  }
   return redirect(configUrl("resultats", "regles"), 303);
 }
 
@@ -1184,9 +1293,10 @@ async function handleRuleTest(_req: Request, url: URL, user: AuthUser): Promise<
   }
   const [existing, candidates] = await Promise.all([listScopeRules(), findCurrentMatching(lastSuccess.id, normalize(v.value))]);
   const alone = { keep: kind === "keep" ? [v.value] : [], exclude: kind === "exclude" ? [v.value] : [] };
+  const active = existing.filter((r) => r.enabled);
   const withNew = {
-    keep: [...existing.filter((r) => r.kind === "keep").map((r) => r.term), ...alone.keep],
-    exclude: [...existing.filter((r) => r.kind === "exclude").map((r) => r.term), ...alone.exclude],
+    keep: [...active.filter((r) => r.kind === "keep").map((r) => r.term), ...alone.keep],
+    exclude: [...active.filter((r) => r.kind === "exclude").map((r) => r.term), ...alone.exclude],
   };
   const rows = candidates
     .filter((c) => applyScopeRules(c, alone) !== null)
@@ -1245,7 +1355,9 @@ async function handleRuleDelete(req: Request, _url: URL, user: AuthUser): Promis
   const { id = "" } = await form(req);
   const rid = Number(id);
   if (!Number.isInteger(rid)) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
+  const row = (await listScopeRules()).find((r) => r.id === rid);
   await deleteScopeRule(rid);
+  if (row) await logConfigEvent(user, "regle", "suppression", `Règle supprimée : ${ruleLabel(row.kind, row.term)}`);
   return redirect(configUrl("resultats", "regles"), 303);
 }
 
@@ -1302,9 +1414,27 @@ async function handleSettingsUpdate(req: Request, _url: URL, user: AuthUser): Pr
     }
   }
 
-  for (const [key, value] of writes) await setSetting(key, value, user.id);
+  for (const [key, value] of writes) {
+    await setSetting(key, value, user.id);
+    await logConfigEvent(user, "reglage", "modification", settingChangeLabel(key, value));
+  }
   if (catalogNotice) return configPage(user, onglet, { kind: "ok", text: `Réglages enregistrés. ${catalogNotice}` });
   return redirect(configUrl(onglet, carte), 303);
+}
+
+const SETTING_LABELS: Record<string, string> = {
+  digest_window_days: "Fenêtre des échéances rappelées",
+  code_departements: "Périmètre géographique",
+  classifier_mode: "Classifieur",
+  llm_models: "Modèles LLM",
+};
+
+function settingChangeLabel(key: string, value: string | null): string {
+  const label = SETTING_LABELS[key] ?? key;
+  if (value === null) return `${label} : retour à la valeur par défaut`;
+  if (key === "digest_window_days") return `${label} : ${value} jours`;
+  if (key === "classifier_mode") return `${label} : ${CLASSIFIER_LABELS.find(([v]) => v === value)?.[1] ?? value}`;
+  return `${label} : ${value}`;
 }
 
 // Le suffixe :floor / :nitro n'est pas un modèle distinct au catalogue.
@@ -1375,6 +1505,7 @@ async function handleSourceToggle(req: Request, _url: URL, user: AuthUser): Prom
   if (!isSource(id) || id === "boamp" || (valeur !== "0" && valeur !== "1")) return fail("Requête invalide.");
   if (sourceDisabledBy(id, Bun.env, {}) === "env") return fail(`${sourceLabel(id)} est coupée sur le serveur : seul l'hébergeur peut la rallumer.`);
   await setSetting(sourceSettingKey(id), valeur === "0" ? "0" : null, user.id);
+  await logConfigEvent(user, "source", valeur === "0" ? "pause" : "activation", `Source ${valeur === "0" ? "désactivée" : "réactivée"} : ${sourceLabel(id)}`);
   return redirect(configUrl("moteur", "sources"), 303);
 }
 
@@ -2410,6 +2541,8 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
   { method: "GET", path: "/configuration", access: "config", handler: (req, url, user) => handleConfigHome(req, url, user!) },
   { method: "POST", path: "/configuration/mots-cles/ajouter", access: "config", handler: (req, url, user) => handleKeywordAdd(req, url, user!) },
   { method: "POST", path: "/configuration/mots-cles/supprimer", access: "config", handler: (req, url, user) => handleKeywordDelete(req, url, user!) },
+  { method: "POST", path: "/configuration/mots-cles/activer", access: "config", handler: (req, url, user) => handleKeywordToggle(req, url, user!) },
+  { method: "POST", path: "/configuration/regles/activer", access: "config", handler: (req, url, user) => handleRuleToggle(req, url, user!) },
   { method: "POST", path: "/configuration/regles/ajouter", access: "config", handler: (req, url, user) => handleRuleAdd(req, url, user!) },
   { method: "POST", path: "/configuration/regles/supprimer", access: "config", handler: (req, url, user) => handleRuleDelete(req, url, user!) },
   { method: "GET", path: "/configuration/essai", access: "config", handler: (req, url, user) => handleRuleTest(req, url, user!) },

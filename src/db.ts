@@ -176,6 +176,10 @@ export async function migrate(): Promise<void> {
   await sql`ALTER TABLE search_keywords ADD COLUMN IF NOT EXISTS famille text NOT NULL DEFAULT 'mobilité'`;
   await sql`ALTER TABLE search_keywords DROP CONSTRAINT IF EXISTS search_keywords_term_key`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS search_keywords_liste_famille_term ON search_keywords (liste, famille, term)`;
+  // Un terme ou une règle se met en pause sans être perdu (enabled) et porte
+  // une note (pourquoi il est là).
+  await sql`ALTER TABLE search_keywords ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true`;
+  await sql`ALTER TABLE search_keywords ADD COLUMN IF NOT EXISTS note text`;
   await sql`
     CREATE TABLE IF NOT EXISTS scope_rules (
       id         bigserial PRIMARY KEY,
@@ -184,6 +188,21 @@ export async function migrate(): Promise<void> {
       created_by bigint REFERENCES users(id) ON DELETE SET NULL,
       created_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE (kind, term)
+    )`;
+  await sql`ALTER TABLE scope_rules ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true`;
+  await sql`ALTER TABLE scope_rules ADD COLUMN IF NOT EXISTS note text`;
+  // Journal des modifications de la configuration (qui a changé quoi, quand) :
+  // lignes ajoutées seulement, l'email est recopié pour survivre à la
+  // suppression du compte.
+  await sql`
+    CREATE TABLE IF NOT EXISTS config_events (
+      id         bigserial PRIMARY KEY,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      user_id    bigint REFERENCES users(id) ON DELETE SET NULL,
+      user_email text NOT NULL,
+      kind       text NOT NULL,
+      action     text NOT NULL,
+      detail     text NOT NULL
     )`;
   await sql`
     CREATE TABLE IF NOT EXISTS settings (
@@ -898,47 +917,76 @@ export async function getUpcomingDeadlines(runId: number, days: number): Promise
 // Même philosophie que les statuts : lignes éditables par petites actions POST,
 // lues par le job quotidien (src/run.ts) au démarrage de chaque run.
 
-export type KeywordRow = { id: number; term: string; position: number; liste: Liste; famille: Famille };
-export type ScopeRuleRow = { id: number; kind: "keep" | "exclude"; term: string };
+export type KeywordRow = {
+  id: number;
+  term: string;
+  position: number;
+  liste: Liste;
+  famille: Famille;
+  enabled: boolean;
+  note: string | null;
+};
+export type ScopeRuleRow = { id: number; kind: "keep" | "exclude"; term: string; enabled: boolean; note: string | null };
 
 export async function listKeywords(): Promise<KeywordRow[]> {
-  const rows = await db()`SELECT id, term, position, liste, famille FROM search_keywords ORDER BY liste, famille, position, id`;
-  return rows.map((r: { id: unknown; term: string; position: number; liste: Liste; famille: Famille }) => ({
+  const rows = await db()`SELECT id, term, position, liste, famille, enabled, note FROM search_keywords ORDER BY liste, famille, position, id`;
+  return rows.map((r: { id: unknown; term: string; position: number; liste: Liste; famille: Famille; enabled: boolean; note: string | null }) => ({
     id: Number(r.id),
     term: r.term,
     position: r.position,
     liste: r.liste,
     famille: r.famille,
+    enabled: r.enabled,
+    note: r.note,
   }));
 }
 
-export async function addKeyword(term: string, userId: number, liste: Liste = "boamp", famille: Famille = "mobilité"): Promise<boolean> {
+export async function addKeyword(
+  term: string,
+  userId: number,
+  liste: Liste = "boamp",
+  famille: Famille = "mobilité",
+  note: string | null = null,
+): Promise<boolean> {
   const rows = await db()`
-    INSERT INTO search_keywords (term, position, liste, famille, created_by)
-    VALUES (${term}, (SELECT COALESCE(max(position), 0) + 10 FROM search_keywords WHERE liste = ${liste}), ${liste}, ${famille}, ${userId})
+    INSERT INTO search_keywords (term, position, liste, famille, note, created_by)
+    VALUES (${term}, (SELECT COALESCE(max(position), 0) + 10 FROM search_keywords WHERE liste = ${liste}), ${liste}, ${famille}, ${note}, ${userId})
     ON CONFLICT (liste, famille, term) DO NOTHING
     RETURNING id`;
   return rows.length > 0;
 }
 
-// Refuse de supprimer le dernier mot-clé d'une liste : pour BOAMP, une requête
-// vide reviendrait à récupérer tous les avis ouverts ; pour les autres, la
-// liste serait resemée au prochain démarrage. Couper une source se fait depuis
-// la carte des sources.
+// Une liste garde toujours au moins un terme actif : pour BOAMP, une requête
+// vide reviendrait à récupérer tous les avis ouverts ; pour les autres, une
+// liste vide serait resemée au prochain démarrage. Couper une source se fait
+// depuis la carte des sources. D'où le refus de supprimer ou de désactiver le
+// dernier terme actif d'une liste (retour false).
 export async function deleteKeyword(id: number): Promise<boolean> {
   const rows = await db()`
     DELETE FROM search_keywords k
-    WHERE k.id = ${id} AND (SELECT count(*) FROM search_keywords WHERE liste = k.liste) > 1
+    WHERE k.id = ${id}
+      AND EXISTS (SELECT 1 FROM search_keywords o WHERE o.liste = k.liste AND o.enabled AND o.id <> k.id)
+    RETURNING id`;
+  return rows.length > 0;
+}
+
+export async function setKeywordEnabled(id: number, enabled: boolean): Promise<boolean> {
+  const rows = await db()`
+    UPDATE search_keywords k SET enabled = ${enabled}
+    WHERE k.id = ${id}
+      AND (${enabled} OR EXISTS (SELECT 1 FROM search_keywords o WHERE o.liste = k.liste AND o.enabled AND o.id <> k.id))
     RETURNING id`;
   return rows.length > 0;
 }
 
 export async function listScopeRules(): Promise<ScopeRuleRow[]> {
-  const rows = await db()`SELECT id, kind, term FROM scope_rules ORDER BY kind, term, id`;
-  return rows.map((r: { id: unknown; kind: "keep" | "exclude"; term: string }) => ({
+  const rows = await db()`SELECT id, kind, term, enabled, note FROM scope_rules ORDER BY kind, term, id`;
+  return rows.map((r: { id: unknown; kind: "keep" | "exclude"; term: string; enabled: boolean; note: string | null }) => ({
     id: Number(r.id),
     kind: r.kind,
     term: r.term,
+    enabled: r.enabled,
+    note: r.note,
   }));
 }
 
@@ -946,10 +994,11 @@ export async function addScopeRule(
   kind: "keep" | "exclude",
   term: string,
   userId: number,
+  note: string | null = null,
 ): Promise<boolean> {
   const rows = await db()`
-    INSERT INTO scope_rules (kind, term, created_by)
-    VALUES (${kind}, ${term}, ${userId})
+    INSERT INTO scope_rules (kind, term, note, created_by)
+    VALUES (${kind}, ${term}, ${note}, ${userId})
     ON CONFLICT (kind, term) DO NOTHING
     RETURNING id`;
   return rows.length > 0;
@@ -957,6 +1006,43 @@ export async function addScopeRule(
 
 export async function deleteScopeRule(id: number): Promise<void> {
   await db()`DELETE FROM scope_rules WHERE id = ${id}`;
+}
+
+export async function setScopeRuleEnabled(id: number, enabled: boolean): Promise<void> {
+  await db()`UPDATE scope_rules SET enabled = ${enabled} WHERE id = ${id}`;
+}
+
+// --- Journal des modifications de la configuration ------------------------
+
+export type ConfigEvent = {
+  id: number;
+  created_at: Date;
+  user_email: string;
+  user_name: string | null;
+  kind: string;
+  action: string;
+  detail: string;
+};
+
+export async function logConfigEvent(
+  user: { id: number; email: string },
+  kind: string,
+  action: string,
+  detail: string,
+): Promise<void> {
+  await db()`
+    INSERT INTO config_events (user_id, user_email, kind, action, detail)
+    VALUES (${user.id}, ${user.email}, ${kind}, ${action}, ${detail})`;
+}
+
+export async function listConfigEvents(limit = 30): Promise<ConfigEvent[]> {
+  const rows = await db()`
+    SELECT e.id, e.created_at, e.user_email, u.name AS user_name, e.kind, e.action, e.detail
+    FROM config_events e
+    LEFT JOIN users u ON u.id = e.user_id
+    ORDER BY e.id DESC
+    LIMIT ${limit}`;
+  return (rows as Array<ConfigEvent & { id: unknown }>).map((r) => ({ ...r, id: Number(r.id) }));
 }
 
 // --- Essai d'une règle de tri sur les avis en cours ------------------------

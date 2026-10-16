@@ -118,7 +118,12 @@ async function main() {
   try {
     // Configuration éditable (/configuration) — lue ici, dans le try, pour
     // qu'un échec de lecture passe par le circuit erreur + email d'alerte.
-    const [keywords, ruleRows, settings] = await Promise.all([listKeywords(), listScopeRules(), listSettings()]);
+    // Termes et règles mis en pause (/configuration) : ignorés, pas perdus.
+    const [keywords, ruleRows, settings] = await Promise.all([
+      listKeywords().then((rows) => rows.filter((k) => k.enabled)),
+      listScopeRules().then((rows) => rows.filter((r) => r.enabled)),
+      listSettings(),
+    ]);
     const windowSetting = settings.digest_window_days ?? null;
     const classifierSetting = settings.classifier_mode ?? null;
     const depSetting = settings.code_departements ?? null;

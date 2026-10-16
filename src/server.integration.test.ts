@@ -17,6 +17,10 @@ if (!TEST_URL) {
   test.skip("server.integration — TEST_DATABASE_URL absent", () => {});
 } else {
   const control = new SQL(TEST_URL);
+  // Pour resemer les mots-clés après un test qui les vide (le serveur ne migre
+  // qu'au démarrage).
+  Bun.env.POSTGRESQL_ADDON_URI = TEST_URL;
+  const dbModule = await import("./db.ts");
   let proc: ReturnType<typeof Bun.spawn> | null = null;
   let stderr = "";
   let cookie = "";
@@ -249,6 +253,7 @@ if (!TEST_URL) {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("dernier terme");
     await control`TRUNCATE search_keywords RESTART IDENTITY`;
+    await dbModule.migrate();
   });
 
   test("essai d'une règle de tri sur les avis en cours, compte par règle", async () => {
@@ -294,6 +299,54 @@ if (!TEST_URL) {
     expect((await post("/configuration/sources", { id: "boamp", valeur: "0" })).status).toBe(200);
     expect((await post("/configuration/sources", { id: "x", valeur: "0" })).status).toBe(200);
     expect((await control`SELECT count(*)::int AS n FROM settings`) as unknown[]).toEqual([{ n: 0 }]);
+  });
+
+  test("pause et notes sur mots-clés et règles, journal des modifications", async () => {
+    await control`TRUNCATE config_events RESTART IDENTITY`;
+    const velo = ((await control`SELECT id FROM search_keywords WHERE liste = 'boamp' AND term = 'vélo'`) as Array<{ id: string }>)[0]!;
+    let res = await post("/configuration/mots-cles/activer", { id: velo.id, valeur: "0" });
+    expect(res.status).toBe(303);
+    let page = await get("/configuration");
+    expect(page.text).toContain('class="mot inactif"');
+    expect(page.text).toContain("En pause : cliquer pour réactiver");
+    // Dernier terme actif de la liste BOAMP : refus.
+    await control`UPDATE search_keywords SET enabled = false WHERE liste = 'boamp' AND term <> 'mobilité'`;
+    const mob = ((await control`SELECT id FROM search_keywords WHERE liste = 'boamp' AND term = 'mobilité'`) as Array<{ id: string }>)[0]!;
+    res = await post("/configuration/mots-cles/activer", { id: mob.id, valeur: "0" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("dernier terme actif");
+    await control`UPDATE search_keywords SET enabled = true`;
+
+    // Règle avec note, mise en pause : affichée barrée, ignorée par l'essai.
+    res = await post("/configuration/regles/ajouter", { kind: "keep", terme: "papi", note: "études AMC voulues" });
+    expect(res.status).toBe(303);
+    const regle = ((await control`SELECT id FROM scope_rules WHERE term = 'papi'`) as Array<{ id: string }>)[0]!;
+    page = await get("/configuration");
+    expect(page.text).toContain("— études AMC voulues");
+    expect(page.text).toContain(">mettre en pause<");
+    res = await post("/configuration/regles/activer", { id: regle.id, valeur: "0" });
+    expect(res.status).toBe(303);
+    page = await get("/configuration");
+    expect(page.text).toContain("(en pause)");
+    expect(page.text).toContain(">réactiver<");
+    page = await get("/configuration/essai?kind=exclude&terme=PAPI");
+    expect(page.text).toContain("<strong>1</strong> changerait de catégorie"); // la règle « garder » en pause ne protège plus
+
+    // Journal : les plus récentes d'abord, auteur et détail.
+    page = await get("/configuration");
+    expect(page.text).toContain("Journal des modifications");
+    const journal = page.text.slice(page.text.indexOf('id="carte-journal"'));
+    expect(journal.indexOf("Règle mise en pause : toujours garder « papi »")).toBeLessThan(journal.indexOf("Règle ajoutée : toujours garder « papi » — études AMC voulues"));
+    expect(journal).toContain("Mot-clé mis en pause : « vélo » (BOAMP)");
+    expect(journal).toContain("admin@example.org");
+    await post("/configuration/reglages", { fenetre: "21" });
+    await post("/configuration/sources", { id: "afd", valeur: "0" });
+    page = await get("/configuration?onglet=moteur");
+    expect(page.text).toContain("Fenêtre des échéances rappelées : 21 jours");
+    expect(page.text).toContain("Source désactivée : AFD (dgMarket)");
+    await control`DELETE FROM scope_rules`;
+    await control`DELETE FROM settings`;
+    await control`TRUNCATE config_events RESTART IDENTITY`;
   });
 
   test("réglages : chaque carte n'écrit que ses champs et revient sur son onglet", async () => {
