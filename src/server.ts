@@ -1,5 +1,5 @@
 import { FAMILLES, FAMILLE_LABELS, type Famille } from "./familles.ts";
-import { SOURCES, isSource, isSourceEnabled, sourceLabel, type SourceInfo } from "./sources.ts";
+import { SOURCES, isSource, sourceDisabledBy, sourceLabel, sourceSettingKey, type SourceInfo } from "./sources.ts";
 import { decouperRaw, structurerTexte, type TexteStructure } from "./avis-texte.ts";
 import { errMessage } from "./http.ts";
 import { formatCounter, formatDuration, progressPercent, summarizeProgress, type RunProgress } from "./progress.ts";
@@ -43,6 +43,7 @@ import {
   addScopeRule,
   deleteScopeRule,
   getSetting,
+  listSettings,
   setSetting,
   type StoredAnnouncement,
   type RunRow,
@@ -600,16 +601,29 @@ function classifierLabel(c: string | null | undefined): string | null {
 // Liste des sources de veille : ce qui est lu, activation (variable
 // d'environnement), avis en cours par source dans la dernière mise à jour
 // réussie, et signalement d'une source en échec (avertissement du dernier run).
-function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null): string {
+function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null, settings: Record<string, string>): string {
   const rows = SOURCES.map((s: SourceInfo) => {
-    const enabled = isSourceEnabled(s.id);
+    const disabledBy = sourceDisabledBy(s.id, Bun.env, settings);
+    const enabled = disabledBy === null;
     const n = (cat: string) => counts.find((c) => c.source === s.id && c.category === cat)?.count ?? 0;
     const failed = enabled && !!lastRun?.warning && lastRun.warning.includes(s.label);
-    const etat = !enabled
-      ? `<span class="badge-statut" title="${esc(s.env ?? "")}=0 sur le serveur"><span class="dot" style="background:#9a9a9a"></span><span class="lbl">désactivée</span></span>`
-      : failed
-        ? `<span class="badge-statut" title="Voir l'avertissement de la dernière mise à jour"><span class="dot" style="background:var(--ambre)"></span><span class="lbl">en échec</span></span>`
-        : `<span class="badge-statut"><span class="dot" style="background:var(--vert)"></span><span class="lbl">active</span></span>`;
+    const etat =
+      disabledBy === "env"
+        ? `<span class="badge-statut" title="${esc(s.env ?? "")}=0 sur le serveur : seul l'hébergeur peut la rallumer"><span class="dot" style="background:#9a9a9a"></span><span class="lbl">coupée sur le serveur</span></span>`
+        : disabledBy === "reglage"
+          ? `<span class="badge-statut"><span class="dot" style="background:#9a9a9a"></span><span class="lbl">désactivée</span></span>`
+          : failed
+            ? `<span class="badge-statut" title="Voir l'avertissement de la dernière mise à jour"><span class="dot" style="background:var(--ambre)"></span><span class="lbl">en échec</span></span>`
+            : `<span class="badge-statut"><span class="dot" style="background:var(--vert)"></span><span class="lbl">active</span></span>`;
+    // BOAMP (source principale) et une source coupée par le serveur n'ont pas d'interrupteur.
+    const bouton =
+      s.env && disabledBy !== "env"
+        ? `<form method="post" action="/configuration/sources" style="margin:0;display:inline;">
+            <input type="hidden" name="id" value="${s.id}">
+            <input type="hidden" name="valeur" value="${enabled ? "0" : "1"}">
+            <button class="subtle" type="submit">${enabled ? "désactiver" : "réactiver"}</button>
+          </form>`
+        : "";
     return `
       <tr>
         <td>
@@ -617,7 +631,7 @@ function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null): strin
           <div class="meta" style="color:var(--encre-2);font-size:12.5px;margin-top:2px;">${esc(s.description)}</div>
         </td>
         <td style="white-space:nowrap;text-align:right;vertical-align:top;">
-          ${etat}
+          ${etat} ${bouton}
           <div class="meta" style="color:var(--encre-2);font-size:12px;margin-top:4px;">
             <a href="/?source=${s.id}">${n("relevant")} pertinent${n("relevant") > 1 ? "s" : ""}</a> · ${n("travaux")} travaux · ${n("excluded")} exclu${n("excluded") > 1 ? "s" : ""}
           </div>
@@ -629,10 +643,11 @@ function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null): strin
         <h2>Sources de veille</h2>
         <p class="effet">Ne change pas le périmètre, seulement où la veille lit</p>
         <p style="color:var(--encre-2);font-size:13.5px;">
-          Chaque mise à jour lit ces sites l'un après l'autre. Une source en panne n'empêche pas
+          Chaque mise à jour lit ces sites en même temps. Une source en panne n'empêche pas
           les autres : elle est signalée ici et par email, et ses avis restent affichés jusqu'à
           la prochaine lecture réussie. Les comptes sont ceux de la dernière mise à jour réussie.
-          Une source se coupe côté serveur avec sa variable d'environnement à 0.
+          Une source désactivée est sautée à la prochaine mise à jour ; ses avis déjà trouvés
+          restent affichés jusqu'à leur échéance. BOAMP, source principale, ne se coupe pas.
         </p>
         <table><tbody>${rows}</tbody></table>
       </div>`;
@@ -878,7 +893,7 @@ async function configPage(
   onglet: Onglet,
   notice?: { kind: "ok" | "error"; text: string },
 ): Promise<Response> {
-  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun0, lastSuccess, catalog, credit] =
+  const [keywords, rules, fenetre, classifieur, departements, modeles, lastRun0, lastSuccess, catalog, credit, settings] =
     await Promise.all([
       listKeywords(),
       listScopeRules(),
@@ -890,6 +905,7 @@ async function configPage(
       getLastSuccessfulRun(),
       onglet === "moteur" ? fetchCatalog() : Promise.resolve(null),
       onglet === "moteur" ? fetchKeyCredit() : Promise.resolve(null),
+      onglet === "moteur" ? listSettings() : Promise.resolve({} as Record<string, string>),
     ]);
   const sourceCounts = onglet === "moteur" && lastSuccess ? await countCurrentBySource(lastSuccess.id) : [];
   // Onglet Résultats : combien d'avis en cours chaque règle touche (estimation SQL).
@@ -916,7 +932,7 @@ async function configPage(
 
   const contenu = onglet === "resultats"
     ? renderOngletResultats({ keywords, rules, ruleHits, hasRun: !!lastSuccess, fenetre, departements, running })
-    : renderOngletMoteur({ classifieur, modeles, catalog, credit, lastRun, running, runLine, sourceCounts });
+    : renderOngletMoteur({ classifieur, modeles, catalog, credit, lastRun, running, runLine, sourceCounts, settings });
 
   return html(
     layout(
@@ -1040,6 +1056,7 @@ function renderOngletMoteur(d: {
   running: boolean;
   runLine: string;
   sourceCounts: SourceCount[];
+  settings: Record<string, string>;
 }): string {
   const defaultMode = effectiveClassifierDefault();
   const modeOptions = CLASSIFIER_LABELS.map(
@@ -1079,7 +1096,7 @@ function renderOngletMoteur(d: {
         }
       </div>
 
-      ${renderSourcesCard(d.sourceCounts, d.lastRun)}
+      ${renderSourcesCard(d.sourceCounts, d.lastRun, d.settings)}
 
       <div class="card large" id="carte-classement">
         <h2>Classement</h2>
@@ -1348,6 +1365,17 @@ function renderLlmSettings(
           </p>
           <ul style="margin:6px 0 0;padding-left:18px;font-size:13.5px;color:var(--encre-2);">${chainPrices}</ul>
           ${keyLine}`;
+}
+
+// Interrupteur d'une source secondaire : réglage « source_<id> » (0 = coupée,
+// absent = active). La variable d'environnement de la source reste prioritaire.
+async function handleSourceToggle(req: Request, _url: URL, user: AuthUser): Promise<Response> {
+  const { id = "", valeur = "" } = await form(req);
+  const fail = (text: string) => configPage(user, "moteur", { kind: "error", text });
+  if (!isSource(id) || id === "boamp" || (valeur !== "0" && valeur !== "1")) return fail("Requête invalide.");
+  if (sourceDisabledBy(id, Bun.env, {}) === "env") return fail(`${sourceLabel(id)} est coupée sur le serveur : seul l'hébergeur peut la rallumer.`);
+  await setSetting(sourceSettingKey(id), valeur === "0" ? "0" : null, user.id);
+  return redirect(configUrl("moteur", "sources"), 303);
 }
 
 async function handleRelance(_req: Request, _url: URL, user: AuthUser): Promise<Response> {
@@ -2387,6 +2415,7 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
   { method: "GET", path: "/configuration/essai", access: "config", handler: (req, url, user) => handleRuleTest(req, url, user!) },
   { method: "POST", path: "/configuration/reglages", access: "config", handler: (req, url, user) => handleSettingsUpdate(req, url, user!) },
   { method: "POST", path: "/configuration/relancer", access: "config", handler: (req, url, user) => handleRelance(req, url, user!) },
+  { method: "POST", path: "/configuration/sources", access: "config", handler: (req, url, user) => handleSourceToggle(req, url, user!) },
   { method: "GET", path: "/admin", access: "admin", handler: (_req, _url, user) => adminPage(user!) },
   { method: "POST", path: "/admin/configurer", access: "admin", handler: (req, url, user) => handleAdminConfigure(req, url, user!) },
   { method: "POST", path: "/admin/ajouter", access: "admin", handler: (req, url, user) => handleAdminAdd(req, url, user!) },

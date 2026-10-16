@@ -72,8 +72,33 @@ export function isSource(id: string | null | undefined): id is Source {
   return SOURCES.some((s) => s.id === id);
 }
 
-// Une source est active sauf si sa variable vaut « 0 » (env par défaut : Bun.env).
-export function isSourceEnabled(id: Source, env: Record<string, string | undefined> = Bun.env): boolean {
+// Réglage « source_<id> » de la table settings : « 0 » = source coupée depuis
+// /configuration. BOAMP n'a pas de réglage (source principale, bloquante).
+export function sourceSettingKey(id: Source): string {
+  return `source_${id}`;
+}
+
+export type SourceDisabledBy = "env" | "reglage" | null;
+
+// Pourquoi une source est coupée : sa variable d'environnement à « 0 » (côté
+// serveur, prioritaire — un coupe-circuit d'exploitation), sinon le réglage
+// en base (/configuration), sinon elle est active.
+export function sourceDisabledBy(
+  id: Source,
+  env: Record<string, string | undefined> = Bun.env,
+  settings: Record<string, string | null | undefined> = {},
+): SourceDisabledBy {
   const info = SOURCES.find((s) => s.id === id);
-  return !info?.env || env[info.env] !== "0";
+  if (!info?.env) return null;
+  if (env[info.env] === "0") return "env";
+  if (settings[sourceSettingKey(id)] === "0") return "reglage";
+  return null;
+}
+
+export function isSourceEnabled(
+  id: Source,
+  env: Record<string, string | undefined> = Bun.env,
+  settings: Record<string, string | null | undefined> = {},
+): boolean {
+  return sourceDisabledBy(id, env, settings) === null;
 }

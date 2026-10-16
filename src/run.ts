@@ -14,7 +14,7 @@ import {
   updateRunProgress,
   listKeywords,
   listScopeRules,
-  getSetting,
+  listSettings,
   getLastRun,
   heartbeatStale,
   terminateRunLockHolders,
@@ -118,15 +118,11 @@ async function main() {
   try {
     // Configuration éditable (/configuration) — lue ici, dans le try, pour
     // qu'un échec de lecture passe par le circuit erreur + email d'alerte.
-    const [keywords, ruleRows, windowSetting, classifierSetting, depSetting, modelsSetting] =
-      await Promise.all([
-        listKeywords(),
-        listScopeRules(),
-        getSetting("digest_window_days"),
-        getSetting("classifier_mode"),
-        getSetting("code_departements"),
-        getSetting("llm_models"),
-      ]);
+    const [keywords, ruleRows, settings] = await Promise.all([listKeywords(), listScopeRules(), listSettings()]);
+    const windowSetting = settings.digest_window_days ?? null;
+    const classifierSetting = settings.classifier_mode ?? null;
+    const depSetting = settings.code_departements ?? null;
+    const modelsSetting = settings.llm_models ?? null;
     const scopeRules = {
       keep: ruleRows.filter((r) => r.kind === "keep").map((r) => r.term),
       exclude: ruleRows.filter((r) => r.kind === "exclude").map((r) => r.term),
@@ -156,6 +152,7 @@ async function main() {
       // Un réglage en base l'emporte sur la variable d'environnement.
       classifier: classifierSetting ?? Bun.env.CLASSIFIER,
       llmModels: chainFromSetting(modelsSetting),
+      settings,
       scopeRules,
       codeDepartement: dep.ok ? dep.codes : [],
       progress,

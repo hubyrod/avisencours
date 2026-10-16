@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { SOURCES, SOURCE_LABELS, isSource, isSourceEnabled, sourceLabel } from "./sources.ts";
+import { SOURCES, SOURCE_LABELS, isSource, isSourceEnabled, sourceDisabledBy, sourceLabel, sourceSettingKey } from "./sources.ts";
 import { MPE_SITES } from "./mpe.ts";
 
 describe("sources registry", () => {
@@ -30,5 +30,16 @@ describe("sources registry", () => {
     expect(isSourceEnabled("afd", { AFD: "0" })).toBe(false);
     expect(isSourceEnabled("afd", { AFD: "1" })).toBe(true);
     expect(isSourceEnabled("boamp", { BOAMP: "0" })).toBe(true);
+  });
+  test("réglage en base « source_<id> = 0 », la variable d'environnement l'emporte", () => {
+    expect(sourceSettingKey("afd")).toBe("source_afd");
+    expect(isSourceEnabled("afd", {}, { source_afd: "0" })).toBe(false);
+    expect(sourceDisabledBy("afd", {}, { source_afd: "0" })).toBe("reglage");
+    expect(sourceDisabledBy("afd", { AFD: "0" }, { source_afd: "0" })).toBe("env");
+    expect(sourceDisabledBy("afd", { AFD: "1" }, { source_afd: "0" })).toBe("reglage");
+    expect(sourceDisabledBy("afd", {}, { source_afd: "1" })).toBeNull();
+    expect(sourceDisabledBy("afd", {}, {})).toBeNull();
+    // BOAMP ne se coupe ni par l'env ni par réglage.
+    expect(sourceDisabledBy("boamp", { BOAMP: "0" }, { source_boamp: "0" })).toBeNull();
   });
 });

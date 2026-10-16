@@ -1011,6 +1011,12 @@ export async function countCurrentMatching(runId: number, normalizedTerms: strin
   return out;
 }
 
+// Tous les réglages d'un coup (le job quotidien, la carte des sources).
+export async function listSettings(): Promise<Record<string, string>> {
+  const rows = (await db()`SELECT key, value FROM settings`) as Array<{ key: string; value: string }>;
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+
 export async function getSetting(key: string): Promise<string | null> {
   const rows = await db()`SELECT value FROM settings WHERE key = ${key}`;
   return rows[0]?.value ?? null;

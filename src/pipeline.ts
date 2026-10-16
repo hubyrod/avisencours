@@ -48,12 +48,10 @@ export type PipelineOptions = {
   // en base par run.ts ; liste absente = defaults.ts (ce que fait le CLI).
   searches?: Partial<Record<Exclude<Liste, "boamp">, readonly FamilleSearch[]>>;
   codeDepartement?: string[];
-  // Sources secondaires (défaut : activées sauf ACHATPUBLIC=0 / AFD=0, et par
-  // site MPE : MAXIMILIEN=0 / AMPA=0 — voir MPE_SITES).
-  achatPublic?: boolean;
-  afd?: boolean;
-  mpe?: boolean;
-  marchesOnline?: boolean;
+  // Réglages en base (table settings, lus par run.ts) : « source_<id> = 0 »
+  // coupe une source secondaire ; la variable d'environnement de la source
+  // (ACHATPUBLIC=0, AFD=0, MAXIMILIEN=0, AMPA=0, MARCHESONLINE=0) l'emporte.
+  settings?: Record<string, string>;
   log?: (msg: string) => void;
   // Suivi d'avancement (jalons par source + classement), alimenté si fourni.
   // Les identifiants d'étape sont ceux des sources (src/sources.ts) et « classify ».
@@ -176,22 +174,23 @@ async function loadAll(
       };
     }
   }
-  // Activation : option explicite, sinon la variable d'environnement de la
-  // source (src/sources.ts — même registre que la page de configuration).
+  // Activation : variable d'environnement de la source puis réglage en base
+  // (src/sources.ts — même registre que la page de configuration).
   // Déterminée avant BOAMP pour que les sources désactivées apparaissent
   // « sautées » dès le début de la progression.
   const known = opts.known;
+  const enabled = (id: Source) => isSourceEnabled(id, Bun.env, opts.settings ?? {});
   const sources: SecondarySource[] = [];
-  if (opts.achatPublic ?? isSourceEnabled("achatpublic")) {
+  if (enabled("achatpublic")) {
     sources.push({
       id: "achatpublic",
       name: sourceLabel("achatpublic"),
       run: (onPage) => scrapeAchatPublic({ searches: opts.searches?.achatpublic ?? DEFAULT_LISTES.achatpublic, log, onPage, known }),
     });
   }
-  if (opts.afd ?? isSourceEnabled("afd")) sources.push({ id: "afd", name: sourceLabel("afd"), run: (onPage) => scrapeAfd({ log, onPage, known }) });
+  if (enabled("afd")) sources.push({ id: "afd", name: sourceLabel("afd"), run: (onPage) => scrapeAfd({ log, onPage, known }) });
   for (const site of MPE_SITES) {
-    if (opts.mpe ?? isSourceEnabled(site.source)) {
+    if (enabled(site.source)) {
       sources.push({
         id: site.source,
         name: sourceLabel(site.source),
@@ -199,7 +198,7 @@ async function loadAll(
       });
     }
   }
-  if (opts.marchesOnline ?? isSourceEnabled("marchesonline")) {
+  if (enabled("marchesonline")) {
     sources.push({
       id: "marchesonline",
       name: sourceLabel("marchesonline"),

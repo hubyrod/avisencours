@@ -220,7 +220,7 @@ if (!TEST_URL) {
     expect(moteur.text).toContain("Sources de veille");
     expect(moteur.text).toContain("BOAMP");
     expect(moteur.text).toContain("Marchés Online");
-    expect(moteur.text).toContain("désactivée"); // ACHATPUBLIC=0
+    expect(moteur.text).toContain("coupée sur le serveur"); // ACHATPUBLIC=0
     expect(moteur.text).toContain("mistral-nemo ×7");
     expect(moteur.text).toContain("Relancer maintenant");
     expect(moteur.text).toContain("Classement");
@@ -273,6 +273,27 @@ if (!TEST_URL) {
     expect(page.text).toContain("1 avis en cours</a>");
     expect(page.text).toContain('formaction="/configuration/essai"');
     await control`DELETE FROM scope_rules`;
+  });
+
+  test("interrupteur d'une source : réglage en base, env prioritaire, BOAMP intouchable", async () => {
+    let res = await post("/configuration/sources", { id: "afd", valeur: "0" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/configuration?onglet=moteur#carte-sources");
+    expect((await control`SELECT value FROM settings WHERE key = 'source_afd'`) as unknown[]).toEqual([{ value: "0" }]);
+    let page = await get("/configuration?onglet=moteur");
+    expect(page.text).toContain(">réactiver<");
+    expect(page.text).toContain(">désactivée<");
+    res = await post("/configuration/sources", { id: "afd", valeur: "1" });
+    expect(res.status).toBe(303);
+    expect((await control`SELECT value FROM settings WHERE key = 'source_afd'`) as unknown[]).toEqual([]);
+    page = await get("/configuration?onglet=moteur");
+    expect(page.text).not.toContain(">réactiver<");
+    // Coupée par ACHATPUBLIC=0 : pas d'interrupteur, requête refusée.
+    expect(page.text).not.toContain('name="id" value="achatpublic"');
+    expect((await post("/configuration/sources", { id: "achatpublic", valeur: "1" })).status).toBe(200);
+    expect((await post("/configuration/sources", { id: "boamp", valeur: "0" })).status).toBe(200);
+    expect((await post("/configuration/sources", { id: "x", valeur: "0" })).status).toBe(200);
+    expect((await control`SELECT count(*)::int AS n FROM settings`) as unknown[]).toEqual([{ n: 0 }]);
   });
 
   test("réglages : chaque carte n'écrit que ses champs et revient sur son onglet", async () => {
