@@ -17,9 +17,14 @@ import type {
 import { db } from "./db.ts";
 import type { RunProgress } from "./progress.ts";
 
-const STREAM_PORT = Number(Bun.env.SKIP_STREAMING_PORT ?? 9080);
-const CONTROL_PORT = Number(Bun.env.SKIP_CONTROL_PORT ?? 9081);
-const ENABLED = Bun.env.LIVE_COMMENTS !== "0";
+// Lus à l'appel, pas au chargement du module : `bun test` exécute tous les
+// fichiers dans un seul processus avec un cache de modules commun, et l'ordre
+// des fichiers suit l'ordre du disque (différent entre macOS et Linux). Si
+// live.test.ts charge ce module avant que live.integration.test.ts ne pose
+// SKIP_*_PORT, des constantes figées démarreraient le moteur sur 9080/9081.
+const streamPort = () => Number(Bun.env.SKIP_STREAMING_PORT ?? 9080);
+const controlPort = () => Number(Bun.env.SKIP_CONTROL_PORT ?? 9081);
+const enabled = () => Bun.env.LIVE_COMMENTS !== "0";
 export const LIVE_APP_NAME = "avis-live";
 
 // L'adaptateur pg renvoie int8 et timestamptz sous forme de chaînes.
@@ -320,11 +325,13 @@ export function isLiveReady(): boolean {
 }
 
 export async function startLive(): Promise<void> {
-  if (!ENABLED) {
+  if (!enabled()) {
     console.error("live: commentaires en direct désactivés (LIVE_COMMENTS=0)");
     return;
   }
   await cleanupOrphanTriggers();
+  const STREAM_PORT = streamPort();
+  const CONTROL_PORT = controlPort();
   await runService(makeService(), {
     streaming_port: STREAM_PORT,
     control_port: CONTROL_PORT,
@@ -365,6 +372,8 @@ export function runStream(req: Request, id: string): Promise<Response> {
 
 export async function resourceStream(req: Request, resource: "thread" | "run", params: Json): Promise<Response> {
   if (!liveReady) return unavailable();
+  const CONTROL_PORT = controlPort();
+  const STREAM_PORT = streamPort();
 
   let uuid: string;
   try {
