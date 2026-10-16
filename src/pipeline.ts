@@ -43,6 +43,10 @@ export type PipelineOptions = {
   // Chaîne de modèles OpenRouter (ordre de repli). Vide/absent = LLM_MODELS
   // (env) puis DEFAULT_LLM_MODELS.
   llmModels?: string[];
+  // Prix plafond OpenRouter (USD / M tokens) ; absent = LLM_MAX_PRICE_PER_M puis 1.
+  llmMaxPricePerM?: number;
+  // Pages lues par mot-clé sur Marchés Online (les plus récentes) ; absent = 8.
+  marchesOnlineMaxPages?: number;
   scopeRules?: ScopeRules;
   // Mots-clés des sources secondaires par liste (src/rules.ts : LISTES), lus
   // en base par run.ts ; liste absente = defaults.ts (ce que fait le CLI).
@@ -202,7 +206,14 @@ async function loadAll(
     sources.push({
       id: "marchesonline",
       name: sourceLabel("marchesonline"),
-      run: (onPage) => scrapeMarchesOnline({ searches: opts.searches?.marchesonline ?? DEFAULT_LISTES.marchesonline, log, onPage, known }),
+      run: (onPage) =>
+        scrapeMarchesOnline({
+          searches: opts.searches?.marchesonline ?? DEFAULT_LISTES.marchesonline,
+          maxPagesPerKeyword: opts.marchesOnlineMaxPages,
+          log,
+          onPage,
+          known,
+        }),
     });
   }
   for (const s of SOURCES) {
@@ -260,6 +271,7 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
           models: opts.llmModels?.length ? opts.llmModels : defaultModelChain(),
           stats: newLlmStats(),
           breaker: new Breaker(),
+          maxPricePerM: opts.llmMaxPricePerM,
           memo: opts.llmMemo,
         };
   if (ctx) log(`modèles: ${ctx.models.join(" → ")}${ctx.memo ? ` — ${ctx.memo.size} verdict(s) mémorisé(s)` : ""}`);

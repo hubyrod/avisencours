@@ -144,6 +144,8 @@ export type LlmContext = {
   stats: LlmStats;
   breaker: Breaker;
   deps?: ChatDeps;
+  // Prix plafond (USD / M tokens) ; absent = LLM_MAX_PRICE_PER_M puis 1.
+  maxPricePerM?: number;
   // Verdicts des runs précédents par idweb (run.ts les lit en base) ; absent
   // en CLI ou avec LLM_MEMO=0.
   memo?: ReadonlyMap<string, LlmMemoEntry>;
@@ -170,7 +172,7 @@ export async function classifyLLM(a: Announcement, ctx: LlmContext): Promise<Cla
   if (hit) return hit;
   try {
     const r = await chatJSON(
-      { messages: buildMessages(a), models: ctx.models, parse: parseClassification, signal: ctx.breaker.signal },
+      { messages: buildMessages(a), models: ctx.models, parse: parseClassification, signal: ctx.breaker.signal, maxPricePerM: ctx.maxPricePerM },
       ctx.deps,
     );
     recordCall(ctx.stats, r, ctx.models);

@@ -31,6 +31,8 @@ export type ChatOptions<T> = {
   maxTokens?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
+  // Prix plafond (USD / M tokens) de cette requête ; défaut : maxPricePerM().
+  maxPricePerM?: number;
 };
 
 export type ChatResult<T> = {
@@ -147,7 +149,7 @@ async function requestOnce<T>(
   deps: ChatDeps,
 ): Promise<ChatResult<T>> {
   const multi = models.length > 1;
-  const cap = maxPricePerM();
+  const cap = opts.maxPricePerM ?? maxPricePerM();
   const body = JSON.stringify({
     model: models[0],
     models: multi ? models : undefined,

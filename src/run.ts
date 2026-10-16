@@ -128,6 +128,15 @@ async function main() {
     const classifierSetting = settings.classifier_mode ?? null;
     const depSetting = settings.code_departements ?? null;
     const modelsSetting = settings.llm_models ?? null;
+    // Limites (réglage en base > variable d'environnement > défaut du code).
+    const numberSetting = (key: string, env: string | undefined): number | undefined => {
+      const raw = settings[key] ?? env;
+      const n = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    };
+    const boampMaxPages = numberSetting("boamp_max_pages", Bun.env.MAX_PAGES);
+    const marchesOnlineMaxPages = numberSetting("marchesonline_max_pages", undefined);
+    const llmMaxPricePerM = numberSetting("llm_max_price_per_m", Bun.env.LLM_MAX_PRICE_PER_M);
     const asRule = (r: (typeof ruleRows)[number]) => ({ term: r.term, source: r.source, champ: r.champ, motEntier: r.motEntier });
     const scopeRules = {
       keep: ruleRows.filter((r) => r.kind === "keep").map(asRule),
@@ -152,7 +161,9 @@ async function main() {
     const boampKeywords = keywords.filter((k) => k.liste === "boamp");
     const { boamp: _boamp, ...searches } = searchesByListe(keywords);
     const { relevant, travaux, excluded, llm, warning } = await runPipeline({
-      maxPages: Bun.env.MAX_PAGES ? Number(Bun.env.MAX_PAGES) : undefined,
+      maxPages: boampMaxPages,
+      marchesOnlineMaxPages,
+      llmMaxPricePerM,
       query: boampKeywords.length > 0 ? buildQueryFromKeywords(boampKeywords.map((k) => k.term)) : undefined,
       searches,
       // Un réglage en base l'emporte sur la variable d'environnement.

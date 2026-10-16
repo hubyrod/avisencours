@@ -376,6 +376,33 @@ if (!TEST_URL) {
     await control`TRUNCATE config_events RESTART IDENTITY`;
   });
 
+  test("limites : prix plafond, pages BOAMP et Marchés Online, vide = défaut", async () => {
+    let res = await post("/configuration/reglages", { prix: "0,5", classifieur: "", modeles: "" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/configuration?onglet=moteur#carte-classement");
+    res = await post("/configuration/reglages", { pages_boamp: "50", pages_marchesonline: "12" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/configuration?onglet=moteur#carte-sources");
+    const rows = (await control`SELECT key, value FROM settings ORDER BY key`) as Array<{ key: string; value: string }>;
+    expect(rows).toEqual([
+      { key: "boamp_max_pages", value: "50" },
+      { key: "llm_max_price_per_m", value: "0.5" },
+      { key: "marchesonline_max_pages", value: "12" },
+    ]);
+    const page = await get("/configuration?onglet=moteur");
+    expect(page.text).toContain('name="prix" inputmode="decimal" value="0.5"');
+    expect(page.text).toContain('name="pages_marchesonline" min="1" max="60"\n                 value="12"');
+    expect(page.text).toContain("Prix plafond par modèle : 0.5 $ / M tokens");
+    expect(page.text).toContain("Pages BOAMP au plus : 50 pages");
+    expect((await post("/configuration/reglages", { pages_marchesonline: "61" })).status).toBe(200);
+    expect((await post("/configuration/reglages", { prix: "0" })).status).toBe(200);
+    res = await post("/configuration/reglages", { pages_boamp: "", pages_marchesonline: "" });
+    expect(res.status).toBe(303);
+    expect((await control`SELECT key FROM settings ORDER BY key`) as unknown[]).toEqual([{ key: "llm_max_price_per_m" }]);
+    await control`DELETE FROM settings`;
+    await control`TRUNCATE config_events RESTART IDENTITY`;
+  });
+
   test("réglages : chaque carte n'écrit que ses champs et revient sur son onglet", async () => {
     let res = await post("/configuration/reglages", { fenetre: "21" });
     expect(res.status).toBe(303);

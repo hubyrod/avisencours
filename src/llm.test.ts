@@ -137,6 +137,12 @@ describe("chatJSON", () => {
     expect(c.body.usage).toEqual({ include: true });
   });
 
+  test("prix plafond par requête : prioritaire sur LLM_MAX_PRICE_PER_M", async () => {
+    const { deps, calls } = fakeFetch([completion('{"x":1}')]);
+    await chatJSON({ messages, models: CHAIN, parse, maxPricePerM: 0.25 }, deps);
+    expect((calls[0]!.body as { provider: { max_price: unknown } }).provider.max_price).toEqual({ prompt: 0.25, completion: 0.25 });
+  });
+
   test("modèle unique : pas de champ models", async () => {
     const { deps, calls } = fakeFetch([completion('{"x":1}')]);
     await chatJSON({ messages, models: ["a/one"], parse }, deps);

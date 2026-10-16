@@ -204,6 +204,25 @@ export function validateDigestWindow(raw: string): Validation {
   return { ok: true, value: String(n) };
 }
 
+// Prix plafond OpenRouter, USD par million de tokens : décimal strictement
+// positif, 100 au plus (au-delà, le garde-fou ne garde plus rien).
+export function validatePrice(raw: string): Validation {
+  const n = Number(raw.trim().replace(",", "."));
+  if (!Number.isFinite(n) || n <= 0 || n > 100) {
+    return { ok: false, error: "Le prix plafond doit être un nombre entre 0,01 et 100 (dollars par million de tokens)." };
+  }
+  return { ok: true, value: String(n) };
+}
+
+// Plafonds de pages lues : entier entre min et max.
+export function validatePages(raw: string, min: number, max: number, label: string): Validation {
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n < min || n > max) {
+    return { ok: false, error: `${label} : un nombre entier de pages entre ${min} et ${max}.` };
+  }
+  return { ok: true, value: String(n) };
+}
+
 export function validateClassifierMode(raw: string): Validation {
   const mode = raw.trim();
   if (mode !== "regex" && mode !== "llm" && mode !== "hybrid") {

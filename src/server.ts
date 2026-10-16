@@ -102,12 +102,16 @@ import {
   type RuleScope,
   validateDigestWindow,
   validateClassifierMode,
+  validatePrice,
+  validatePages,
+  type Validation,
   parseDepartements,
   validateModelChain,
   parseModelChain,
 } from "./rules.ts";
 import { DEFAULT_LLM_MODELS, RECOMMENDED_MODELS } from "./defaults.ts";
 import { normalize, type Category } from "./classify.ts";
+import { maxPricePerM } from "./llm.ts";
 import { llmConfigured, llmStatsSummary, defaultModelChain } from "./llm.ts";
 import {
   fetchCatalog,
@@ -671,6 +675,21 @@ function renderSourcesCard(counts: SourceCount[], lastRun: RunRow | null, settin
           restent affichés jusqu'à leur échéance. BOAMP, source principale, ne se coupe pas.
         </p>
         <table><tbody>${rows}</tbody></table>
+        <form method="post" action="/configuration/reglages" style="margin-top:14px;">
+          <h3 class="sous-titre-carte">Limites de lecture</h3>
+          <p class="meta" style="margin:0 0 4px;">
+            Ce que la mise à jour accepte de lire à chaque passage. Au-delà, les avis les plus anciens
+            ne sont pas revus et sortent du tableau de bord même s'ils sont encore ouverts.
+          </p>
+          <label for="reg-pages-boamp">Pages BOAMP au plus (100 avis par page)</label>
+          <input type="number" id="reg-pages-boamp" name="pages_boamp" min="1" max="500"
+                 value="${esc(settings.boamp_max_pages ?? "")}" placeholder="${esc(Bun.env.MAX_PAGES || "100")} (par défaut)">
+          <label for="reg-pages-mo">Pages lues par mot-clé sur Marchés Online (20 avis par page, les plus récents d'abord)</label>
+          <input type="number" id="reg-pages-mo" name="pages_marchesonline" min="1" max="60"
+                 value="${esc(settings.marchesonline_max_pages ?? "")}" placeholder="8 (par défaut)">
+          <p class="meta" style="margin:4px 0 0;">Chaque page Marchés Online coûte un peu plus d'une seconde : 8 pages sur 40 mots-clés, c'est 5 à 6 minutes.</p>
+          <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
+        </form>
       </div>`;
 }
 
@@ -1205,6 +1224,12 @@ function renderOngletMoteur(d: {
             ${modeOptions}
           </select>
           ${renderLlmSettings(d.modeles, d.catalog, d.credit)}
+          <label for="reg-prix" style="margin-top:14px;">Prix plafond par modèle (dollars par million de tokens, entrée comme sortie)</label>
+          <input type="text" id="reg-prix" name="prix" inputmode="decimal" value="${esc(d.settings.llm_max_price_per_m ?? "")}"
+                 placeholder="${esc(String(maxPricePerM()))} (par défaut)">
+          <p style="color:var(--encre-2);font-size:13.5px;margin:6px 0 0;">
+            Garde-fou contre un modèle coûteux saisi par erreur : un modèle plus cher que ce plafond n'est jamais appelé.
+          </p>
           <div class="actions"><button class="primary" type="submit">Enregistrer</button></div>
         </form>
       </div>`;
@@ -1419,8 +1444,9 @@ async function handleRuleDelete(req: Request, _url: URL, user: AuthUser): Promis
 async function handleSettingsUpdate(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const data = await form(req);
   const has = (k: string) => Object.hasOwn(data, k);
-  const onglet: Onglet = has("classifieur") || has("modeles") ? "moteur" : "resultats";
-  const carte = has("classifieur") || has("modeles") ? "classement" : has("fenetre") ? "email" : "perimetre";
+  const moteur = has("classifieur") || has("modeles") || has("prix") || has("pages_boamp") || has("pages_marchesonline");
+  const onglet: Onglet = moteur ? "moteur" : "resultats";
+  const carte = has("pages_boamp") || has("pages_marchesonline") ? "sources" : moteur ? "classement" : has("fenetre") ? "email" : "perimetre";
   const fail = (text: string) => configPage(user, onglet, { kind: "error", text });
 
   const writes: Array<[string, string | null]> = [];
@@ -1467,6 +1493,23 @@ async function handleSettingsUpdate(req: Request, _url: URL, user: AuthUser): Pr
     }
   }
 
+  // Limites : vide = valeur par défaut (variable d'environnement ou code).
+  const limites: Array<[string, string, (raw: string) => Validation]> = [
+    ["prix", "llm_max_price_per_m", validatePrice],
+    ["pages_boamp", "boamp_max_pages", (raw) => validatePages(raw, 1, 500, "Pages BOAMP")],
+    ["pages_marchesonline", "marchesonline_max_pages", (raw) => validatePages(raw, 1, 60, "Pages Marchés Online par mot-clé")],
+  ];
+  for (const [field, key, validate] of limites) {
+    if (!has(field)) continue;
+    const raw = data[field] ?? "";
+    if (raw.trim() === "") writes.push([key, null]);
+    else {
+      const v = validate(raw);
+      if (!v.ok) return fail(v.error);
+      writes.push([key, v.value]);
+    }
+  }
+
   for (const [key, value] of writes) {
     await setSetting(key, value, user.id);
     await logConfigEvent(user, "reglage", "modification", settingChangeLabel(key, value));
@@ -1480,12 +1523,17 @@ const SETTING_LABELS: Record<string, string> = {
   code_departements: "Périmètre géographique",
   classifier_mode: "Classifieur",
   llm_models: "Modèles LLM",
+  llm_max_price_per_m: "Prix plafond par modèle",
+  boamp_max_pages: "Pages BOAMP au plus",
+  marchesonline_max_pages: "Pages Marchés Online par mot-clé",
 };
 
 function settingChangeLabel(key: string, value: string | null): string {
   const label = SETTING_LABELS[key] ?? key;
   if (value === null) return `${label} : retour à la valeur par défaut`;
   if (key === "digest_window_days") return `${label} : ${value} jours`;
+  if (key === "llm_max_price_per_m") return `${label} : ${value} $ / M tokens`;
+  if (key.endsWith("_max_pages")) return `${label} : ${value} pages`;
   if (key === "classifier_mode") return `${label} : ${CLASSIFIER_LABELS.find(([v]) => v === value)?.[1] ?? value}`;
   return `${label} : ${value}`;
 }

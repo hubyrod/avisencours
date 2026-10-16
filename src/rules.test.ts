@@ -14,6 +14,8 @@ import {
   wholeWordRegex,
   describeScope,
   parseRuleScope,
+  validatePrice,
+  validatePages,
   isListe,
   isFamille,
   LISTES,
@@ -67,6 +69,24 @@ describe("applyScopeRules", () => {
     const excl = applyScopeRules(avis("Réseau fibre"), { keep: [], exclude: ["fibre"] });
     expect(excl?.reason).toContain("règle personnalisée");
     expect(excl?.reason).toContain("fibre");
+  });
+});
+
+describe("limites", () => {
+  test("prix plafond : décimal positif, virgule acceptée, 100 au plus", () => {
+    expect(validatePrice("0.5")).toEqual({ ok: true, value: "0.5" });
+    expect(validatePrice(" 2,5 ")).toEqual({ ok: true, value: "2.5" });
+    expect(validatePrice("0").ok).toBe(false);
+    expect(validatePrice("-1").ok).toBe(false);
+    expect(validatePrice("101").ok).toBe(false);
+    expect(validatePrice("abc").ok).toBe(false);
+  });
+  test("pages : entier dans les bornes", () => {
+    expect(validatePages("8", 1, 60, "Pages")).toEqual({ ok: true, value: "8" });
+    expect(validatePages("0", 1, 60, "Pages").ok).toBe(false);
+    expect(validatePages("61", 1, 60, "Pages").ok).toBe(false);
+    expect(validatePages("2.5", 1, 60, "Pages").ok).toBe(false);
+    expect((validatePages("x", 1, 60, "Pages BOAMP") as { error: string }).error).toContain("Pages BOAMP");
   });
 });
 
