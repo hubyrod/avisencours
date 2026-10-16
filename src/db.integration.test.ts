@@ -317,6 +317,27 @@ if (!TEST_URL) {
       await db.migrate();
     });
 
+    test("essai d'une règle : préfiltre SQL sans accents ni casse, comptes par terme", async () => {
+      await control`TRUNCATE comments, status_events, announcements RESTART IDENTITY CASCADE`;
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [
+        avis("R1", { objet: "Étude de MAÎTRISE D'ŒUVRE", raw: "" }),
+        avis("R2", { objet: "Plan vélo", raw: "Descriptif : déploiement de fibre optique", category: "relevant" }),
+        avis("R3", { objet: "Fibre optique passée", raw: "", deadline: "01/01/2020 à 12h00" }),
+        avis("R4", { objet: "Doublon fibre optique", raw: "" }),
+      ]);
+      await control`UPDATE announcements SET doublon_de = 'R2' WHERE idweb = 'R4'`;
+      await db.finishRun(run, { status: "success", totalFetched: 4, relevant: 3, travaux: 0, excluded: 0 });
+      const fibre = await db.findCurrentMatching(run, "fibre optique");
+      expect(fibre.map((a) => a.idweb)).toEqual(["R2"]); // R3 échue, R4 doublon
+      expect((await db.findCurrentMatching(run, "maitrise d'oeuvre")).map((a) => a.idweb)).toEqual(["R1"]);
+      expect((await db.findCurrentMatching(run, "100%")).length).toBe(0);
+      const counts = await db.countCurrentMatching(run, ["fibre optique", "maitrise d'oeuvre", "absent"]);
+      expect([...counts.entries()]).toEqual([["fibre optique", 1], ["maitrise d'oeuvre", 1], ["absent", 0]]);
+      expect((await db.countCurrentMatching(run, [])).size).toBe(0);
+      await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
+    });
+
     test("index sur last_seen_run_id et first_seen_run_id", async () => {
       const idx = (await control`SELECT indexname FROM pg_indexes WHERE tablename = 'announcements'`) as Array<{ indexname: string }>;
       const names = idx.map((i) => i.indexname);

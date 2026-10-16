@@ -7,6 +7,9 @@ import {
   migrate,
   getLastRun,
   getLastSuccessfulRun,
+  findCurrentMatching,
+  countCurrentMatching,
+  type RuleCandidate,
   getRun,
   countCurrentBySource,
   loadPublications,
@@ -86,6 +89,7 @@ import {
   LISTES,
   type Liste,
   validateRuleTerm,
+  applyScopeRules,
   validateDigestWindow,
   validateClassifierMode,
   parseDepartements,
@@ -93,6 +97,7 @@ import {
   parseModelChain,
 } from "./rules.ts";
 import { DEFAULT_LLM_MODELS, RECOMMENDED_MODELS } from "./defaults.ts";
+import { normalize, type Category } from "./classify.ts";
 import { llmConfigured, llmStatsSummary, defaultModelChain } from "./llm.ts";
 import {
   fetchCatalog,
@@ -825,13 +830,22 @@ function keywordListe(l: (typeof LISTES)[number], keywords: KeywordRow[]): strin
       </div>`;
 }
 
-function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude"): string {
+function essaiUrl(kind: "keep" | "exclude", term: string): string {
+  return `/configuration/essai?${new URLSearchParams({ kind, terme: term })}`;
+}
+
+function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude", hits: Map<number, number>, hasRun: boolean): string {
   const rows = rules
     .filter((r) => r.kind === kind)
     .map(
       (r) => `
         <li style="display:flex;align-items:center;gap:8px;margin:4px 0;">
           <span>${esc(r.term)}</span>
+          ${
+            hasRun
+              ? `<a class="meta" href="${esc(essaiUrl(kind, r.term))}" style="margin:0;">${hits.get(r.id) ?? 0} avis en cours</a>`
+              : ""
+          }
           <form method="post" action="/configuration/regles/supprimer" style="margin:0;">
             <input type="hidden" name="id" value="${r.id}">
             <button class="subtle" type="submit">Supprimer</button>
@@ -878,6 +892,12 @@ async function configPage(
       onglet === "moteur" ? fetchKeyCredit() : Promise.resolve(null),
     ]);
   const sourceCounts = onglet === "moteur" && lastSuccess ? await countCurrentBySource(lastSuccess.id) : [];
+  // Onglet Résultats : combien d'avis en cours chaque règle touche (estimation SQL).
+  const ruleHits = new Map<number, number>();
+  if (onglet === "resultats" && lastSuccess && rules.length > 0) {
+    const counts = await countCurrentMatching(lastSuccess.id, rules.map((r) => normalize(r.term)));
+    for (const r of rules) ruleHits.set(r.id, counts.get(normalize(r.term)) ?? 0);
+  }
 
   const banner = notice
     ? `<div class="banner ${notice.kind === "ok" ? "ok" : "error"}">${esc(notice.text)}</div>`
@@ -895,7 +915,7 @@ async function configPage(
       </nav>`;
 
   const contenu = onglet === "resultats"
-    ? renderOngletResultats({ keywords, rules, fenetre, departements, running })
+    ? renderOngletResultats({ keywords, rules, ruleHits, hasRun: !!lastSuccess, fenetre, departements, running })
     : renderOngletMoteur({ classifieur, modeles, catalog, credit, lastRun, running, runLine, sourceCounts });
 
   return html(
@@ -916,6 +936,8 @@ async function configPage(
 function renderOngletResultats(d: {
   keywords: Awaited<ReturnType<typeof listKeywords>>;
   rules: ScopeRuleRow[];
+  ruleHits: Map<number, number>;
+  hasRun: boolean;
   fenetre: string | null;
   departements: string | null;
   running: boolean;
@@ -954,19 +976,25 @@ function renderOngletResultats(d: {
           de l'avis (majuscules et accents ignorés). Une règle « toujours garder »
           l'emporte sur une règle « toujours exclure ».
         </p>
+        ${
+          d.hasRun
+            ? `<p class="meta">Le compte à côté de chaque règle est le nombre d'avis en cours qui contiennent son terme (cliquer pour les voir). « Tester » montre ce qu'une règle changerait avant de l'ajouter.</p>`
+            : `<p class="meta">Les règles pourront être testées sur les avis en cours après la première mise à jour réussie.</p>`
+        }
         <h3 class="sous-titre-carte">Toujours exclure</h3>
-        ${ruleList(d.rules, "exclude")}
+        ${ruleList(d.rules, "exclude", d.ruleHits, d.hasRun)}
         <h3 class="sous-titre-carte">Toujours garder</h3>
-        ${ruleList(d.rules, "keep")}
+        ${ruleList(d.rules, "keep", d.ruleHits, d.hasRun)}
         <form method="post" action="/configuration/regles/ajouter" style="margin-top:12px;">
           <label for="regle-terme">Nouvelle règle</label>
-          <div style="display:flex;gap:8px;align-items:center;">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <select name="kind" ${SELECT_STYLE}>
               <option value="exclude">toujours exclure</option>
               <option value="keep">toujours garder</option>
             </select>
             <input type="text" id="regle-terme" name="terme" required maxlength="120"
-                   placeholder="ex. fibre optique" style="flex:1;">
+                   placeholder="ex. fibre optique" style="flex:1;min-width:160px;">
+            ${d.hasRun ? `<button type="submit" formmethod="get" formaction="/configuration/essai">Tester</button>` : ""}
             <button class="primary" type="submit">Ajouter</button>
           </div>
         </form>
@@ -1119,6 +1147,81 @@ async function handleRuleAdd(req: Request, _url: URL, user: AuthUser): Promise<R
   const added = await addScopeRule(kind, v.value, user.id);
   if (!added) return configPage(user, "resultats", { kind: "error", text: "Cette règle existe déjà." });
   return redirect(configUrl("resultats", "regles"), 303);
+}
+
+const CATEGORY_LABELS: Record<Category, string> = { relevant: "pertinent", travaux: "travaux", excluded: "exclu" };
+
+// Essai d'une règle : ce qu'elle changerait sur les avis en cours du dernier
+// run réussi. Les candidats sont préfiltrés en SQL (avis_fold) puis la règle
+// est rejouée en JS avec les règles existantes (« garder » l'emporte), la
+// catégorie d'arrivée étant celle que forcerait l'ensemble, sinon l'actuelle.
+async function handleRuleTest(_req: Request, url: URL, user: AuthUser): Promise<Response> {
+  const kind = url.searchParams.get("kind");
+  const terme = url.searchParams.get("terme") ?? "";
+  if (kind !== "keep" && kind !== "exclude") return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
+  const v = validateRuleTerm(terme);
+  if (!v.ok) return configPage(user, "resultats", { kind: "error", text: v.error });
+  const lastSuccess = await getLastSuccessfulRun();
+  if (!lastSuccess) {
+    return configPage(user, "resultats", { kind: "error", text: "Aucune mise à jour réussie : rien sur quoi essayer la règle." });
+  }
+  const [existing, candidates] = await Promise.all([listScopeRules(), findCurrentMatching(lastSuccess.id, normalize(v.value))]);
+  const alone = { keep: kind === "keep" ? [v.value] : [], exclude: kind === "exclude" ? [v.value] : [] };
+  const withNew = {
+    keep: [...existing.filter((r) => r.kind === "keep").map((r) => r.term), ...alone.keep],
+    exclude: [...existing.filter((r) => r.kind === "exclude").map((r) => r.term), ...alone.exclude],
+  };
+  const rows = candidates
+    .filter((c) => applyScopeRules(c, alone) !== null)
+    .map((c) => ({ ...c, after: (applyScopeRules(c, withNew)?.category ?? c.category) as Category }));
+  const changed = rows.filter((r) => r.after !== r.category).length;
+  const already = existing.some((r) => r.kind === kind && r.term === v.value);
+  const libelle = kind === "keep" ? "toujours garder" : "toujours exclure";
+
+  const ligne = (r: RuleCandidate & { after: Category }) => `
+      <tr>
+        <td><a href="/avis/${encodeURIComponent(r.idweb)}?retour=${encodeURIComponent(essaiUrl(kind, v.value))}">${esc(r.objet)}</a>
+          <div class="meta">${esc(r.acheteur ?? "—")} · ${esc(sourceLabel(r.source))}${r.deadline_text ? ` · ${esc(r.deadline_text)}` : ""}</div></td>
+        <td style="white-space:nowrap;">${esc(CATEGORY_LABELS[r.category])}</td>
+        <td style="white-space:nowrap;${r.after !== r.category ? "font-weight:600;" : "color:var(--encre-2);"}">${
+          r.after !== r.category ? `→ ${esc(CATEGORY_LABELS[r.after])}` : "inchangé"
+        }</td>
+      </tr>`;
+
+  return html(
+    layout(
+      "Essai d'une règle — Avis en cours",
+      whoStrip(user),
+      `<main>
+      <h2 class="titre-page">Essai : ${esc(libelle)} « ${esc(v.value)} »</h2>
+      <p class="retour"><a href="${configUrl("resultats", "regles")}">← Retour à la configuration</a></p>
+      <div class="card large">
+        <p>
+          ${rows.length === 0 ? "Aucun avis en cours ne contient ce terme" : `<strong>${rows.length}</strong> avis en cours contien${rows.length > 1 ? "nent" : "t"} ce terme`}
+          (majuscules et accents ignorés, dans le titre et le texte de l'avis)${
+            rows.length > 0 ? ` ; <strong>${changed}</strong> changerai${changed > 1 ? "ent" : "t"} de catégorie` : ""
+          }.
+          Une règle « toujours garder » existante l'emporte sur une exclusion.
+          Les avis à venir seront traités de même à chaque mise à jour.
+        </p>
+        ${
+          rows.length > 0
+            ? `<table><thead><tr><th>Avis</th><th>Aujourd'hui</th><th>Avec la règle</th></tr></thead><tbody>${rows.map(ligne).join("")}</tbody></table>`
+            : ""
+        }
+        ${
+          already
+            ? `<p class="meta">Cette règle existe déjà.</p>`
+            : `<form method="post" action="/configuration/regles/ajouter" style="margin-top:12px;">
+          <input type="hidden" name="kind" value="${kind}">
+          <input type="hidden" name="terme" value="${esc(v.value)}">
+          <div class="actions"><button class="primary" type="submit">Ajouter cette règle</button></div>
+        </form>`
+        }
+      </div>
+    </main>`,
+    ),
+  );
 }
 
 async function handleRuleDelete(req: Request, _url: URL, user: AuthUser): Promise<Response> {
@@ -2281,6 +2384,7 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
   { method: "POST", path: "/configuration/mots-cles/supprimer", access: "config", handler: (req, url, user) => handleKeywordDelete(req, url, user!) },
   { method: "POST", path: "/configuration/regles/ajouter", access: "config", handler: (req, url, user) => handleRuleAdd(req, url, user!) },
   { method: "POST", path: "/configuration/regles/supprimer", access: "config", handler: (req, url, user) => handleRuleDelete(req, url, user!) },
+  { method: "GET", path: "/configuration/essai", access: "config", handler: (req, url, user) => handleRuleTest(req, url, user!) },
   { method: "POST", path: "/configuration/reglages", access: "config", handler: (req, url, user) => handleSettingsUpdate(req, url, user!) },
   { method: "POST", path: "/configuration/relancer", access: "config", handler: (req, url, user) => handleRelance(req, url, user!) },
   { method: "GET", path: "/admin", access: "admin", handler: (_req, _url, user) => adminPage(user!) },

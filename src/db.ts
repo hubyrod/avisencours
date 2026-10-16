@@ -192,6 +192,20 @@ export async function migrate(): Promise<void> {
       updated_by bigint REFERENCES users(id) ON DELETE SET NULL,
       updated_at timestamptz NOT NULL DEFAULT now()
     )`;
+  // Repli d'accents côté SQL, pour préfiltrer les avis qu'une règle de tri
+  // toucherait (page /configuration/essai) sans rapatrier tous les textes :
+  // approximation de normalize() (src/classify.ts) — minuscules, accents
+  // latins courants, œ, apostrophe typographique ; lower() ne touche pas aux
+  // majuscules accentuées sous locale C, d'où leur présence dans la table.
+  await sql`
+    CREATE OR REPLACE FUNCTION avis_fold(t text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT AS $$
+      SELECT translate(
+        lower(replace(replace(replace(t, 'œ', 'oe'), 'Œ', 'oe'), '’', '''')),
+        'àáâãäåÀÁÂÃÄÅèéêëÈÉÊËìíîïÌÍÎÏòóôõöÒÓÔÕÖùúûüÙÚÛÜýÿÝçÇñÑ',
+        'aaaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuuyyyccnn')
+    $$`;
+
   // Mots-clés de départ, liste par liste, uniquement pour une liste encore
   // absente de la table (chaque liste vit ensuite dans /configuration ; une
   // base d'avant les listes secondaires reçoit ainsi les leurs). Stockés sans
@@ -943,6 +957,58 @@ export async function addScopeRule(
 
 export async function deleteScopeRule(id: number): Promise<void> {
   await db()`DELETE FROM scope_rules WHERE id = ${id}`;
+}
+
+// --- Essai d'une règle de tri sur les avis en cours ------------------------
+// Les avis « en cours » du dernier run réussi (principaux, échéance non
+// passée) dont le texte normalisé contient le terme — préfiltre SQL
+// (avis_fold, approximation de normalize()), la correspondance exacte étant
+// rejouée en JS par applyScopeRules sur les lignes rendues.
+
+export type RuleCandidate = {
+  idweb: string;
+  objet: string;
+  raw: string;
+  acheteur: string | null;
+  source: Source;
+  category: Category;
+  deadline_text: string | null;
+};
+
+// Terme normalisé -> motif LIKE (jokers échappés).
+function likeFragment(term: string): string {
+  return `%${term.replace(/[%_\\]/g, "\\$&")}%`;
+}
+
+export async function findCurrentMatching(runId: number, normalizedTerm: string): Promise<RuleCandidate[]> {
+  const rows = await db()`
+    SELECT idweb, objet, raw, acheteur, source, category, deadline_text
+    FROM announcements a
+    WHERE a.last_seen_run_id = ${runId}
+      AND a.doublon_de IS NULL
+      AND (a.deadline IS NULL OR a.deadline >= now())
+      AND avis_fold(a.objet || ' ' || coalesce(a.raw, '')) LIKE ${likeFragment(normalizedTerm)}
+    ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
+  return rows as RuleCandidate[];
+}
+
+// Nombre d'avis en cours contenant chaque terme (une seule lecture de la
+// table pour toutes les règles). Clé = terme normalisé tel que passé.
+export async function countCurrentMatching(runId: number, normalizedTerms: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>(normalizedTerms.map((t) => [t, 0]));
+  if (normalizedTerms.length === 0) return out;
+  const patterns = normalizedTerms.map(likeFragment);
+  const rows = await db()`
+    SELECT t.ord::int AS ord, count(a.idweb)::int AS n
+    FROM jsonb_array_elements_text(${JSON.stringify(patterns)}::text::jsonb) WITH ORDINALITY AS t(pattern, ord)
+    LEFT JOIN announcements a
+      ON a.last_seen_run_id = ${runId}
+      AND a.doublon_de IS NULL
+      AND (a.deadline IS NULL OR a.deadline >= now())
+      AND avis_fold(a.objet || ' ' || coalesce(a.raw, '')) LIKE t.pattern
+    GROUP BY t.ord`;
+  for (const r of rows as Array<{ ord: number; n: number }>) out.set(normalizedTerms[r.ord - 1]!, r.n);
+  return out;
 }
 
 export async function getSetting(key: string): Promise<string | null> {

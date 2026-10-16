@@ -251,6 +251,30 @@ if (!TEST_URL) {
     await control`TRUNCATE search_keywords RESTART IDENTITY`;
   });
 
+  test("essai d'une règle de tri sur les avis en cours, compte par règle", async () => {
+    let page = await get("/configuration/essai?kind=exclude&terme=PAPI");
+    expect(page.status).toBe(200);
+    expect(page.text).toContain("Essai : toujours exclure « PAPI »");
+    expect(page.text).toContain("<strong>1</strong> avis en cours contient ce terme");
+    expect(page.text).toContain("<strong>1</strong> changerait de catégorie");
+    expect(page.text).toContain("Étude PAPI achatpublic");
+    expect(page.text).toContain("→ exclu");
+    expect(page.text).toContain("Ajouter cette règle");
+    // Terme absent : rien ; terme invalide : page de configuration avec erreur.
+    expect((await get("/configuration/essai?kind=keep&terme=zzzz")).text).toContain("Aucun avis en cours ne contient ce terme");
+    expect((await get("/configuration/essai?kind=keep&terme=x")).text).toContain("Terme trop court");
+    // Une règle « garder » existante l'emporte : l'exclusion ne change plus rien.
+    await post("/configuration/regles/ajouter", { kind: "keep", terme: "papi" });
+    page = await get("/configuration/essai?kind=exclude&terme=PAPI");
+    expect(page.text).toContain("<strong>0</strong> changerait");
+    expect(page.text).toContain("inchangé");
+    // La liste des règles porte le compte d'avis en cours.
+    page = await get("/configuration");
+    expect(page.text).toContain("1 avis en cours</a>");
+    expect(page.text).toContain('formaction="/configuration/essai"');
+    await control`DELETE FROM scope_rules`;
+  });
+
   test("réglages : chaque carte n'écrit que ses champs et revient sur son onglet", async () => {
     let res = await post("/configuration/reglages", { fenetre: "21" });
     expect(res.status).toBe(303);
