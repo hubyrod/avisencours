@@ -128,9 +128,10 @@ async function main() {
     const classifierSetting = settings.classifier_mode ?? null;
     const depSetting = settings.code_departements ?? null;
     const modelsSetting = settings.llm_models ?? null;
+    const asRule = (r: (typeof ruleRows)[number]) => ({ term: r.term, source: r.source, champ: r.champ, motEntier: r.motEntier });
     const scopeRules = {
-      keep: ruleRows.filter((r) => r.kind === "keep").map((r) => r.term),
-      exclude: ruleRows.filter((r) => r.kind === "exclude").map((r) => r.term),
+      keep: ruleRows.filter((r) => r.kind === "keep").map(asRule),
+      exclude: ruleRows.filter((r) => r.kind === "exclude").map(asRule),
     };
     const dep = parseDepartements(depSetting ?? "");
     const digestWindow =

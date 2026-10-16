@@ -96,6 +96,10 @@ import {
   type Liste,
   validateRuleTerm,
   applyScopeRules,
+  parseRuleScope,
+  describeScope,
+  DEFAULT_SCOPE,
+  type RuleScope,
   validateDigestWindow,
   validateClassifierMode,
   parseDepartements,
@@ -890,8 +894,19 @@ function renderJournalCard(events: ConfigEvent[]): string {
       </div>`;
 }
 
-function essaiUrl(kind: "keep" | "exclude", term: string): string {
-  return `/configuration/essai?${new URLSearchParams({ kind, terme: term })}`;
+function essaiUrl(kind: "keep" | "exclude", term: string, scope: RuleScope = DEFAULT_SCOPE): string {
+  const q = new URLSearchParams({ kind, terme: term });
+  if (scope.source) q.set("source", scope.source);
+  if (scope.champ === "objet") q.set("champ", "objet");
+  if (scope.motEntier) q.set("entier", "1");
+  return `/configuration/essai?${q}`;
+}
+
+// Champs cachés qui reportent la portée d'une règle dans un formulaire.
+function scopeInputs(scope: RuleScope): string {
+  return `<input type="hidden" name="source" value="${esc(scope.source ?? "")}">
+          <input type="hidden" name="champ" value="${scope.champ}">
+          <input type="hidden" name="entier" value="${scope.motEntier ? "1" : "0"}">`;
 }
 
 function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude", hits: Map<number, number>, hasRun: boolean): string {
@@ -901,11 +916,12 @@ function ruleList(rules: ScopeRuleRow[], kind: "keep" | "exclude", hits: Map<num
       (r) => `
         <li class="${r.enabled ? "" : "inactif"}" style="display:flex;align-items:center;gap:8px;margin:4px 0;flex-wrap:wrap;">
           <span>${esc(r.term)}</span>
+          ${describeScope(r) ? `<span class="badge-statut">${esc(describeScope(r))}</span>` : ""}
           ${r.note ? `<span class="meta" style="margin:0;">— ${esc(r.note)}</span>` : ""}
           ${r.enabled ? "" : `<span class="meta" style="margin:0;">(en pause)</span>`}
           ${
             hasRun
-              ? `<a class="meta" href="${esc(essaiUrl(kind, r.term))}" style="margin:0;">${hits.get(r.id) ?? 0} avis en cours</a>`
+              ? `<a class="meta" href="${esc(essaiUrl(kind, r.term, r))}" style="margin:0;">${hits.get(r.id) ?? 0} avis en cours</a>`
               : ""
           }
           <form method="post" action="/configuration/regles/activer" style="margin:0;">
@@ -964,8 +980,11 @@ async function configPage(
   // Onglet Résultats : combien d'avis en cours chaque règle touche (estimation SQL).
   const ruleHits = new Map<number, number>();
   if (onglet === "resultats" && lastSuccess && rules.length > 0) {
-    const counts = await countCurrentMatching(lastSuccess.id, rules.map((r) => normalize(r.term)));
-    for (const r of rules) ruleHits.set(r.id, counts.get(normalize(r.term)) ?? 0);
+    const counts = await countCurrentMatching(
+      lastSuccess.id,
+      rules.map((r) => ({ term: normalize(r.term), source: r.source, champ: r.champ, motEntier: r.motEntier })),
+    );
+    rules.forEach((r, i) => ruleHits.set(r.id, counts[i] ?? 0));
   }
 
   const banner = notice
@@ -1044,7 +1063,9 @@ function renderOngletResultats(d: {
         <p>
           Appliquées avant le classement automatique, en cherchant le terme dans le texte
           de l'avis (majuscules et accents ignorés). Une règle « toujours garder »
-          l'emporte sur une règle « toujours exclure ».
+          l'emporte sur une règle « toujours exclure ». Une règle peut se limiter à une source,
+          à l'intitulé seul (plutôt que tout le texte), ou exiger le mot entier
+          (« vélo » ne touche alors plus « développement » ; le pluriel reste accepté).
         </p>
         ${
           d.hasRun
@@ -1066,6 +1087,19 @@ function renderOngletResultats(d: {
                    placeholder="ex. fibre optique" style="flex:1;min-width:160px;">
             <input type="text" name="note" maxlength="200" placeholder="note (facultatif)" style="flex:1;min-width:160px;"
                    aria-label="Note">
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+            <select name="source" ${SELECT_STYLE} aria-label="Source">
+              <option value="">toutes les sources</option>
+              ${SOURCES.map((s) => `<option value="${s.id}">${esc(s.label)} seulement</option>`).join("")}
+            </select>
+            <select name="champ" ${SELECT_STYLE} aria-label="Champ">
+              <option value="texte">dans tout le texte</option>
+              <option value="objet">dans l'intitulé seul</option>
+            </select>
+            <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:13.5px;">
+              <input type="checkbox" name="entier" value="1"> mot entier
+            </label>
             ${d.hasRun ? `<button type="submit" formmethod="get" formaction="/configuration/essai">Tester</button>` : ""}
             <button class="primary" type="submit">Ajouter</button>
           </div>
@@ -1245,20 +1279,24 @@ async function handleKeywordDelete(req: Request, _url: URL, user: AuthUser): Pro
 }
 
 async function handleRuleAdd(req: Request, _url: URL, user: AuthUser): Promise<Response> {
-  const { kind = "", terme = "", note = "" } = await form(req);
+  const data = await form(req);
+  const { kind = "", terme = "", note = "" } = data;
   if (kind !== "keep" && kind !== "exclude") {
     return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
   }
   const v = validateRuleTerm(terme);
   if (!v.ok) return configPage(user, "resultats", { kind: "error", text: v.error });
-  const added = await addScopeRule(kind, v.value, user.id, noteValue(note));
+  const scope = parseRuleScope(data);
+  if (!scope.ok) return configPage(user, "resultats", { kind: "error", text: scope.error });
+  const added = await addScopeRule(kind, v.value, user.id, noteValue(note), scope.value);
   if (!added) return configPage(user, "resultats", { kind: "error", text: "Cette règle existe déjà." });
-  await logConfigEvent(user, "regle", "ajout", `Règle ajoutée : ${ruleLabel(kind, v.value)}${noteValue(note) ? ` — ${noteValue(note)}` : ""}`);
+  await logConfigEvent(user, "regle", "ajout", `Règle ajoutée : ${ruleLabel(kind, v.value, scope.value)}${noteValue(note) ? ` — ${noteValue(note)}` : ""}`);
   return redirect(configUrl("resultats", "regles"), 303);
 }
 
-function ruleLabel(kind: "keep" | "exclude", term: string): string {
-  return `${kind === "keep" ? "toujours garder" : "toujours exclure"} « ${term} »`;
+function ruleLabel(kind: "keep" | "exclude", term: string, scope: RuleScope = DEFAULT_SCOPE): string {
+  const q = describeScope({ term, ...scope });
+  return `${kind === "keep" ? "toujours garder" : "toujours exclure"} « ${term} »${q ? ` (${q})` : ""}`;
 }
 
 async function handleRuleToggle(req: Request, _url: URL, user: AuthUser): Promise<Response> {
@@ -1270,7 +1308,7 @@ async function handleRuleToggle(req: Request, _url: URL, user: AuthUser): Promis
   const enabled = valeur === "1";
   if (row.enabled !== enabled) {
     await setScopeRuleEnabled(rid, enabled);
-    await logConfigEvent(user, "regle", enabled ? "activation" : "pause", `Règle ${enabled ? "réactivée" : "mise en pause"} : ${ruleLabel(row.kind, row.term)}`);
+    await logConfigEvent(user, "regle", enabled ? "activation" : "pause", `Règle ${enabled ? "réactivée" : "mise en pause"} : ${ruleLabel(row.kind, row.term, row)}`);
   }
   return redirect(configUrl("resultats", "regles"), 303);
 }
@@ -1287,27 +1325,41 @@ async function handleRuleTest(_req: Request, url: URL, user: AuthUser): Promise<
   if (kind !== "keep" && kind !== "exclude") return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
   const v = validateRuleTerm(terme);
   if (!v.ok) return configPage(user, "resultats", { kind: "error", text: v.error });
+  const parsedScope = parseRuleScope({
+    source: url.searchParams.get("source") ?? "",
+    champ: url.searchParams.get("champ") ?? "texte",
+    entier: url.searchParams.get("entier") ?? "",
+  });
+  if (!parsedScope.ok) return configPage(user, "resultats", { kind: "error", text: parsedScope.error });
+  const scope = parsedScope.value;
   const lastSuccess = await getLastSuccessfulRun();
   if (!lastSuccess) {
     return configPage(user, "resultats", { kind: "error", text: "Aucune mise à jour réussie : rien sur quoi essayer la règle." });
   }
-  const [existing, candidates] = await Promise.all([listScopeRules(), findCurrentMatching(lastSuccess.id, normalize(v.value))]);
-  const alone = { keep: kind === "keep" ? [v.value] : [], exclude: kind === "exclude" ? [v.value] : [] };
+  const candidate = { term: v.value, ...scope };
+  const [existing, candidates] = await Promise.all([
+    listScopeRules(),
+    findCurrentMatching(lastSuccess.id, { ...candidate, term: normalize(v.value) }),
+  ]);
+  const alone = { keep: kind === "keep" ? [candidate] : [], exclude: kind === "exclude" ? [candidate] : [] };
   const active = existing.filter((r) => r.enabled);
   const withNew = {
-    keep: [...active.filter((r) => r.kind === "keep").map((r) => r.term), ...alone.keep],
-    exclude: [...active.filter((r) => r.kind === "exclude").map((r) => r.term), ...alone.exclude],
+    keep: [...active.filter((r) => r.kind === "keep"), ...alone.keep],
+    exclude: [...active.filter((r) => r.kind === "exclude"), ...alone.exclude],
   };
   const rows = candidates
     .filter((c) => applyScopeRules(c, alone) !== null)
     .map((c) => ({ ...c, after: (applyScopeRules(c, withNew)?.category ?? c.category) as Category }));
   const changed = rows.filter((r) => r.after !== r.category).length;
-  const already = existing.some((r) => r.kind === kind && r.term === v.value);
+  const already = existing.some(
+    (r) => r.kind === kind && r.term === v.value && r.source === scope.source && r.champ === scope.champ && r.motEntier === scope.motEntier,
+  );
+  const qualif = describeScope(candidate);
   const libelle = kind === "keep" ? "toujours garder" : "toujours exclure";
 
   const ligne = (r: RuleCandidate & { after: Category }) => `
       <tr>
-        <td><a href="/avis/${encodeURIComponent(r.idweb)}?retour=${encodeURIComponent(essaiUrl(kind, v.value))}">${esc(r.objet)}</a>
+        <td><a href="/avis/${encodeURIComponent(r.idweb)}?retour=${encodeURIComponent(essaiUrl(kind, v.value, scope))}">${esc(r.objet)}</a>
           <div class="meta">${esc(r.acheteur ?? "—")} · ${esc(sourceLabel(r.source))}${r.deadline_text ? ` · ${esc(r.deadline_text)}` : ""}</div></td>
         <td style="white-space:nowrap;">${esc(CATEGORY_LABELS[r.category])}</td>
         <td style="white-space:nowrap;${r.after !== r.category ? "font-weight:600;" : "color:var(--encre-2);"}">${
@@ -1320,12 +1372,12 @@ async function handleRuleTest(_req: Request, url: URL, user: AuthUser): Promise<
       "Essai d'une règle — Avis en cours",
       whoStrip(user),
       `<main>
-      <h2 class="titre-page">Essai : ${esc(libelle)} « ${esc(v.value)} »</h2>
+      <h2 class="titre-page">Essai : ${esc(libelle)} « ${esc(v.value)} »${qualif ? ` <span class="badge-statut">${esc(qualif)}</span>` : ""}</h2>
       <p class="retour"><a href="${configUrl("resultats", "regles")}">← Retour à la configuration</a></p>
       <div class="card large">
         <p>
           ${rows.length === 0 ? "Aucun avis en cours ne contient ce terme" : `<strong>${rows.length}</strong> avis en cours contien${rows.length > 1 ? "nent" : "t"} ce terme`}
-          (majuscules et accents ignorés, dans le titre et le texte de l'avis)${
+          (majuscules et accents ignorés, ${scope.champ === "objet" ? "dans l'intitulé seul" : "dans le titre et le texte de l'avis"}${scope.motEntier ? ", mot entier" : ""}${scope.source ? `, source ${esc(sourceLabel(scope.source))}` : ""})${
             rows.length > 0 ? ` ; <strong>${changed}</strong> changerai${changed > 1 ? "ent" : "t"} de catégorie` : ""
           }.
           Une règle « toujours garder » existante l'emporte sur une exclusion.
@@ -1342,6 +1394,7 @@ async function handleRuleTest(_req: Request, url: URL, user: AuthUser): Promise<
             : `<form method="post" action="/configuration/regles/ajouter" style="margin-top:12px;">
           <input type="hidden" name="kind" value="${kind}">
           <input type="hidden" name="terme" value="${esc(v.value)}">
+          ${scopeInputs(scope)}
           <div class="actions"><button class="primary" type="submit">Ajouter cette règle</button></div>
         </form>`
         }
@@ -1357,7 +1410,7 @@ async function handleRuleDelete(req: Request, _url: URL, user: AuthUser): Promis
   if (!Number.isInteger(rid)) return configPage(user, "resultats", { kind: "error", text: "Requête invalide." });
   const row = (await listScopeRules()).find((r) => r.id === rid);
   await deleteScopeRule(rid);
-  if (row) await logConfigEvent(user, "regle", "suppression", `Règle supprimée : ${ruleLabel(row.kind, row.term)}`);
+  if (row) await logConfigEvent(user, "regle", "suppression", `Règle supprimée : ${ruleLabel(row.kind, row.term, row)}`);
   return redirect(configUrl("resultats", "regles"), 303);
 }
 

@@ -10,6 +10,10 @@ import {
   parseModelChain,
   parseDepartements,
   searchesByListe,
+  ruleMatches,
+  wholeWordRegex,
+  describeScope,
+  parseRuleScope,
   isListe,
   isFamille,
   LISTES,
@@ -63,6 +67,38 @@ describe("applyScopeRules", () => {
     const excl = applyScopeRules(avis("Réseau fibre"), { keep: [], exclude: ["fibre"] });
     expect(excl?.reason).toContain("règle personnalisée");
     expect(excl?.reason).toContain("fibre");
+  });
+});
+
+describe("portée d'une règle", () => {
+  const a = { objet: "Plan vélo et développement", raw: "Acheteur: Ville — schéma des vélos", source: "boamp" as const };
+  test("sous-chaîne par défaut, mot entier avec pluriel toléré", () => {
+    expect(ruleMatches(a, "velo")).toBe(true);
+    expect(ruleMatches(a, "dévelop")).toBe(true);
+    expect(ruleMatches(a, { term: "vélo", motEntier: true })).toBe(true);
+    expect(ruleMatches(a, { term: "dévelop", motEntier: true })).toBe(false);
+    expect(ruleMatches({ objet: "Développement", raw: "" }, { term: "vélo", motEntier: true })).toBe(false);
+    expect(wholeWordRegex("plan velo").test("le plan-velos de la ville")).toBe(true);
+    expect(wholeWordRegex("a+b").test("x a+b y")).toBe(true);
+  });
+  test("intitulé seul, source", () => {
+    expect(ruleMatches(a, { term: "schéma" })).toBe(true);
+    expect(ruleMatches(a, { term: "schéma", champ: "objet" })).toBe(false);
+    expect(ruleMatches(a, { term: "vélo", source: "boamp" })).toBe(true);
+    expect(ruleMatches(a, { term: "vélo", source: "afd" })).toBe(false);
+    // Avis sans source connue : la restriction de source ne filtre pas.
+    expect(ruleMatches({ objet: "vélo", raw: "" }, { term: "vélo", source: "afd" })).toBe(true);
+  });
+  test("applyScopeRules cite les qualificatifs ; description et saisie de la portée", () => {
+    const r = applyScopeRules(a, { keep: [], exclude: [{ term: "vélo", motEntier: true, champ: "objet", source: "boamp" }] });
+    expect(r?.category).toBe("excluded");
+    expect(r?.reason).toBe("règle personnalisée — exclu (« vélo » — mot entier, intitulé seul, BOAMP)");
+    expect(describeScope("vélo")).toBe("");
+    expect(describeScope({ term: "x", source: "achatpublic" })).toBe("achatpublic.com");
+    expect(parseRuleScope({})).toEqual({ ok: true, value: { source: null, champ: "texte", motEntier: false } });
+    expect(parseRuleScope({ source: "afd", champ: "objet", entier: "1" })).toEqual({ ok: true, value: { source: "afd", champ: "objet", motEntier: true } });
+    expect(parseRuleScope({ source: "x" }).ok).toBe(false);
+    expect(parseRuleScope({ champ: "raw" }).ok).toBe(false);
   });
 });
 

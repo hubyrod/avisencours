@@ -17,6 +17,7 @@ if (!TEST_URL) {
 } else {
   Bun.env.POSTGRESQL_ADDON_URI = TEST_URL;
   const db = await import("./db.ts");
+  const { DEFAULT_SCOPE } = await import("./rules.ts");
   const control = new SQL(TEST_URL);
 
   const stats = {
@@ -328,13 +329,32 @@ if (!TEST_URL) {
       ]);
       await control`UPDATE announcements SET doublon_de = 'R2' WHERE idweb = 'R4'`;
       await db.finishRun(run, { status: "success", totalFetched: 4, relevant: 3, travaux: 0, excluded: 0 });
-      const fibre = await db.findCurrentMatching(run, "fibre optique");
+      const spec = (term: string, scope: Partial<typeof DEFAULT_SCOPE> = {}) => ({ term, ...DEFAULT_SCOPE, ...scope });
+      const fibre = await db.findCurrentMatching(run, spec("fibre optique"));
       expect(fibre.map((a) => a.idweb)).toEqual(["R2"]); // R3 échue, R4 doublon
-      expect((await db.findCurrentMatching(run, "maitrise d'oeuvre")).map((a) => a.idweb)).toEqual(["R1"]);
-      expect((await db.findCurrentMatching(run, "100%")).length).toBe(0);
-      const counts = await db.countCurrentMatching(run, ["fibre optique", "maitrise d'oeuvre", "absent"]);
-      expect([...counts.entries()]).toEqual([["fibre optique", 1], ["maitrise d'oeuvre", 1], ["absent", 0]]);
-      expect((await db.countCurrentMatching(run, [])).size).toBe(0);
+      expect((await db.findCurrentMatching(run, spec("maitrise d'oeuvre"))).map((a) => a.idweb)).toEqual(["R1"]);
+      expect((await db.findCurrentMatching(run, spec("100%"))).length).toBe(0);
+      // Portée : intitulé seul, source, mot entier (« velo » ⊄ « velos » ? si : pluriel toléré ; ⊄ « developpement »).
+      expect((await db.findCurrentMatching(run, spec("fibre optique", { champ: "objet" }))).length).toBe(0);
+      expect((await db.findCurrentMatching(run, spec("fibre optique", { source: "marchesonline" }))).length).toBe(0);
+      expect((await db.findCurrentMatching(run, spec("fibre optique", { source: "boamp" }))).length).toBe(1);
+      expect((await db.findCurrentMatching(run, spec("velo", { motEntier: true }))).map((a) => a.idweb)).toEqual(["R2"]);
+      expect((await db.findCurrentMatching(run, spec("vel", { motEntier: true }))).length).toBe(0);
+      expect((await db.findCurrentMatching(run, spec("vel"))).length).toBe(1);
+      expect((await db.findCurrentMatching(run, spec("plan velo", { motEntier: true, champ: "objet" }))).length).toBe(1);
+      const counts = await db.countCurrentMatching(run, [spec("fibre optique"), spec("maitrise d'oeuvre"), spec("absent"), spec("vel", { motEntier: true }), spec("fibre", { champ: "objet" })]);
+      expect(counts).toEqual([1, 1, 0, 0, 0]);
+      expect((await db.countCurrentMatching(run, [])).length).toBe(0);
+      // Même terme, portées différentes : deux règles ; même portée : doublon refusé.
+      expect(await db.addScopeRule("exclude", "fibre", 1)).toBe(true);
+      expect(await db.addScopeRule("exclude", "fibre", 1, null, { ...DEFAULT_SCOPE, motEntier: true })).toBe(true);
+      expect(await db.addScopeRule("exclude", "fibre", 1, null, { ...DEFAULT_SCOPE, source: "boamp" })).toBe(true);
+      expect(await db.addScopeRule("exclude", "fibre", 1, null, { ...DEFAULT_SCOPE, source: "boamp" })).toBe(false);
+      expect(await db.addScopeRule("exclude", "fibre", 1)).toBe(false);
+      expect((await db.listScopeRules()).filter((r) => r.term === "fibre").map((r) => [r.source, r.champ, r.motEntier])).toEqual([
+        [null, "texte", false], [null, "texte", true], ["boamp", "texte", false],
+      ]);
+      await control`DELETE FROM scope_rules`;
       await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
     });
 

@@ -3,7 +3,7 @@ import { normalizeProgress, type RunProgress } from "./progress.ts";
 import { deadlineDay, grouperDoublons, type Publication } from "./doublons.ts";
 import type { ClassifiedItem } from "./pipeline.ts";
 import { DEFAULT_LISTES } from "./defaults.ts";
-import { LISTES, type Liste } from "./rules.ts";
+import { DEFAULT_SCOPE, LISTES, type Champ, type Liste, type RuleScope } from "./rules.ts";
 import type { LlmStats } from "./llm.ts";
 import type { LlmMemoEntry } from "./classify-llm.ts";
 import type { Category } from "./classify.ts";
@@ -186,11 +186,17 @@ export async function migrate(): Promise<void> {
       kind       text NOT NULL CHECK (kind IN ('keep', 'exclude')),
       term       text NOT NULL,
       created_by bigint REFERENCES users(id) ON DELETE SET NULL,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      UNIQUE (kind, term)
+      created_at timestamptz NOT NULL DEFAULT now()
     )`;
   await sql`ALTER TABLE scope_rules ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true`;
   await sql`ALTER TABLE scope_rules ADD COLUMN IF NOT EXISTS note text`;
+  // Portée d'une règle (src/rules.ts : RuleScope) : source (NULL = toutes),
+  // champ lu, mot entier. L'unicité porte sur le terme et sa portée.
+  await sql`ALTER TABLE scope_rules ADD COLUMN IF NOT EXISTS source text`;
+  await sql`ALTER TABLE scope_rules ADD COLUMN IF NOT EXISTS champ text NOT NULL DEFAULT 'texte'`;
+  await sql`ALTER TABLE scope_rules ADD COLUMN IF NOT EXISTS mot_entier boolean NOT NULL DEFAULT false`;
+  await sql`ALTER TABLE scope_rules DROP CONSTRAINT IF EXISTS scope_rules_kind_term_key`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS scope_rules_portee ON scope_rules (kind, term, coalesce(source, ''), champ, mot_entier)`;
   // Journal des modifications de la configuration (qui a changé quoi, quand) :
   // lignes ajoutées seulement, l'email est recopié pour survivre à la
   // suppression du compte.
@@ -926,7 +932,16 @@ export type KeywordRow = {
   enabled: boolean;
   note: string | null;
 };
-export type ScopeRuleRow = { id: number; kind: "keep" | "exclude"; term: string; enabled: boolean; note: string | null };
+export type ScopeRuleRow = {
+  id: number;
+  kind: "keep" | "exclude";
+  term: string;
+  enabled: boolean;
+  note: string | null;
+  source: Source | null;
+  champ: Champ;
+  motEntier: boolean;
+};
 
 export async function listKeywords(): Promise<KeywordRow[]> {
   const rows = await db()`SELECT id, term, position, liste, famille, enabled, note FROM search_keywords ORDER BY liste, famille, position, id`;
@@ -980,14 +995,19 @@ export async function setKeywordEnabled(id: number, enabled: boolean): Promise<b
 }
 
 export async function listScopeRules(): Promise<ScopeRuleRow[]> {
-  const rows = await db()`SELECT id, kind, term, enabled, note FROM scope_rules ORDER BY kind, term, id`;
-  return rows.map((r: { id: unknown; kind: "keep" | "exclude"; term: string; enabled: boolean; note: string | null }) => ({
-    id: Number(r.id),
-    kind: r.kind,
-    term: r.term,
-    enabled: r.enabled,
-    note: r.note,
-  }));
+  const rows = await db()`SELECT id, kind, term, enabled, note, source, champ, mot_entier FROM scope_rules ORDER BY kind, term, id`;
+  return rows.map(
+    (r: { id: unknown; kind: "keep" | "exclude"; term: string; enabled: boolean; note: string | null; source: Source | null; champ: Champ; mot_entier: boolean }) => ({
+      id: Number(r.id),
+      kind: r.kind,
+      term: r.term,
+      enabled: r.enabled,
+      note: r.note,
+      source: r.source,
+      champ: r.champ,
+      motEntier: r.mot_entier,
+    }),
+  );
 }
 
 export async function addScopeRule(
@@ -995,11 +1015,12 @@ export async function addScopeRule(
   term: string,
   userId: number,
   note: string | null = null,
+  scope: RuleScope = DEFAULT_SCOPE,
 ): Promise<boolean> {
   const rows = await db()`
-    INSERT INTO scope_rules (kind, term, note, created_by)
-    VALUES (${kind}, ${term}, ${note}, ${userId})
-    ON CONFLICT (kind, term) DO NOTHING
+    INSERT INTO scope_rules (kind, term, note, source, champ, mot_entier, created_by)
+    VALUES (${kind}, ${term}, ${note}, ${scope.source}, ${scope.champ}, ${scope.motEntier}, ${userId})
+    ON CONFLICT (kind, term, coalesce(source, ''), champ, mot_entier) DO NOTHING
     RETURNING id`;
   return rows.length > 0;
 }
@@ -1061,39 +1082,58 @@ export type RuleCandidate = {
   deadline_text: string | null;
 };
 
-// Terme normalisé -> motif LIKE (jokers échappés).
-function likeFragment(term: string): string {
-  return `%${term.replace(/[%_\\]/g, "\\$&")}%`;
+// Critère d'une règle, côté SQL : motif LIKE (jokers échappés) ou expression
+// régulière « mot entier » (bornes alphanumériques, pluriel toléré) sur le
+// texte replié, champ lu, source. Terme déjà normalisé (normalize()).
+export type MatchSpec = { term: string } & RuleScope;
+
+function sqlCriterion(m: MatchSpec): { like: string | null; re: string | null; objet: boolean; source: string | null } {
+  if (m.motEntier) {
+    const escaped = m.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/[\s-]+/g, "[[:space:]-]+");
+    return { like: null, re: `(^|[^a-z0-9])${escaped}s?([^a-z0-9]|$)`, objet: m.champ === "objet", source: m.source };
+  }
+  return { like: `%${m.term.replace(/[%_\\]/g, "\\$&")}%`, re: null, objet: m.champ === "objet", source: m.source };
 }
 
-export async function findCurrentMatching(runId: number, normalizedTerm: string): Promise<RuleCandidate[]> {
+export async function findCurrentMatching(runId: number, spec: MatchSpec): Promise<RuleCandidate[]> {
+  const c = sqlCriterion(spec);
   const rows = await db()`
     SELECT idweb, objet, raw, acheteur, source, category, deadline_text
     FROM announcements a
     WHERE a.last_seen_run_id = ${runId}
       AND a.doublon_de IS NULL
       AND (a.deadline IS NULL OR a.deadline >= now())
-      AND avis_fold(a.objet || ' ' || coalesce(a.raw, '')) LIKE ${likeFragment(normalizedTerm)}
+      AND (${c.source}::text IS NULL OR a.source = ${c.source})
+      AND (
+        CASE WHEN ${c.like}::text IS NOT NULL
+          THEN avis_fold(CASE WHEN ${c.objet} THEN a.objet ELSE a.objet || ' ' || coalesce(a.raw, '') END) LIKE ${c.like}
+          ELSE avis_fold(CASE WHEN ${c.objet} THEN a.objet ELSE a.objet || ' ' || coalesce(a.raw, '') END) ~ ${c.re}
+        END)
     ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
   return rows as RuleCandidate[];
 }
 
-// Nombre d'avis en cours contenant chaque terme (une seule lecture de la
-// table pour toutes les règles). Clé = terme normalisé tel que passé.
-export async function countCurrentMatching(runId: number, normalizedTerms: string[]): Promise<Map<string, number>> {
-  const out = new Map<string, number>(normalizedTerms.map((t) => [t, 0]));
-  if (normalizedTerms.length === 0) return out;
-  const patterns = normalizedTerms.map(likeFragment);
+// Nombre d'avis en cours que chaque critère touche (une seule lecture de la
+// table pour toutes les règles), dans l'ordre des critères passés.
+export async function countCurrentMatching(runId: number, specs: MatchSpec[]): Promise<number[]> {
+  const out = specs.map(() => 0);
+  if (specs.length === 0) return out;
+  const criteria = specs.map(sqlCriterion);
   const rows = await db()`
     SELECT t.ord::int AS ord, count(a.idweb)::int AS n
-    FROM jsonb_array_elements_text(${JSON.stringify(patterns)}::text::jsonb) WITH ORDINALITY AS t(pattern, ord)
+    FROM jsonb_array_elements(${JSON.stringify(criteria)}::text::jsonb) WITH ORDINALITY AS t(c, ord)
     LEFT JOIN announcements a
       ON a.last_seen_run_id = ${runId}
       AND a.doublon_de IS NULL
       AND (a.deadline IS NULL OR a.deadline >= now())
-      AND avis_fold(a.objet || ' ' || coalesce(a.raw, '')) LIKE t.pattern
+      AND (t.c->>'source' IS NULL OR a.source = t.c->>'source')
+      AND (
+        CASE WHEN t.c->>'like' IS NOT NULL
+          THEN avis_fold(CASE WHEN (t.c->>'objet')::boolean THEN a.objet ELSE a.objet || ' ' || coalesce(a.raw, '') END) LIKE t.c->>'like'
+          ELSE avis_fold(CASE WHEN (t.c->>'objet')::boolean THEN a.objet ELSE a.objet || ' ' || coalesce(a.raw, '') END) ~ (t.c->>'re')
+        END)
     GROUP BY t.ord`;
-  for (const r of rows as Array<{ ord: number; n: number }>) out.set(normalizedTerms[r.ord - 1]!, r.n);
+  for (const r of rows as Array<{ ord: number; n: number }>) out[r.ord - 1] = r.n;
   return out;
 }
 

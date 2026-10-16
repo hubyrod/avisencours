@@ -5,6 +5,7 @@
 import { normalize, type Classification } from "./classify.ts";
 import { FAMILLES, FAMILLE_MARCHE, type Famille, type FamilleSearch } from "./familles.ts";
 import type { Source } from "./scraper.ts";
+import { SOURCES, isSource, sourceLabel } from "./sources.ts";
 
 // Listes de mots-clés : une par moteur de recherche. BOAMP interroge l'API
 // (une requête OR, sans famille) ; les autres listent toutes les consultations
@@ -86,28 +87,86 @@ export function searchesByListe(rows: readonly KeywordLike[]): Partial<Record<Li
   return out;
 }
 
-export type ScopeRules = { keep: string[]; exclude: string[] };
+// Portée d'une règle : la source (null = toutes), le champ lu (texte complet
+// ou intitulé seul) et la correspondance (sous-chaîne, ou mot entier avec un
+// pluriel toléré, comme les sigles des listes de mots-clés).
+export type Champ = "texte" | "objet";
+export type RuleScope = { source: Source | null; champ: Champ; motEntier: boolean };
+export type ScopeRule = { term: string } & Partial<RuleScope>;
+// Une règle se donne aussi par son seul terme (portée par défaut : toutes les
+// sources, texte complet, sous-chaîne).
+export type ScopeRuleInput = string | ScopeRule;
+export type ScopeRules = { keep: ScopeRuleInput[]; exclude: ScopeRuleInput[] };
+
+export const DEFAULT_SCOPE: RuleScope = { source: null, champ: "texte", motEntier: false };
+
+export function toRule(r: ScopeRuleInput): { term: string } & RuleScope {
+  return typeof r === "string" ? { term: r, ...DEFAULT_SCOPE } : { ...DEFAULT_SCOPE, ...r };
+}
+
+// Motif « mot entier » sur texte normalisé : bornes alphanumériques, pluriel
+// toléré, espaces et traits d'union interchangeables.
+export function wholeWordRegex(normalizedTerm: string): RegExp {
+  const escaped = normalizedTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/[\s-]+/g, "[\\s-]+");
+  return new RegExp(`(?<![a-z0-9])${escaped}s?(?![a-z0-9])`);
+}
+
+export function ruleMatches(a: { objet: string; raw: string; source?: Source }, r: ScopeRuleInput): boolean {
+  const rule = toRule(r);
+  if (rule.source && a.source && a.source !== rule.source) return false;
+  const hay = normalize(rule.champ === "objet" ? a.objet : `${a.objet} ${a.raw}`);
+  const term = normalize(rule.term);
+  return rule.motEntier ? wholeWordRegex(term).test(hay) : hay.includes(term);
+}
+
+// Qualificatifs d'une règle à portée restreinte, pour la raison et les pages
+// (« mot entier, intitulé seul, achatpublic.com »), vide pour la portée par défaut.
+export function describeScope(r: ScopeRuleInput): string {
+  const rule = toRule(r);
+  const parts: string[] = [];
+  if (rule.motEntier) parts.push("mot entier");
+  if (rule.champ === "objet") parts.push("intitulé seul");
+  if (rule.source) parts.push(sourceLabel(rule.source));
+  return parts.join(", ");
+}
 
 // Règles « toujours garder » / « toujours exclure », appliquées AVANT les
 // classifieurs (un avis forcé « garder » ne coûte donc aucun appel LLM).
-// Correspondance en sous-chaîne sur texte normalisé (sans accents, minuscules).
-// « garder » l'emporte sur « exclure » : les termes d'exclusion sont génériques,
-// les termes à garder sont la soupape spécifique — le spécifique gagne.
+// Correspondance sur texte normalisé (sans accents, minuscules), selon la
+// portée de chaque règle. « garder » l'emporte sur « exclure » : les termes
+// d'exclusion sont génériques, les termes à garder sont la soupape
+// spécifique — le spécifique gagne.
 export function applyScopeRules(
-  a: { objet: string; raw: string },
+  a: { objet: string; raw: string; source?: Source },
   rules: ScopeRules,
 ): Classification | null {
-  const haystack = normalize(`${a.objet} ${a.raw}`);
-  const keepHit = rules.keep.find((t) => haystack.includes(normalize(t)));
-  if (keepHit) {
-    return { category: "relevant", reason: `règle personnalisée — toujours garder (« ${keepHit} »)` };
+  const cite = (r: ScopeRuleInput) => {
+    const q = describeScope(r);
+    return `« ${toRule(r).term} »${q ? ` — ${q}` : ""}`;
+  };
+  const keepHit = rules.keep.find((r) => ruleMatches(a, r));
+  if (keepHit !== undefined) {
+    return { category: "relevant", reason: `règle personnalisée — toujours garder (${cite(keepHit)})` };
   }
-  const excludeHit = rules.exclude.find((t) => haystack.includes(normalize(t)));
-  if (excludeHit) {
-    return { category: "excluded", reason: `règle personnalisée — exclu (« ${excludeHit} »)` };
+  const excludeHit = rules.exclude.find((r) => ruleMatches(a, r));
+  if (excludeHit !== undefined) {
+    return { category: "excluded", reason: `règle personnalisée — exclu (${cite(excludeHit)})` };
   }
   return null;
 }
+
+// Portée saisie dans le formulaire (/configuration) : source vide = toutes.
+export function parseRuleScope(data: { source?: string; champ?: string; entier?: string }):
+  | { ok: true; value: RuleScope }
+  | { ok: false; error: string } {
+  const source = (data.source ?? "").trim();
+  if (source !== "" && !isSource(source)) return { ok: false, error: `Source inconnue : « ${source} ».` };
+  const champ = (data.champ ?? "texte").trim();
+  if (champ !== "texte" && champ !== "objet") return { ok: false, error: "Champ inconnu (attendu : texte ou objet)." };
+  return { ok: true, value: { source: source === "" ? null : source, champ, motEntier: data.entier === "1" } };
+}
+
+export const SOURCE_CHOICES = SOURCES;
 
 // Les termes sont stockés sans guillemets ; les expressions de plusieurs mots
 // sont recollées en "…" pour traverser parseQueryTerms (split sur ` OR `).

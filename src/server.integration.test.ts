@@ -349,6 +349,33 @@ if (!TEST_URL) {
     await control`TRUNCATE config_events RESTART IDENTITY`;
   });
 
+  test("règle à portée restreinte : mot entier, intitulé, source ; essai et journal la citent", async () => {
+    await control`TRUNCATE config_events RESTART IDENTITY`;
+    // « plan » en mot entier dans l'intitulé, BOAMP seulement : touche B1 (« Plan de mobilité BOAMP »).
+    let page = await get("/configuration/essai?kind=exclude&terme=plan&champ=objet&entier=1&source=boamp");
+    expect(page.text).toContain("<strong>1</strong> avis en cours contient ce terme");
+    expect(page.text).toContain("dans l'intitulé seul, mot entier, source BOAMP");
+    expect(page.text).toContain('name="entier" value="1"');
+    // Même terme sur achatpublic : rien ; « pla » en mot entier : rien ; en sous-chaîne : B1.
+    expect((await get("/configuration/essai?kind=exclude&terme=plan&source=achatpublic")).text).toContain("Aucun avis en cours");
+    expect((await get("/configuration/essai?kind=exclude&terme=pla&entier=1")).text).toContain("Aucun avis en cours");
+    expect((await get("/configuration/essai?kind=exclude&terme=pla")).text).toContain("<strong>1</strong> avis en cours");
+    expect((await get("/configuration/essai?kind=exclude&terme=plan&source=x")).text).toContain("Source inconnue");
+    let res = await post("/configuration/regles/ajouter", { kind: "exclude", terme: "plan", champ: "objet", entier: "1", source: "boamp" });
+    expect(res.status).toBe(303);
+    const rows = (await control`SELECT source, champ, mot_entier FROM scope_rules WHERE term = 'plan'`) as unknown[];
+    expect(rows).toEqual([{ source: "boamp", champ: "objet", mot_entier: true }]);
+    // Même terme sans portée : règle distincte.
+    res = await post("/configuration/regles/ajouter", { kind: "exclude", terme: "plan" });
+    expect(res.status).toBe(303);
+    page = await get("/configuration");
+    expect(page.text).toContain("mot entier, intitulé seul, BOAMP</span>");
+    expect(page.text).toContain("Règle ajoutée : toujours exclure « plan » (mot entier, intitulé seul, BOAMP)");
+    expect(page.text).toContain('href="/configuration/essai?kind=exclude&amp;terme=plan&amp;source=boamp&amp;champ=objet&amp;entier=1"');
+    await control`DELETE FROM scope_rules`;
+    await control`TRUNCATE config_events RESTART IDENTITY`;
+  });
+
   test("réglages : chaque carte n'écrit que ses champs et revient sur son onglet", async () => {
     let res = await post("/configuration/reglages", { fenetre: "21" });
     expect(res.status).toBe(303);
