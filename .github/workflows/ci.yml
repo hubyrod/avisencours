@@ -40,6 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned: an unpinned Bun moved CI from 1.4.3 to 1.4.4 on 2026-11-01 and
+          # changed the test-file order, which exposed an order-dependent test.
+          # Bump deliberately, together with @types/bun.
+          bun-version: 1.4.4
 
       # Cache bun's global download cache, NOT node_modules: bun never prunes
       # node_modules entries that left the lockfile, so a restored node_modules
@@ -61,9 +66,11 @@ jobs:
         run: bun run lint
 
       - name: Test (unit + integration on a throwaway Postgres)
+        # scripts/test-ci.sh: each integration file alone on a recreated database
+        # (no file may depend on another's leftovers), then the whole suite.
         env:
           TEST_DATABASE_URL: postgresql://avis:avis@localhost:5432/avis_test
-        run: bun test
+        run: bash scripts/test-ci.sh
 
       - name: Build
         run: bun run build

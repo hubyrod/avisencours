@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",
     "test": "bun test",
+    "test:ci": "bash scripts/test-ci.sh",
     "build": "bun build src/server.ts src/run.ts src/index.ts --target=bun --outdir=dist --packages external"
   },
   "dependencies": {

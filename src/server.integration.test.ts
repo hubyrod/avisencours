@@ -52,6 +52,9 @@ if (!TEST_URL) {
   }
 
   beforeAll(async () => {
+    // Schéma d'abord : Bun n'ordonne pas les fichiers de test et la base de CI
+    // est vide — ne jamais compter sur db.integration pour créer les tables.
+    await dbModule.migrate();
     // Données : un run réussi avec statistiques LLM (la page configuration les
     // affiche), un run « running » sans processus (orphelin), deux avis.
     await control`TRUNCATE comments, status_events, announcements, runs, users, sessions, email_verification_codes RESTART IDENTITY CASCADE`;
