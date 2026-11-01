@@ -26,7 +26,7 @@ jobs:
     # tournent que si TEST_DATABASE_URL est défini — ici, toujours.
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_USER: avis
           POSTGRES_PASSWORD: avis
@@ -38,7 +38,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
 
       # Cache bun's global download cache, NOT node_modules: bun never prunes
@@ -73,7 +73,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # clever deploy pushes git history to the Clever remote.
           fetch-depth: 0

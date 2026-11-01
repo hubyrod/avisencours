@@ -20,11 +20,16 @@
     "@skipruntime/wasm": "0.0.23"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.2",
-    "oxlint": "^1.82.0",
-    "typescript": "^5.6.3"
+    "@types/bun": "^1.4.4",
+    "oxlint": "^1.90.0",
+    "typescript": "^5.9.3"
   },
   "patchedDependencies": {
     "@skip-adapter/postgres@0.0.23": "patches/@skip-adapter%2Fpostgres@0.0.23.patch"
+  },
+  "overrides": {
+    "express": "~4.22.3",
+    "body-parser": "~1.20.9",
+    "proxy-addr": "~2.0.8"
   }
 }
