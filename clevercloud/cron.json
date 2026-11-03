@@ -1,3 +1,4 @@
 [
-  "30 4 * * * $ROOT/clevercloud/daily-run.sh"
+  "30 4 * * * $ROOT/clevercloud/daily-run.sh",
+  "30 12 * * * $ROOT/clevercloud/daily-run.sh midi"
 ]

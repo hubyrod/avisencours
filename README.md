@@ -130,7 +130,7 @@ src/
   *.test.ts           Unit tests; live.integration.test.ts needs TEST_DATABASE_URL (see Checks)
 patches/              Local patch to @skip-adapter/postgres (reconnects after a dropped LISTEN connection)
 clevercloud/
-  cron.json           Daily schedule (04:30 UTC)
+  cron.json           Schedule: 04:30 UTC (full run + digest) and 12:30 UTC (read only, no digest)
   daily-run.sh        Cron entry: env-loading wrapper around src/run.ts
 .cache/               Gitignored scrape cache (raw API output)
 ```
@@ -146,7 +146,7 @@ One **Node.js app** (Bun is auto-detected from `bun.lock`; `scripts.start` serve
 3. Set the env vars from `.env.example`: portal vars, `OPENROUTER_API_KEY` (set it **before** the push: the cron and the « Relancer maintenant » button inherit the app env), `MAILPACE_API_TOKEN`, `EMAIL_FROM`, `OTP_PEPPER`, `ADMIN_EMAILS` (your email — seeded as admin at startup), `ALERT_RECIPIENT`, `DASHBOARD_URL`.
 4. `clever deploy`. Tables are created automatically at startup; `ADMIN_EMAILS` accounts are upserted as admins.
 5. Log in at `/connexion` with your email code, then add teammates from `/admin`.
-6. The cron (`clevercloud/cron.json`) fires every day at 04:30 UTC: scrape → classify → store → digest email. On failure, `ALERT_RECIPIENT` gets an alert email and the dashboard banner turns red.
+6. The cron (`clevercloud/cron.json`) fires every day at 04:30 UTC: scrape → classify → store → digest email, and again at 12:30 UTC without the digest (same-day freshness, and an automatic retry of a failed morning). On failure, `ALERT_RECIPIENT` gets an alert email and the dashboard banner turns red.
 
 The daily digest goes to users who ticked the opt-in on `/profil`; it is sent every day even when empty — if it stops arriving, something is wrong. It is skipped (with a log line) when `MAILPACE_API_TOKEN` is unset or nobody opted in.
 
