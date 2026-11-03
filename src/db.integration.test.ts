@@ -17,6 +17,7 @@ if (!TEST_URL) {
 } else {
   Bun.env.POSTGRESQL_ADDON_URI = TEST_URL;
   const db = await import("./db.ts");
+  const { compterFacettes, filtrerAvis, trierAvis } = await import("./filtres.ts");
   const { DEFAULT_SCOPE } = await import("./rules.ts");
   const control = new SQL(TEST_URL);
 
@@ -166,9 +167,9 @@ if (!TEST_URL) {
       const grp = current.find((a) => a.idweb === "26-A")!;
       expect(grp.publications?.map((p) => `${p.source}:${p.idweb}`)).toEqual(["boamp:26-A", "marchesonline:MO-A"]);
       // Filtre source : le groupe est trouvé par l'une ou l'autre plateforme ; recherche dans un doublon.
-      expect((await db.getCurrent("relevant", run, { source: "marchesonline" })).map((a) => a.idweb).sort()).toEqual(["26-A", "MO-B"]);
-      expect((await db.getCurrent("relevant", run, { source: "boamp" })).map((a) => a.idweb)).toEqual(["26-A"]);
-      expect((await db.getCurrent("relevant", run, { q: "stationnement." })).map((a) => a.idweb)).toEqual(["26-A"]);
+      expect(filtrerAvis(current, { source: "marchesonline" }).map((a) => a.idweb).sort()).toEqual(["26-A", "MO-B"]);
+      expect(filtrerAvis(current, { source: "boamp" }).map((a) => a.idweb)).toEqual(["26-A"]);
+      expect(filtrerAvis(current, { q: "stationnement." }).map((a) => a.idweb)).toEqual(["26-A"]);
       const counts = await db.countCurrentBySource(run);
       expect(counts.find((c) => c.source === "boamp")?.count).toBe(1);
       expect(counts.find((c) => c.source === "marchesonline")?.count).toBe(2);
@@ -212,9 +213,9 @@ if (!TEST_URL) {
 
       const all = await db.getCurrent("relevant", run);
       expect(all.map((a) => a.idweb).sort()).toEqual(["B1", "CSL_1", "CSL_2"]);
-      expect((await db.getCurrent("relevant", run, { source: "achatpublic" })).map((a) => a.idweb).sort()).toEqual(["CSL_1", "CSL_2"]);
-      expect((await db.getCurrent("relevant", run, { famille: "inondations" })).map((a) => a.idweb)).toEqual(["CSL_2"]);
-      expect((await db.getCurrent("relevant", run, { source: "afd" })).length).toBe(0);
+      expect(filtrerAvis(all, { source: "achatpublic" }).map((a) => a.idweb).sort()).toEqual(["CSL_1", "CSL_2"]);
+      expect(filtrerAvis(all, { famille: "inondations" }).map((a) => a.idweb)).toEqual(["CSL_2"]);
+      expect(filtrerAvis(all, { source: "afd" }).length).toBe(0);
 
       const counts = await db.countCurrentBySource(run);
       const n = (s: string, c: string) => counts.find((x) => x.source === s && x.category === c)?.count ?? 0;
@@ -223,15 +224,16 @@ if (!TEST_URL) {
       expect(n("achatpublic", "relevant")).toBe(2);
       expect(n("marchesonline", "excluded")).toBe(1);
 
-      // Recherche texte, tri, « nouveaux depuis ».
-      expect((await db.getCurrent("relevant", run, { q: "csl_1" })).map((a) => a.idweb)).toEqual(["CSL_1"]);
-      expect((await db.getCurrent("relevant", run, { q: "Ville" })).map((a) => a.idweb).sort()).toEqual(["B1", "CSL_1", "CSL_2"]);
-      expect((await db.getCurrent("relevant", run, { q: "%" })).length).toBe(0);
-      expect((await db.getCurrent("relevant", run, { newSince: new Date(Date.now() + 60_000) })).length).toBe(0);
-      expect((await db.getCurrent("relevant", run, { newSince: new Date(Date.now() - 60_000) })).length).toBe(3);
+      // Recherche texte, tri, « nouveaux depuis » (src/filtres.ts, sur les lignes lues).
+      expect(filtrerAvis(all, { q: "csl_1" }).map((a) => a.idweb)).toEqual(["CSL_1"]);
+      expect(filtrerAvis(all, { q: "Ville" }).map((a) => a.idweb).sort()).toEqual(["B1", "CSL_1", "CSL_2"]);
+      expect(filtrerAvis(all, { q: "%" }).length).toBe(0);
+      expect(filtrerAvis(all, { newSince: new Date(Date.now() + 60_000) }).length).toBe(0);
+      expect(filtrerAvis(all, { newSince: new Date(Date.now() - 60_000) }).length).toBe(3);
       await control`UPDATE announcements SET first_seen_at = now() - interval '2 days' WHERE idweb = 'B1'`;
-      expect((await db.getCurrent("relevant", run, { sort: "recents" })).map((a) => a.idweb).slice(-1)).toEqual(["B1"]);
-      expect((await db.getCurrent("relevant", run, { sort: "echeance" }))[0]!.idweb).toBe("B1");
+      const relu = await db.getCurrent("relevant", run);
+      expect(trierAvis(relu, "recents").map((a) => a.idweb).slice(-1)).toEqual(["B1"]);
+      expect(trierAvis(relu, "echeance")[0]!.idweb).toBe("B1");
 
       // Un second run conserve first_seen et met à jour le reste.
       const run2 = await db.startRun();
@@ -397,7 +399,7 @@ if (!TEST_URL) {
     });
   });
 
-  describe("tri « à trier d'abord » et comptes par statut (getCurrent / countCurrentByStatus)", () => {
+  describe("statut courant porté par getCurrent : tri « à trier d'abord », comptes et filtre par statut", () => {
     test("sans statut en tête (récents d'abord), puis par échéance ; comptes avec le défaut implicite", async () => {
       await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
       const run = await db.startRun();
@@ -414,12 +416,14 @@ if (!TEST_URL) {
       const [u] = (await control`INSERT INTO users (email) VALUES ('t@example.org') RETURNING id`) as Array<{ id: number }>;
       await db.addStatusEvent("T-statue-tard", autre.id, Number(u!.id));
       await db.addStatusEvent("T-statue-tot", autre.id, Number(u!.id));
-      const ordre = (await db.getCurrent("relevant", run, { sort: "atrier" })).map((a) => a.idweb);
-      expect(ordre).toEqual(["T-sans-recent", "T-sans-ancien", "T-statue-tot", "T-statue-tard"]);
-      const counts = await db.countCurrentByStatus(run, "relevant");
+      const current = await db.getCurrent("relevant", run);
+      expect(trierAvis(current, "atrier").map((a) => a.idweb)).toEqual(["T-sans-recent", "T-sans-ancien", "T-statue-tot", "T-statue-tard"]);
+      // Sans événement, la ligne porte le statut par défaut (COALESCE) : comptes et filtre le retrouvent.
+      const counts = compterFacettes(current, {}).statut;
       expect(counts.get(Number(statuts[0]!.id))).toBe(2);
       expect(counts.get(Number(autre.id))).toBe(2);
-      expect(await db.countCurrentByStatus(run, "travaux")).toEqual(new Map());
+      expect(filtrerAvis(current, { statusId: Number(statuts[0]!.id) }).map((a) => a.idweb).sort()).toEqual(["T-sans-ancien", "T-sans-recent"]);
+      expect(await db.getCurrent("travaux", run)).toEqual([]);
       await control`TRUNCATE comments, status_events, announcements, runs, users RESTART IDENTITY CASCADE`;
     });
   });

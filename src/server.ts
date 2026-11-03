@@ -15,14 +15,12 @@ import {
   loadPublications,
   type PublicationLien,
   markDashboardVisit,
-  type CurrentSort,
   isRunLockHeld,
   closeOrphanRuns,
   heartbeatStale,
   terminateRunLockHolders,
   HEARTBEAT_STALE_MS,
   type SourceCount,
-  countCurrentByStatus,
   getCurrent,
   getAnnouncement,
   addComment,
@@ -112,6 +110,7 @@ import {
 } from "./rules.ts";
 import { DEFAULT_LLM_MODELS, RECOMMENDED_MODELS } from "./defaults.ts";
 import { normalize, type Category } from "./classify.ts";
+import { compterFacettes, filtrerAvis, trierAvis, type FiltreAvis, type TriAvis } from "./filtres.ts";
 import { maxPricePerM } from "./llm.ts";
 import { llmConfigured, llmStatsSummary, defaultModelChain } from "./llm.ts";
 import {
@@ -2241,7 +2240,7 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: bo
     return `<div class="statut warn"><span class="pastille"></span>Mise à jour en cours${resume}</div>`;
   }
   const when = lastRun.finished_at ? frDateTime(new Date(lastRun.finished_at)) : "?";
-  return `<div class="statut ok"><span class="pastille"></span>Dernière mise à jour : ${esc(when)} — ${lastRun.relevant_count ?? 0} avis pertinents.</div>`;
+  return `<div class="statut ok"><span class="pastille"></span>Dernière mise à jour : ${esc(when)}.</div>`;
 }
 
 // Lignes par page : le tableau de bord rend chaque ligne avec son sélecteur de
@@ -2284,7 +2283,6 @@ const DASHBOARD_CSS = `
 
 async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Response> {
   const cat = url.searchParams.get("cat") === "travaux" ? "travaux" : "pertinents";
-  const dbCategory = cat === "travaux" ? "travaux" : "relevant";
   const statutParam = Number(url.searchParams.get("statut"));
   const statusId = Number.isInteger(statutParam) && statutParam > 0 ? statutParam : null;
   // Les avis abandonnés (statut « rejet ») sont masqués par défaut : la liste
@@ -2301,7 +2299,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const page = Number.isInteger(pageParam) && pageParam > 0 ? pageParam : 1;
   const triParam = url.searchParams.get("tri");
   // Défaut : à trier d'abord (sans statut, les plus récents en tête), puis par échéance.
-  const tri: CurrentSort = triParam === "recents" ? "recents" : triParam === "echeance" ? "echeance" : "atrier";
+  const tri: TriAvis = triParam === "recents" ? "recents" : triParam === "echeance" ? "echeance" : "atrier";
   const nouveaux = url.searchParams.get("nouveaux") === "1";
 
   const [lastRun0, lastSuccess, statuts, prevSeen] = await Promise.all([
@@ -2312,22 +2310,28 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   ]);
   const inFlight = await runInFlight(lastRun0);
   const lastRun = inFlight || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
-  const [tous, sourceCounts, statusCounts] = lastSuccess
-    ? await Promise.all([
-        getCurrent(dbCategory, lastSuccess.id, {
-          statusId,
-          hideRejet: masquer,
-          famille,
-          source,
-          q: q || null,
-          // « Nouveaux » sans visite précédente : rien n'est nouveau pour moi.
-          newSince: nouveaux ? (prevSeen ?? new Date()) : null,
-          sort: tri,
-        }),
-        countCurrentBySource(lastSuccess.id),
-        countCurrentByStatus(lastSuccess.id, dbCategory),
-      ])
-    : [[], [], new Map<number, number>()];
+  // Les deux catégories en cours, lues entières : filtres, tri et comptes se
+  // font en mémoire (src/filtres.ts), avec la même définition partout.
+  const [pertinents, travaux] = lastSuccess
+    ? await Promise.all([getCurrent("relevant", lastSuccess.id), getCurrent("travaux", lastSuccess.id)])
+    : [[], []];
+  // Filtrer sur un statut « abandonné » montre forcément les abandonnés.
+  const statutChoisi = statusId !== null ? (statuts.find((s) => Number(s.id) === statusId) ?? null) : null;
+  const filtre: FiltreAvis = {
+    statusId,
+    masquerRejet: masquer && !statutChoisi?.is_rejet,
+    famille,
+    source,
+    q: q || null,
+    // « Nouveaux » sans visite précédente : rien n'est nouveau pour moi.
+    newSince: nouveaux ? (prevSeen ?? new Date()) : null,
+  };
+  const [courants, autres] = cat === "pertinents" ? [pertinents, travaux] : [travaux, pertinents];
+  const tous = trierAvis(filtrerAvis(courants, filtre), tri);
+  // Les deux onglets comptent avec les mêmes filtres ; les listes déroulantes
+  // disent ce que chaque valeur donnerait, les autres filtres restant en place.
+  const autresCount = filtrerAvis(autres, filtre).length;
+  const facettes = compterFacettes(courants, filtre);
   // Page courante (PAGE_SIZE lignes) ; les comptes des onglets restent ceux du tout.
   const pages = Math.max(1, Math.ceil(tous.length / PAGE_SIZE));
   const pageCourante = Math.min(page, pages);
@@ -2347,12 +2351,13 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
       ${pageCourante < pages ? `<a href="${esc(withPage(pageCourante + 1))}">Page suivante →</a>` : ""}
     </nav>`
       : "";
-  // Compte par source pour la catégorie affichée (avant les autres filtres).
-  const countFor = (id: string) => sourceCounts.find((c) => c.source === id && c.category === dbCategory)?.count ?? 0;
-  const countStatut = (id: number) => statusCounts.get(Number(id)) ?? 0;
-  // « À trier » = au statut par défaut (aucun événement, ou remis au défaut).
+  const countFor = (id: string) => facettes.source.get(id) ?? 0;
+  const countStatut = (id: number) => facettes.statut.get(Number(id)) ?? 0;
+  const countFamille = (f: string) => facettes.famille.get(f) ?? 0;
+  // « À trier » = avis pertinents au statut par défaut (aucun événement, ou
+  // remis au défaut), quels que soient les filtres : c'est le reste à faire.
   const defaut = statuts[0] ?? null;
-  const aTrier = defaut ? countStatut(defaut.id) : 0;
+  const aTrier = defaut ? pertinents.filter((a) => Number(a.status_id) === Number(defaut.id)).length : 0;
   const filtresActifs = statusId !== null || abandonnes || famille !== null || source !== null || q !== "" || nouveaux;
   // Chemin courant (avec filtres) : retour depuis la fiche, et onglets qui gardent les filtres.
   const retour = `/${url.search}`;
@@ -2370,10 +2375,10 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const tabs = `
   <nav>
     <a href="${esc(withCat("pertinents"))}" class="${cat === "pertinents" ? "active" : ""}">Avis pertinents (${
-      cat === "pertinents" ? tous.length : (lastSuccess?.relevant_count ?? "…")
+      cat === "pertinents" ? tous.length : autresCount
     })</a>${badgeATrier}
     <a href="${esc(withCat("travaux"))}" class="${cat === "travaux" ? "active" : ""}">Travaux — hors scope (${
-      cat === "travaux" ? tous.length : (lastSuccess?.travaux_count ?? "…")
+      cat === "travaux" ? tous.length : autresCount
     })</a>
   </nav>`;
 
@@ -2405,7 +2410,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     <select id="f-famille" name="famille">
       <option value="">Toutes</option>
       ${(Object.keys(FAMILLE_LABELS) as Famille[])
-        .map((f) => `<option value="${f}"${f === famille ? " selected" : ""}>${esc(FAMILLE_LABELS[f])}</option>`)
+        .map((f) => `<option value="${f}"${f === famille ? " selected" : ""}>${esc(FAMILLE_LABELS[f])} (${countFamille(f)})</option>`)
         .join("")}
     </select>
     <label for="f-tri">Tri</label>
@@ -2415,7 +2420,9 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
       <option value="recents"${tri === "recents" ? " selected" : ""}>Repérés le plus récemment</option>
     </select>
     <label title="Avis apparus depuis votre visite précédente"><input type="checkbox" name="nouveaux" value="1"${nouveaux ? " checked" : ""}> Nouveaux depuis ma dernière visite</label>
-    <label title="Les avis au statut « abandonné » sont masqués par défaut"><input type="checkbox" name="abandonnes" value="1"${abandonnes ? " checked" : ""}> Afficher les avis abandonnés</label>
+    <label title="Les avis au statut « abandonné » sont masqués par défaut"><input type="checkbox" name="abandonnes" value="1"${abandonnes ? " checked" : ""}> Afficher les avis abandonnés${
+      facettes.rejetMasques > 0 ? ` (${facettes.rejetMasques})` : ""
+    }</label>
     <button type="submit" id="f-bouton">Filtrer</button>
   </form>`;
 

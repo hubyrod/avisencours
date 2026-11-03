@@ -577,7 +577,15 @@ export type StoredAnnouncement = {
   status_set_by_email?: string | null;
 };
 
-export type PublicationLien = { idweb: string; source: string; url: string; published_at: string | null };
+// Objet et acheteur ne sont portés que par getCurrent (recherche du tableau de bord).
+export type PublicationLien = {
+  idweb: string;
+  source: string;
+  url: string;
+  published_at: string | null;
+  objet?: string;
+  acheteur?: string | null;
+};
 
 export type StatusRow = {
   id: number;
@@ -659,42 +667,17 @@ export async function markDashboardVisit(userId: number): Promise<Date | null> {
   return v ? new Date(v) : null;
 }
 
-// « atrier » (défaut du tableau de bord) : les avis sans aucun statut d'abord,
-// les plus récemment repérés en tête, puis les avis triés par échéance.
-export type CurrentSort = "atrier" | "echeance" | "recents" | "nouveaute";
-
-export type CurrentFilter = {
-  statusId?: number | null;
-  hideRejet?: boolean;
-  famille?: string | null;
-  source?: string | null;
-  // Recherche texte sur l'objet et l'acheteur (ILIKE, sensible aux accents).
-  q?: string | null;
-  // Ne garder que les avis apparus après cette date (« nouveaux pour moi »).
-  newSince?: Date | null;
-  sort?: CurrentSort;
-};
-
 // Announcements still present in the latest successful run, deadline not passed
-// (or unknown). Statut courant = dernier événement ; aucun événement = statut
-// par défaut (premier statut actif par position), d'où le COALESCE — le filtre
-// « à évaluer » doit aussi attraper les avis sans événement. Le tri se fait en
-// mémoire (quelques milliers de lignes au plus) : échéance croissante par défaut,
-// ou avis vus le plus récemment en premier.
-export async function getCurrent(
-  category: string,
-  runId: number,
-  filter?: CurrentFilter,
-): Promise<StoredAnnouncement[]> {
-  const statusId = filter?.statusId ?? null;
-  const hideRejet = filter?.hideRejet ?? false;
-  const famille = filter?.famille ?? null;
-  const source = filter?.source ?? null;
-  const q = filter?.q?.trim() ? `%${filter.q.trim().replace(/[%_\\]/g, "\\$&")}%` : null;
-  const newSince = filter?.newSince ?? null;
+// (or unknown), échéance croissante. Statut courant = dernier événement ; aucun
+// événement = statut par défaut (premier statut actif par position), d'où le
+// COALESCE — le filtre « à évaluer » doit aussi attraper les avis sans
+// événement. Filtres, tri et comptes se font en mémoire (src/filtres.ts) :
+// quelques milliers de lignes au plus, et une seule définition de « en cours ».
+export async function getCurrent(category: string, runId: number): Promise<StoredAnnouncement[]> {
   const defaultId = (await getDefaultStatus())?.id ?? null;
   // Seuls les principaux sont listés ; `pubs` = principal + doublons (toutes les
-  // plateformes), pour l'affichage, le filtre source et la recherche.
+  // plateformes) avec leur objet et acheteur, pour l'affichage, le filtre
+  // source et la recherche.
   const rows = await db()`
     SELECT a.*,
       (SELECT count(*)::int FROM comments c WHERE c.idweb = a.idweb) AS comment_count,
@@ -712,10 +695,9 @@ export async function getCurrent(
     LEFT JOIN statuses s ON s.id = COALESCE(cur.status_id, ${defaultId})
     LEFT JOIN users su ON su.id = cur.user_id
     JOIN LATERAL (
-      SELECT json_agg(json_build_object('idweb', p.idweb, 'source', p.source, 'url', p.url, 'published_at', p.published_at)
-                      ORDER BY (p.idweb = a.idweb) DESC, p.first_seen_at, p.idweb) AS publications,
-             bool_or(${source}::text IS NOT NULL AND p.source = ${source}) AS sur_source,
-             bool_or(${q}::text IS NOT NULL AND (p.objet ILIKE ${q} OR COALESCE(p.acheteur, '') ILIKE ${q})) AS cherche
+      SELECT json_agg(json_build_object('idweb', p.idweb, 'source', p.source, 'url', p.url, 'published_at', p.published_at,
+                                        'objet', p.objet, 'acheteur', p.acheteur)
+                      ORDER BY (p.idweb = a.idweb) DESC, p.first_seen_at, p.idweb) AS publications
       FROM announcements p
       WHERE p.idweb = a.idweb OR p.doublon_de = a.idweb
     ) pubs ON true
@@ -723,52 +705,11 @@ export async function getCurrent(
       AND a.doublon_de IS NULL
       AND a.category = ${category}
       AND (a.deadline IS NULL OR a.deadline >= now())
-      AND (${statusId}::bigint IS NULL OR COALESCE(cur.status_id, ${defaultId}) = ${statusId})
-      AND (${hideRejet} = false OR COALESCE(s.is_rejet, false) = false)
-      AND (${famille}::text IS NULL OR a.famille = ${famille})
-      AND (${source}::text IS NULL OR pubs.sur_source)
-      AND (${q}::text IS NULL OR pubs.cherche)
-      AND (${newSince}::timestamptz IS NULL OR a.first_seen_at > ${newSince})
     ORDER BY a.deadline ASC NULLS LAST, a.idweb`;
-  const items = (rows as Array<StoredAnnouncement & { publications: unknown }>).map((r) => ({
+  return (rows as Array<StoredAnnouncement & { publications: unknown }>).map((r) => ({
     ...r,
     publications: normalizePublications(r.publications),
   })) as StoredAnnouncement[];
-  const sort = filter?.sort ?? "echeance";
-  const vu = (a: StoredAnnouncement) => (a.first_seen_at ? new Date(a.first_seen_at).getTime() : 0);
-  const echeance = (a: StoredAnnouncement) => (a.deadline ? new Date(a.deadline).getTime() : Number.MAX_SAFE_INTEGER);
-  const parRecence = (x: StoredAnnouncement, y: StoredAnnouncement) =>
-    vu(y) - vu(x) || echeance(x) - echeance(y) || x.idweb.localeCompare(y.idweb);
-  if (sort === "recents" || sort === "nouveaute") {
-    items.sort(parRecence);
-  } else if (sort === "atrier") {
-    // Sans événement de statut = status_set_at null (le statut affiché est le défaut implicite).
-    const aTrier = (a: StoredAnnouncement) => (a.status_set_at ? 1 : 0);
-    items.sort((x, y) => {
-      const t = aTrier(x) - aTrier(y);
-      if (t !== 0) return t;
-      return aTrier(x) === 0 ? parRecence(x, y) : echeance(x) - echeance(y) || x.idweb.localeCompare(y.idweb);
-    });
-  }
-  return items;
-}
-
-// Avis en cours de la catégorie par statut courant (même définition que
-// getCurrent sans filtre) : les avis sans événement comptent pour le statut
-// par défaut, comme le filtre « statut » les retrouve.
-export async function countCurrentByStatus(runId: number, category: string): Promise<Map<number, number>> {
-  const defaultId = (await getDefaultStatus())?.id ?? null;
-  const rows = (await db()`
-    SELECT COALESCE(cur.status_id, ${defaultId}::bigint) AS status_id, count(*)::int AS count
-    FROM announcements a
-    LEFT JOIN LATERAL (
-      SELECT e.status_id FROM status_events e WHERE e.idweb = a.idweb
-      ORDER BY e.created_at DESC, e.id DESC LIMIT 1
-    ) cur ON true
-    WHERE a.last_seen_run_id = ${runId} AND a.doublon_de IS NULL AND a.category = ${category}
-      AND (a.deadline IS NULL OR a.deadline >= now())
-    GROUP BY 1`) as Array<{ status_id: number | null; count: number }>;
-  return new Map(rows.filter((r) => r.status_id !== null).map((r) => [Number(r.status_id), Number(r.count)]));
 }
 
 // Avis « en cours » (même définition que getCurrent, sans filtre) comptés par

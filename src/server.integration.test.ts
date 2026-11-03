@@ -171,6 +171,20 @@ if (!TEST_URL) {
     expect(q.text).toContain("Étude PAPI achatpublic");
     expect(q.text).not.toContain("Plan de mobilité BOAMP");
     expect(q.text).toContain('class="objet" href="/avis/CSL_1?retour=%2F%3Fq%3Dpapi"');
+    // Recherche sans égard aux accents ni à la casse, mots dans n'importe quel ordre, doublons compris.
+    expect((await get("/?q=etude")).text).toContain("Étude PAPI achatpublic");
+    expect((await get("/?q=MOBILIT%C3%89")).text).toContain("Plan de mobilité BOAMP");
+    expect((await get("/?q=boamp+plan")).text).toContain("Plan de mobilité BOAMP");
+    expect((await get("/?q=boamp+papi")).text).toContain("Aucun avis ne correspond");
+    // Les comptes suivent les filtres : onglets et listes déroulantes disent ce que la vue donnerait.
+    const compte = (await get("/?source=achatpublic")).text;
+    expect(compte).toContain("Avis pertinents (1)");
+    expect(compte).toContain("Travaux — hors scope (0)");
+    expect(compte).toMatch(/<option value="boamp">[^<]*\(1\)<\/option>/);
+    expect(compte).toMatch(/<option value="achatpublic" selected>[^<]*\(1\)<\/option>/);
+    expect(compte).toMatch(/<option value="inondations">[^<]*\(1\)<\/option>/);
+    expect(compte).toMatch(/<option value="mobilit\u00e9">[^<]*\(0\)<\/option>/);
+    expect((await get("/")).text).toMatch(/<option value="marchesonline">[^<]*\(1\)<\/option>/);
 
     expect((await get("/?tri=recents")).text).toContain('value="recents" selected');
     // Pages HTML compressées quand le navigateur l'accepte ; pas les flux ni les redirections.
