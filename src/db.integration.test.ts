@@ -397,6 +397,31 @@ if (!TEST_URL) {
     });
   });
 
+  describe("statuts pour l'email (attachStatuses / countUntriaged)", () => {
+    test("dernier événement par avis, statut par défaut sinon ; les sans-statut comptés", async () => {
+      await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [avis("S-1"), avis("S-2"), avis("S-3"), avis("S-clos", { deadline: "01/01/2020 à 12h00" })]);
+      await db.finishRun(run, { status: "success", totalFetched: 4, relevant: 4, travaux: 0, excluded: 0 });
+      const statuts = await db.listStatuses(false);
+      const rejet = statuts.find((s) => s.is_rejet) ?? statuts[statuts.length - 1]!;
+      const autre = statuts.find((s) => s.id !== rejet.id && s.id !== statuts[0]!.id) ?? statuts[0]!;
+      const [u] = (await control`INSERT INTO users (email) VALUES ('s@example.org') RETURNING id`) as Array<{ id: number }>;
+      await db.addStatusEvent("S-1", autre.id, Number(u!.id));
+      await db.addStatusEvent("S-1", rejet.id, Number(u!.id)); // le dernier gagne
+      await db.addStatusEvent("S-2", autre.id, Number(u!.id));
+      const items = await db.attachStatuses([avis("S-1"), avis("S-2"), avis("S-3")].map((a) => ({ ...a, deadline: null, deadline_text: a.deadline, type_avis: a.typeAvis, published_at: a.publishedAt, reason: null, first_seen_run_id: run })));
+      expect(items.map((a) => [a.idweb, a.status_label, a.status_is_rejet])).toEqual([
+        ["S-1", rejet.label, rejet.is_rejet],
+        ["S-2", autre.label, autre.is_rejet],
+        ["S-3", statuts[0]!.label, statuts[0]!.is_rejet],
+      ]);
+      // S-3 n'a aucun événement ; S-clos est hors échéance.
+      expect(await db.countUntriaged(run)).toBe(1);
+      await control`TRUNCATE comments, status_events, announcements, runs, users RESTART IDENTITY CASCADE`;
+    });
+  });
+
   describe("relais d'une source (saveRelais / loadRelais)", () => {
     test("aller-retour jsonb, une ligne par source, périmé au-delà de l'âge demandé", async () => {
       const items = [avis("MO-1", { source: "marchesonline" }), avis("MO-2", { source: "marchesonline", deadline: null })].map(

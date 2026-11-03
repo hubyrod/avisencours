@@ -65,6 +65,35 @@ describe("renderDigestHtml", () => {
     expect(html).toContain("&lt;script&gt;");
   });
 
+  test("titre vers la fiche interne, annonce officielle à côté ; sans tableau de bord, lien direct", () => {
+    const html = renderDigestHtml(digest(1));
+    expect(html).toContain('href="https://dashboard.example/avis/26-0"');
+    expect(html).toContain('href="https://example.com/0"');
+    expect(html).toContain("annonce ↗");
+    const sans = renderDigestHtml({ ...digest(1), dashboardUrl: null });
+    expect(sans).not.toContain("/avis/26-0");
+    expect(sans).toContain('href="https://example.com/0"');
+  });
+  test("statut de l'équipe sur chaque ligne, échéances sans les avis abandonnés, compte des avis à trier", () => {
+    const d = digest(0);
+    d.upcoming = [
+      { ...stored(1), status_label: "répondu", status_color: "#0e6b51", status_is_rejet: false },
+      { ...stored(2), status_label: "on laisse tomber", status_color: "#999", status_is_rejet: true },
+      { ...stored(3), status_label: "à évaluer", status_color: "#626d66", status_is_rejet: false },
+    ];
+    d.untriaged = 12;
+    const html = renderDigestHtml(d);
+    expect(html).toContain("Échéances sous 14 jours (2)");
+    expect(html).toContain("répondu");
+    expect(html).not.toContain("Avis 2");
+    expect(html).toContain("1 avis abandonné non listé");
+    expect(html).toContain("<strong>12 sans statut</strong>");
+    expect(html).toContain("à trier sur le tableau de bord");
+    // Tout abandonné : la section le dit plutôt que « aucune échéance ».
+    const tous = renderDigestHtml({ ...d, upcoming: [d.upcoming[1]!] });
+    expect(tous).toContain("ont été abandonnés");
+    expect(renderDigestHtml({ ...d, untriaged: 0 })).not.toContain("sans statut");
+  });
   test("inclut le lien tableau de bord", () => {
     expect(renderDigestHtml(digest(2))).toContain("https://dashboard.example");
   });

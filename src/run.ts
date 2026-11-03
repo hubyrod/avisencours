@@ -9,6 +9,8 @@ import {
   regrouperDoublons,
   countByCategory,
   attachPublications,
+  attachStatuses,
+  countUntriaged,
   getNewSinceLastDigest,
   getUpcomingDeadlines,
   markDigestSent,
@@ -267,13 +269,14 @@ async function main() {
     }
     progress.start("digest");
 
-    const newRelevant = await attachPublications(await getNewSinceLastDigest(runId, "relevant"));
-    const upcoming = await attachPublications(await getUpcomingDeadlines(runId, digestWindow));
+    const newRelevant = await attachStatuses(await attachPublications(await getNewSinceLastDigest(runId, "relevant")));
+    const upcoming = await attachStatuses(await attachPublications(await getUpcomingDeadlines(runId, digestWindow)));
     const data = {
       newRelevant,
       upcoming,
       totalRelevant: nRelevant,
       totalTravaux: nTravaux,
+      untriaged: await countUntriaged(runId),
       dashboardUrl: Bun.env.DASHBOARD_URL ?? null,
       dateStr: frDate(new Date()),
       llm: (llm ?? null) as LlmStats | null,

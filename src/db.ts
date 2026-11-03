@@ -954,6 +954,42 @@ export async function getCurrentStatusEvent(idweb: string): Promise<CurrentStatu
   };
 }
 
+// Statut courant d'une liste d'avis (pour l'email, qui ne passe pas par
+// getCurrent) : dernier événement, sinon le statut par défaut (implicite).
+export async function attachStatuses(items: StoredAnnouncement[]): Promise<StoredAnnouncement[]> {
+  if (items.length === 0) return items;
+  const defaultStatus = await getDefaultStatus();
+  const rows = (await db()`
+    SELECT cur.idweb, s.id AS status_id, s.label, s.color, s.is_rejet
+    FROM (
+      SELECT DISTINCT ON (e.idweb) e.idweb, e.status_id
+      FROM status_events e
+      WHERE e.idweb IN (SELECT jsonb_array_elements_text(${JSON.stringify(items.map((a) => a.idweb))}::text::jsonb))
+      ORDER BY e.idweb, e.created_at DESC, e.id DESC
+    ) cur
+    JOIN statuses s ON s.id = cur.status_id`) as Array<{ idweb: string; status_id: number; label: string; color: string; is_rejet: boolean }>;
+  const par = new Map(rows.map((r) => [r.idweb, r]));
+  return items.map((a) => {
+    const s = par.get(a.idweb);
+    if (s) return { ...a, status_id: Number(s.status_id), status_label: s.label, status_color: s.color, status_is_rejet: s.is_rejet };
+    if (defaultStatus) {
+      return { ...a, status_id: Number(defaultStatus.id), status_label: defaultStatus.label, status_color: defaultStatus.color, status_is_rejet: defaultStatus.is_rejet };
+    }
+    return a;
+  });
+}
+
+// Avis pertinents en cours (principaux) sans aucun événement de statut :
+// ce que l'équipe n'a pas encore trié.
+export async function countUntriaged(runId: number): Promise<number> {
+  const rows = (await db()`
+    SELECT count(*)::int AS n FROM announcements a
+    WHERE a.last_seen_run_id = ${runId} AND a.category = 'relevant' AND a.doublon_de IS NULL
+      AND (a.deadline IS NULL OR a.deadline >= now())
+      AND NOT EXISTS (SELECT 1 FROM status_events e WHERE e.idweb = a.idweb)`) as Array<{ n: number }>;
+  return Number(rows[0]?.n ?? 0);
+}
+
 // « Nouveau » pour l'email = apparu depuis le dernier digest réellement envoyé
 // (et non depuis le run précédent : un run manuel — SKIP_DIGEST — ne doit pas
 // faire disparaître ses trouvailles du digest du lendemain).

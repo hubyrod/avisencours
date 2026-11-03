@@ -97,13 +97,25 @@ function sourceTag(a: StoredAnnouncement): string {
   return parts.length ? ` — <span style="color:#0e6b51;">${esc(parts.join(" · "))}</span>` : "";
 }
 
-function itemRow(a: StoredAnnouncement): string {
+// Statut courant de l'équipe (attachStatuses) : un point coloré et le libellé.
+function statusTag(a: StoredAnnouncement): string {
+  if (!a.status_label) return "";
+  return ` · <span style="white-space:nowrap;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${esc(a.status_color ?? "#626d66")};vertical-align:middle;margin-right:4px;"></span>${esc(a.status_label)}</span>`;
+}
+
+// Le titre ouvre la fiche interne (statut, commentaires, texte) quand le
+// tableau de bord est connu ; l'annonce officielle reste à un clic.
+function itemRow(a: StoredAnnouncement, dashboardUrl: string | null): string {
   const deadline = a.deadline_text ?? "—";
+  const fiche = dashboardUrl ? `${dashboardUrl.replace(/\/+$/, "")}/avis/${encodeURIComponent(a.idweb)}` : null;
+  const titre = fiche
+    ? `<a href="${esc(fiche)}" style="color:#1a5fb4;text-decoration:none;font-weight:600;">${esc(a.objet)}</a> <a href="${esc(a.url)}" style="color:#666;font-size:12px;text-decoration:none;white-space:nowrap;">annonce ↗</a>`
+    : `<a href="${esc(a.url)}" style="color:#1a5fb4;text-decoration:none;font-weight:600;">${esc(a.objet)}</a>`;
   return `
     <tr>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e5e5;">
-        <a href="${esc(a.url)}" style="color:#1a5fb4;text-decoration:none;font-weight:600;">${esc(a.objet)}</a><br>
-        <span style="color:#666;font-size:13px;">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department || "?")}${sourceTag(a)}</span>
+        ${titre}<br>
+        <span style="color:#666;font-size:13px;">${esc(a.acheteur ?? "?")} — dépt. ${esc(a.department || "?")}${sourceTag(a)}${statusTag(a)}</span>
       </td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e5e5;white-space:nowrap;vertical-align:top;">${esc(deadline)}</td>
     </tr>`;
@@ -113,7 +125,7 @@ function itemRow(a: StoredAnnouncement): string {
 // dashboard for the rest (the first run ever flags thousands as "new").
 const MAX_ROWS = 30;
 
-function section(title: string, items: StoredAnnouncement[], emptyText: string): string {
+function section(title: string, items: StoredAnnouncement[], emptyText: string, dashboardUrl: string | null): string {
   const shown = items.slice(0, MAX_ROWS);
   const rest = items.length - shown.length;
   const body =
@@ -124,7 +136,7 @@ function section(title: string, items: StoredAnnouncement[], emptyText: string):
              <th align="left" style="padding:8px 12px;border-bottom:2px solid #333;">Objet</th>
              <th align="left" style="padding:8px 12px;border-bottom:2px solid #333;">Date limite</th>
            </tr>
-           ${shown.map(itemRow).join("")}
+           ${shown.map((a) => itemRow(a, dashboardUrl)).join("")}
          </table>` +
         (rest > 0
           ? `<p style="color:#666;font-size:13px;">… et ${rest} autres avis — voir le tableau de bord.</p>`
@@ -134,14 +146,22 @@ function section(title: string, items: StoredAnnouncement[], emptyText: string):
 
 export type DigestData = {
   newRelevant: StoredAnnouncement[];
+  // Échéances proches, telles que lues : les avis au statut « rejet »
+  // (abandonnés) en sont retirés ici, l'équipe n'y répondra pas.
   upcoming: StoredAnnouncement[];
   totalRelevant: number;
   totalTravaux: number;
+  // Avis pertinents en cours sans aucun statut (countUntriaged) ; absent = non calculé.
+  untriaged?: number;
   dashboardUrl: string | null;
   dateStr: string;
   llm?: LlmStats | null;
   warning?: string | null;
 };
+
+export function upcomingToShow(items: StoredAnnouncement[]): StoredAnnouncement[] {
+  return items.filter((a) => !a.status_is_rejet);
+}
 
 // The digest is sent every day to opted-in users, whatever the count —
 // the subject carries the day's news at a glance.
@@ -155,23 +175,33 @@ export function renderDigestHtml(d: DigestData): string {
   const dashboardLink = d.dashboardUrl
     ? `<p><a href="${esc(d.dashboardUrl)}" style="color:#1a5fb4;">Voir tous les avis sur le tableau de bord →</a></p>`
     : "";
+  const upcoming = upcomingToShow(d.upcoming);
+  const abandonnes = d.upcoming.length - upcoming.length;
+  const aTrier =
+    d.untriaged !== undefined && d.untriaged > 0
+      ? ` <strong>${d.untriaged} sans statut</strong> : ${
+          d.dashboardUrl ? `<a href="${esc(d.dashboardUrl)}" style="color:#1a5fb4;">à trier sur le tableau de bord</a>` : "à trier"
+        }.`
+      : "";
   return `
   <div style="font-family:Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;color:#222;">
     <h1 style="font-size:20px;">Avis de marchés publics — ${esc(d.dateStr)}</h1>
     <p style="color:#444;">
-      ${d.totalRelevant} avis pertinents en cours (${d.totalTravaux} avis travaux, hors scope).
+      ${d.totalRelevant} avis pertinents en cours (${d.totalTravaux} avis travaux, hors scope).${aTrier}
       ${d.newRelevant.length === 0 ? "Aucun nouvel avis pertinent depuis la dernière mise à jour." : ""}
     </p>
     ${section(
       `Nouveaux avis pertinents (${d.newRelevant.length})`,
       d.newRelevant,
       "Aucun nouvel avis aujourd'hui.",
+      d.dashboardUrl,
     )}
     ${section(
-      `Échéances sous 14 jours (${d.upcoming.length})`,
-      d.upcoming,
-      "Aucune échéance dans les 14 prochains jours.",
-    )}
+      `Échéances sous 14 jours (${upcoming.length})`,
+      upcoming,
+      abandonnes > 0 ? "Aucune échéance à suivre : les avis qui arrivent à échéance ont été abandonnés." : "Aucune échéance dans les 14 prochains jours.",
+      d.dashboardUrl,
+    )}${abandonnes > 0 && upcoming.length > 0 ? `<p style="color:#666;font-size:13px;">${abandonnes} avis abandonné${abandonnes > 1 ? "s" : ""} non listé${abandonnes > 1 ? "s" : ""}.</p>` : ""}
     ${dashboardLink}
     ${
       d.warning
