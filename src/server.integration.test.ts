@@ -191,6 +191,22 @@ if (!TEST_URL) {
     expect((await get("/")).text).toMatch(/<option value="marchesonline">[^<]*\(1\)<\/option>/);
 
     expect((await get("/?tri=recents")).text).toContain('value="recents" selected');
+    // Mise à jour partielle : bandeau expliqué au lecteur, pas de texte technique ; run en erreur : bandeau d'échec en clair.
+    const [succes] = (await control`SELECT id FROM runs WHERE status = 'success' ORDER BY id DESC LIMIT 1`) as Array<{ id: string }>;
+    await control`UPDATE runs SET warning = 'Marchés Online (Le Moniteur) indisponible — Error: 403 Forbidden sur https://x — ses avis ne sont pas mis à jour ce run' WHERE id = ${succes!.id}`;
+    const partiel = (await get("/")).text;
+    expect(partiel).toContain("Mise à jour partielle : Marchés Online (Le Moniteur) ne répond pas");
+    expect(partiel).toContain("ne répond pas depuis le");
+    expect(partiel).toContain("L'équipe technique est prévenue.");
+    expect(partiel).not.toContain("403 Forbidden");
+    await control`UPDATE runs SET warning = NULL WHERE id = ${succes!.id}`;
+    expect((await get("/")).text).not.toContain("Mise à jour partielle");
+    const [echec] = (await control`INSERT INTO runs (status, finished_at, error) VALUES ('error', now(), 'HttpError: API 403') RETURNING id`) as Array<{ id: string }>;
+    const rate = (await get("/")).text;
+    expect(rate).toContain("n'a pas pu être effectuée");
+    expect(rate).toContain("dernière mise à jour réussie");
+    expect(rate).not.toContain("HttpError");
+    await control`DELETE FROM runs WHERE id = ${echec!.id}`;
     // Pages HTML compressées quand le navigateur l'accepte ; pas les flux ni les redirections.
     const gz = await fetch(`${BASE}/`, { headers: { cookie, "accept-encoding": "gzip" }, redirect: "manual", decompress: false } as RequestInit);
     expect(gz.headers.get("content-encoding")).toBe("gzip");
@@ -494,7 +510,7 @@ if (!TEST_URL) {
 
     // Tableau de bord : bannière d'échec, données du dernier run réussi toujours affichées.
     const home = await get("/");
-    expect(home.text).toContain("La dernière mise à jour a échoué");
+    expect(home.text).toContain("n'a pas pu être effectuée");
     expect(home.text).toContain("Plan de mobilité BOAMP");
   });
 

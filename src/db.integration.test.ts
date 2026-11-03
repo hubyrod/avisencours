@@ -453,6 +453,38 @@ if (!TEST_URL) {
     });
   });
 
+  describe("incident pour les utilisateurs (outageSince / countCarriedOver / incidentForRun)", () => {
+    test("début de la série de pannes, avis conservés sans relecture, incident assemblé", async () => {
+      await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
+      const MO = "Marchés Online (Le Moniteur) indisponible — Error: 403 — ses avis ne sont pas mis à jour ce run";
+      const ok = async (warning: string | null) => {
+        const id = await db.startRun();
+        await db.finishRun(id, { status: "success", totalFetched: 0, relevant: 0, travaux: 0, excluded: 0, warning });
+        return id;
+      };
+      await ok(MO); // ancienne panne, terminée
+      await ok(null);
+      const debut = await ok(MO); // série courante
+      await ok(MO);
+      const dernier = await ok(MO);
+      const [d] = (await control`SELECT started_at FROM runs WHERE id = ${debut}`) as Array<{ started_at: Date }>;
+      expect((await db.outageSince("Marchés Online (Le Moniteur)"))?.getTime()).toBe(new Date(d!.started_at).getTime());
+      expect(await db.outageSince("achatpublic.com")).toBeNull();
+
+      // Deux avis MO conservés (lus il y a 3 jours), un relu ce run, un exclu.
+      await db.upsertAnnouncements(dernier, [
+        avis("MO-garde-1", { source: "marchesonline" }), avis("MO-garde-2", { source: "marchesonline" }),
+        avis("MO-relu", { source: "marchesonline" }), avis("MO-exclu", { source: "marchesonline", category: "excluded" }),
+      ]);
+      await control`UPDATE announcements SET last_seen_at = now() - interval '3 days' WHERE idweb IN ('MO-garde-1', 'MO-garde-2', 'MO-exclu')`;
+      expect(await db.countCarriedOver(dernier, "marchesonline")).toBe(2);
+      const i = await db.incidentForRun(dernier, MO);
+      expect(i?.pannes.map((p) => [p.label, p.conserves, p.since?.getTime()])).toEqual([["Marchés Online (Le Moniteur)", 2, new Date(d!.started_at).getTime()]]);
+      expect(await db.incidentForRun(dernier, null)).toBeNull();
+      await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
+    });
+  });
+
   describe("relais d'une source (saveRelais / loadRelais)", () => {
     test("aller-retour jsonb, une ligne par source, périmé au-delà de l'âge demandé", async () => {
       const items = [avis("MO-1", { source: "marchesonline" }), avis("MO-2", { source: "marchesonline", deadline: null })].map(

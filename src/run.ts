@@ -25,6 +25,7 @@ import {
   loadLlmMemo,
   loadKnownAnnouncements,
   loadRelais,
+  incidentForRun,
 } from "./db.ts";
 import {
   buildQueryFromKeywords,
@@ -41,6 +42,8 @@ import {
   renderDigestHtml,
   renderAlertHtml,
   renderWarningHtml,
+  renderEchecHtml,
+  ECHEC_SUBJECT,
   digestSubject,
 } from "./email.ts";
 import { cleanupAuth, getDigestUserEmails } from "./auth.ts";
@@ -281,6 +284,8 @@ async function main() {
       dateStr: frDate(new Date()),
       llm: (llm ?? null) as LlmStats | null,
       warning: warning ?? null,
+      // Explication pour le lecteur (source en panne depuis quand, avis conservés).
+      incident: await incidentForRun(runId, warning),
     };
     await sendEmail({
       to: recipients,
@@ -299,7 +304,29 @@ async function main() {
       console.error(`could not record failure: ${e}`);
     }
     await sendAlert("⚠️ Avis en cours — échec de la mise à jour quotidienne", renderAlertHtml(msg, frDate(new Date())));
+    // Les utilisateurs n'auront pas de digest ce matin : on leur dit pourquoi,
+    // en clair, et ce qu'ils peuvent encore consulter. Pas pour la mise à jour
+    // de midi (SKIP_DIGEST) : le tableau de bord l'affiche, le matin suffit.
+    if (Bun.env.SKIP_DIGEST !== "1") await notifyUsersOfFailure();
     process.exitCode = 1;
+  }
+}
+
+async function notifyUsersOfFailure(): Promise<void> {
+  try {
+    const recipients = uniqueEmails([await getDigestUserEmails()]);
+    if (recipients.length === 0 || !hasEmailToken()) return;
+    const lastSuccess = await getLastSuccessfulRun();
+    const html = renderEchecHtml(
+      frDate(new Date()),
+      lastSuccess?.finished_at ? new Date(lastSuccess.finished_at) : null,
+      "à midi, puis demain matin",
+      Bun.env.DASHBOARD_URL ?? null,
+    );
+    await sendEmail({ to: recipients, subject: ECHEC_SUBJECT, html });
+    console.error(`échec signalé à ${recipients.length} utilisateur(s)`);
+  } catch (e) {
+    console.error(`email d'échec aux utilisateurs impossible : ${e}`);
   }
 }
 

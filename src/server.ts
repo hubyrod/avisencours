@@ -21,6 +21,7 @@ import {
   terminateRunLockHolders,
   HEARTBEAT_STALE_MS,
   type SourceCount,
+  incidentForRun,
   getCurrent,
   getAnnouncement,
   addComment,
@@ -57,6 +58,7 @@ import {
 } from "./db.ts";
 import { startLive, isLiveReady, liveAdapterState, commentStream, runStream } from "./live.ts";
 import { frDate, frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
+import { phrasesEchec, phrasesIncident, titreIncident, type Incident } from "./incidents.ts";
 import { matchPath } from "./router.ts";
 import {
   type AuthUser,
@@ -2219,13 +2221,24 @@ function announcementRow(a: StoredAnnouncement, ctx: RowContext): string {
   </tr>`;
 }
 
-function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: boolean): string {
+// Bandeau d'incident (mise à jour partielle) : même texte que l'email.
+function incidentBanner(i: Incident): string {
+  return `<div class="statut warn incident"><span class="pastille"></span><strong>${esc(titreIncident(i))}.</strong> ${phrasesIncident(i)
+    .map(esc)
+    .join(" ")}</div>`;
+}
+
+function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: boolean, incident: Incident | null = null): string {
   if (!lastRun) {
     return `<div class="statut warn"><span class="pastille"></span>Aucune donnée pour l'instant — la première mise à jour n'a pas encore eu lieu.</div>`;
   }
   if (lastRun.status === "error") {
-    const when = lastSuccess?.finished_at ? frDateTime(new Date(lastSuccess.finished_at)) : "jamais";
-    return `<div class="banner error">⚠️ La dernière mise à jour a échoué. Données affichées : ${esc(when)}. L'administrateur a été prévenu.</div>`;
+    const phrases = phrasesEchec(
+      frDate(new Date(lastRun.started_at)),
+      lastSuccess?.finished_at ? new Date(lastSuccess.finished_at) : null,
+      "à la prochaine mise à jour (à midi et chaque matin)",
+    );
+    return `<div class="banner error">⚠️ ${phrases.map(esc).join(" ")}</div>`;
   }
   if (lastRun.status === "running") {
     if (!inFlight) {
@@ -2240,7 +2253,7 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: bo
     return `<div class="statut warn"><span class="pastille"></span>Mise à jour en cours${resume}</div>`;
   }
   const when = lastRun.finished_at ? frDateTime(new Date(lastRun.finished_at)) : "?";
-  return `<div class="statut ok"><span class="pastille"></span>Dernière mise à jour : ${esc(when)}.</div>`;
+  return `<div class="statut ok"><span class="pastille"></span>Dernière mise à jour : ${esc(when)}.</div>${incident ? incidentBanner(incident) : ""}`;
 }
 
 // Lignes par page : le tableau de bord rend chaque ligne avec son sélecteur de
@@ -2261,6 +2274,8 @@ const DASHBOARD_CSS = `
     td a.lien-annonce, td a.comments-link { font-weight: 500; }
     .reason { color: var(--encre-2); font-size: 12px; margin-top: 2px; font-style: italic; }
     .non-revu { color: var(--ambre); font-weight: 500; }
+    .statut.incident { display: block; margin-top: 8px; line-height: 1.45; }
+    .statut.incident .pastille { display: inline-block; margin-right: 6px; vertical-align: middle; }
     .statut-form { display: flex; align-items: center; gap: 6px; margin: 0; }
     .statut-select { padding: 4px 6px; border: 1px solid var(--ligne-forte); border-left-width: 4px; border-radius: 6px; font-family: inherit; font-size: 12.5px; background: var(--carte); color: var(--encre); max-width: 190px; }
     .statut-form .ok { background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; font-family: inherit; }
@@ -2316,6 +2331,8 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   ]);
   const inFlight = await runInFlight(lastRun0);
   const lastRun = inFlight || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
+  // Mise à jour partielle (source en panne, LLM interrompu) : expliquée au lecteur.
+  const incident = lastRun?.status === "success" && lastRun.warning ? await incidentForRun(lastRun.id, lastRun.warning) : null;
   // Les deux catégories en cours, lues entières : filtres, tri et comptes se
   // font en mémoire (src/filtres.ts), avec la même définition partout.
   const [pertinents, travaux] = lastSuccess
@@ -2458,7 +2475,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     ${
       inFlight && lastRun
         ? `<div id="bandeau-maj">${banner(lastRun, lastSuccess, true)}</div>${progressClient(lastRun, "bandeau-maj")}`
-        : banner(lastRun, lastSuccess, inFlight)
+        : banner(lastRun, lastSuccess, inFlight, incident)
     }
     ${tabs}
     ${filtres}

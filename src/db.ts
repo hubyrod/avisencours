@@ -8,6 +8,9 @@ import type { LlmStats } from "./llm.ts";
 import type { LlmMemoEntry } from "./classify-llm.ts";
 import type { Category } from "./classify.ts";
 import type { Announcement, Source } from "./scraper.ts";
+import { failedSourcesFromWarning } from "./alertes.ts";
+import { sourceLabel } from "./sources.ts";
+import { incidentFromWarning, type Incident } from "./incidents.ts";
 import type { Famille } from "./familles.ts";
 import type { KnownAnnouncement, KnownLookup } from "./known.ts";
 
@@ -449,6 +452,42 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
           last_seen_at = EXCLUDED.last_seen_at`;
     }
   });
+}
+
+// --- Incidents pour les utilisateurs (src/incidents.ts) -----------------------------
+// Début de la panne d'une source : premier run réussi de la série ininterrompue
+// de runs dont l'avertissement la cite (par libellé, cf. alertes.ts).
+export async function outageSince(label: string): Promise<Date | null> {
+  const rows = (await db()`
+    SELECT started_at FROM runs
+    WHERE status = 'success' AND strpos(COALESCE(warning, ''), ${label}) > 0
+      AND id > COALESCE((SELECT max(id) FROM runs WHERE status = 'success' AND strpos(COALESCE(warning, ''), ${label}) = 0), 0)
+    ORDER BY id LIMIT 1`) as Array<{ started_at: Date }>;
+  return rows[0] ? new Date(rows[0].started_at) : null;
+}
+
+// Avis pertinents (principaux) de la source conservés sur le run sans relecture
+// (carryOverSource) : dernière lecture plus de 36 h avant le début du run.
+export async function countCarriedOver(runId: number, source: Source): Promise<number> {
+  const rows = (await db()`
+    SELECT count(*)::int AS n FROM announcements a, runs r
+    WHERE r.id = ${runId} AND a.last_seen_run_id = r.id AND a.source = ${source}
+      AND a.category = 'relevant' AND a.doublon_de IS NULL
+      AND (a.deadline IS NULL OR a.deadline >= now())
+      AND a.last_seen_at < r.started_at - interval '36 hours'`) as Array<{ n: number }>;
+  return Number(rows[0]?.n ?? 0);
+}
+
+// Incident d'un run (avertissement → sources en panne, depuis quand, avis
+// conservés), pour le bandeau du tableau de bord et le digest.
+export async function incidentForRun(runId: number, warning: string | null | undefined): Promise<Incident | null> {
+  if (!warning) return null;
+  const infos = new Map<Source, { since: Date | null; conserves: number | null }>();
+  for (const source of failedSourcesFromWarning(warning)) {
+    const [since, conserves] = await Promise.all([outageSince(sourceLabel(source)), countCarriedOver(runId, source)]);
+    infos.set(source, { since, conserves });
+  }
+  return incidentFromWarning(warning, (s) => infos.get(s) ?? { since: null, conserves: null });
 }
 
 // --- Relais d'une source -----------------------------------------------------------

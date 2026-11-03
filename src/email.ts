@@ -3,6 +3,7 @@ import { FAMILLE_LABELS, type Famille } from "./familles.ts";
 import { sourceLabel } from "./sources.ts";
 import { postWithRetry, DEFAULT_RETRYABLE } from "./http.ts";
 import { llmStatsSummary, type LlmStats } from "./llm.ts";
+import { phrasesEchec, phrasesIncident, titreIncident, type Incident } from "./incidents.ts";
 
 const API_URL = "https://app.mailpace.com/api/v1/send";
 
@@ -156,8 +157,19 @@ export type DigestData = {
   dashboardUrl: string | null;
   dateStr: string;
   llm?: LlmStats | null;
+  // Avertissement technique du run (gardé pour l'alerte administrateur) ; le
+  // lecteur reçoit `incident`, sa traduction (src/incidents.ts).
   warning?: string | null;
+  incident?: Incident | null;
 };
+
+// Encadré ambre : titre + phrases en français courant, même texte que le bandeau du tableau de bord.
+export function renderIncidentHtml(i: Incident): string {
+  return `<div style="margin:24px 0 0;padding:12px 14px;border-left:4px solid #b5600a;background:#fbf1e3;color:#4a3a1e;font-size:13.5px;">
+      <strong>⚠️ ${esc(titreIncident(i))}</strong>
+      ${phrasesIncident(i).map((p) => `<p style="margin:6px 0 0;">${esc(p)}</p>`).join("")}
+    </div>`;
+}
 
 export function upcomingToShow(items: StoredAnnouncement[]): StoredAnnouncement[] {
   return items.filter((a) => !a.status_is_rejet);
@@ -205,11 +217,7 @@ export function renderDigestHtml(d: DigestData): string {
       d.dashboardUrl,
     )}${abandonnes > 0 && upcoming.length > 0 ? `<p style="color:#666;font-size:13px;">${abandonnes} avis abandonné${abandonnes > 1 ? "s" : ""} non listé${abandonnes > 1 ? "s" : ""}.</p>` : ""}
     ${dashboardLink}
-    ${
-      d.warning
-        ? `<p style="color:#c01c28;font-size:13px;margin-top:24px;">⚠️ ${esc(d.warning)}</p>`
-        : ""
-    }
+    ${d.incident ? renderIncidentHtml(d.incident) : ""}
     <p style="color:#999;font-size:12px;margin-top:32px;">
       Email automatique quotidien. Si cet email cesse d'arriver, signalez-le à l'administrateur.
       ${d.llm ? `<br>Classification LLM : ${esc(llmStatsSummary(d.llm))}.` : ""}
@@ -241,6 +249,20 @@ export function renderWarningHtml(warning: string, llm: LlmStats | null | undefi
     <pre style="background:#f6f6f6;padding:12px;border-radius:4px;font-size:12px;white-space:pre-wrap;">${esc(warning)}</pre>
     ${llm && llmIssue ? `<p style="color:#666;font-size:13px;">Avant l'interruption : ${esc(llmStatsSummary(llm))}.</p>` : ""}
     ${advice.map((a) => `<p style="color:#666;font-size:13px;">${esc(a)}</p>`).join("")}
+  </div>`;
+}
+
+// Email aux utilisateurs quand la mise à jour a échoué (ils n'ont pas de digest ce jour-là).
+export const ECHEC_SUBJECT = "Avis en cours — mise à jour non effectuée";
+
+export function renderEchecHtml(dateStr: string, lastSuccessAt: Date | null, prochaine: string, dashboardUrl: string | null): string {
+  const phrases = phrasesEchec(dateStr, lastSuccessAt, prochaine);
+  return `
+  <div style="font-family:Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;color:#222;">
+    <h1 style="font-size:20px;color:#b5600a;">⚠️ Mise à jour non effectuée — ${esc(dateStr)}</h1>
+    ${phrases.map((p) => `<p>${esc(p)}</p>`).join("")}
+    ${dashboardUrl ? `<p><a href="${esc(dashboardUrl)}" style="color:#1a5fb4;">Voir les avis sur le tableau de bord →</a></p>` : ""}
+    <p style="color:#999;font-size:12px;margin-top:32px;">Email automatique. Le digest quotidien reprendra avec la prochaine mise à jour réussie.</p>
   </div>`;
 }
 

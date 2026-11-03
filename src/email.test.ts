@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { digestSubject, renderDigestHtml, renderWarningHtml, uniqueEmails, type DigestData } from "./email.ts";
+import { digestSubject, ECHEC_SUBJECT, renderDigestHtml, renderEchecHtml, renderWarningHtml, uniqueEmails, type DigestData } from "./email.ts";
 import type { StoredAnnouncement } from "./db.ts";
 
 function stored(n: number, objet = `Avis ${n}`): StoredAnnouncement {
@@ -97,6 +97,30 @@ describe("renderDigestHtml", () => {
   test("inclut le lien tableau de bord, vers les derniers repérés", () => {
     expect(renderDigestHtml(digest(2))).toContain('href="https://dashboard.example/?tri=recents"');
     expect(renderDigestHtml({ ...digest(2), dashboardUrl: "https://dashboard.example/" })).toContain('href="https://dashboard.example/?tri=recents"');
+  });
+});
+
+describe("incident et échec pour le lecteur", () => {
+  test("incident expliqué au lecteur, jamais l'avertissement technique brut", () => {
+    const d = digest(0);
+    d.warning = "Marchés Online (Le Moniteur) indisponible — Error: 403 Forbidden sur https://x — ses avis ne sont pas mis à jour ce run";
+    d.incident = { pannes: [{ source: "marchesonline", label: "Marchés Online (Le Moniteur)", since: new Date("2026-10-10T04:30:00Z"), conserves: 3 }], llm: false };
+    const html = renderDigestHtml(d);
+    expect(html).toContain("Mise à jour partielle : Marchés Online (Le Moniteur) ne répond pas");
+    expect(html).toContain("depuis le 10 octobre 2026");
+    expect(html).toContain("3 avis pertinents concernés");
+    expect(html).toContain("L'équipe technique est prévenue.");
+    expect(html).not.toContain("403 Forbidden");
+    expect(renderDigestHtml({ ...d, incident: null })).not.toContain("ne répond pas");
+  });
+  test("email d'échec aux utilisateurs", () => {
+    const html = renderEchecHtml("mardi 3 novembre 2026", new Date("2026-11-02T04:32:00Z"), "à midi, puis demain matin", "https://dashboard.example");
+    expect(html).toContain("Mise à jour non effectuée — mardi 3 novembre 2026");
+    expect(html).toContain("n'a pas pu être effectuée");
+    expect(html).toContain("2 novembre 2026");
+    expect(html).toContain("à midi, puis demain matin");
+    expect(html).toContain('href="https://dashboard.example"');
+    expect(ECHEC_SUBJECT).toContain("mise à jour non effectuée");
   });
 });
 
