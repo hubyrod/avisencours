@@ -71,6 +71,20 @@ describe("scrapeAll", () => {
     const empty = fakeOds(0);
     expect(await scrapeAll(params, { fetchImpl: empty.fetchImpl })).toEqual([]);
   });
+  test("403 du frontal : pause puis une seconde lecture complète ; deux 403 = erreur", async () => {
+    let calls = 0;
+    const flaky: FetchLike = async () => {
+      calls++;
+      if (calls === 1) return new Response("<h1>403 Forbidden</h1><center>openresty</center>", { status: 403 });
+      return new Response(JSON.stringify({ total_count: 1, results: [{ idweb: "B1", objet: "x" }] }), { status: 200 });
+    };
+    const pauses: number[] = [];
+    const items = await scrapeAll(params, { fetchImpl: flaky, sleep: async (ms) => { pauses.push(ms); } });
+    expect(items.map((i) => i.idweb)).toEqual(["B1"]);
+    expect(pauses).toEqual([60_000]);
+    const dead: FetchLike = async () => new Response("Forbidden", { status: 403 });
+    await expect(scrapeAll(params, { fetchImpl: dead, sleep: async () => {} })).rejects.toThrow("API 403");
+  });
   test("503 sur une page : réessayée, le run ne tombe pas", async () => {
     const ods = fakeOds(150, { failOnce: new Set([100]) });
     const items = await scrapeAll(params, { pageSize: 100, fetchImpl: ods.fetchImpl, sleep: async () => {} });

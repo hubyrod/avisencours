@@ -1,7 +1,7 @@
 import { buildApiUrl, type SearchParams } from "./params.ts";
 import type { Famille } from "./familles.ts";
 import { mapConcurrent } from "./concurrent.ts";
-import { fetchWithRetry, type FetchLike } from "./http.ts";
+import { fetchWithRetry, HttpError, type FetchLike } from "./http.ts";
 
 export type Announcement = {
   idweb: string;
@@ -56,6 +56,10 @@ export type ScrapeOptions = {
 };
 
 const DEFAULT_CONCURRENCY = 4;
+// Le portail a déjà répondu 403 (page « Forbidden » de son frontal) une fois
+// dans la journée, ce qui a fait tomber le run (2026-10-29) : la lecture
+// entière est reprise une fois après cette pause.
+export const FORBIDDEN_PAUSE_MS = 60_000;
 
 async function fetchPage(params: SearchParams, start: number, rows: number, opts: ScrapeOptions): Promise<OdsResponse> {
   const url = buildApiUrl({ ...params, start, rows });
@@ -69,6 +73,16 @@ export async function scrapeAll(
   params: SearchParams,
   opts: ScrapeOptions = {},
 ): Promise<Announcement[]> {
+  try {
+    return await scrapeOnce(params, opts);
+  } catch (err) {
+    if (!(err instanceof HttpError) || err.status !== 403) throw err;
+    await (opts.sleep ?? ((ms) => Bun.sleep(ms)))(FORBIDDEN_PAUSE_MS);
+    return scrapeOnce(params, opts);
+  }
+}
+
+async function scrapeOnce(params: SearchParams, opts: ScrapeOptions): Promise<Announcement[]> {
   const maxPages = opts.maxPages ?? Number.POSITIVE_INFINITY;
   const pageSize = opts.pageSize ?? 100;
   const concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY;
