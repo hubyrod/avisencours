@@ -181,6 +181,24 @@ if (!TEST_URL) {
     const clair = await fetch(`${BASE}/`, { headers: { cookie, "accept-encoding": "identity" }, redirect: "manual" });
     expect(clair.headers.get("content-encoding")).toBeNull();
     expect((await fetch(`${BASE}/connexion`, { headers: { "accept-encoding": "gzip" }, redirect: "manual", decompress: false } as RequestInit)).headers.get("content-encoding")).toBe("gzip");
+    // Pagination à 100 lignes : l'onglet compte tout, la page n'en rend que cent.
+    const [run] = (await control`SELECT max(id) AS id FROM runs WHERE status = 'success'`) as Array<{ id: string }>;
+    const lot = Array.from({ length: 120 }, (_, i) => ({
+      idweb: `TP-${i}`, url: `https://boamp/TP-${i}`, objet: `Travaux ${i}`, category: "travaux", source: "boamp", famille: "mobilité",
+      deadline: "2030-12-31", deadline_text: "31/12/2030", first_seen_run_id: Number(run!.id), last_seen_run_id: Number(run!.id),
+    }));
+    await control`INSERT INTO announcements ${control(lot)}`;
+    const p1 = (await get("/?cat=travaux")).text;
+    expect(p1).toContain("Travaux — hors scope (120)");
+    expect((p1.match(/<tr>\s*<td class="deadline">/g) ?? []).length).toBe(100);
+    expect(p1).toContain("Avis 1–100 sur 120");
+    expect(p1).toContain('href="/?cat=travaux&amp;page=2"');
+    const p2 = (await get("/?cat=travaux&page=2")).text;
+    expect((p2.match(/<tr>\s*<td class="deadline">/g) ?? []).length).toBe(20);
+    expect(p2).toContain("Avis 101–120 sur 120");
+    expect(p2).toContain('href="/?cat=travaux"'); // page précédente = sans paramètre page
+    expect((await get("/?cat=travaux&page=9")).text).toContain("Avis 101–120 sur 120"); // au-delà : dernière page
+    await control`DELETE FROM announcements WHERE idweb LIKE 'TP-%'`;
     expect((await get("/?tri=x")).text).toContain('value="atrier" selected');
     expect((await get("/?tri=echeance")).text).toContain('value="echeance" selected');
     // Tri par défaut : les avis sans statut d'abord ; compte par statut dans le filtre ; abandonnés masqués par défaut.

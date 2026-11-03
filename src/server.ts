@@ -2244,8 +2244,14 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: bo
   return `<div class="statut ok"><span class="pastille"></span>Dernière mise à jour : ${esc(when)} — ${lastRun.relevant_count ?? 0} avis pertinents.</div>`;
 }
 
+// Lignes par page : le tableau de bord rend chaque ligne avec son sélecteur de
+// statut ; au-delà de cent (onglet travaux : ~400 avis), la page devient lourde
+// à rendre sur mobile sans rien apporter à la lecture.
+const PAGE_SIZE = 100;
+
 const DASHBOARD_CSS = `
     tbody tr:hover td { background: #f7faf8; }
+    .pagination { display: flex; align-items: center; gap: 14px; margin: 12px 0 0; font-size: 13px; color: var(--encre-2); }
     td a.objet { display: inline-block; font-size: 14px; }
     td a.objet:visited { color: var(--encre-2); }
     td a.lien-annonce, td a.comments-link { font-weight: 500; }
@@ -2291,6 +2297,8 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const sourceParam = url.searchParams.get("source") ?? "";
   const source = isSource(sourceParam) ? sourceParam : null;
   const q = (url.searchParams.get("q") ?? "").trim().slice(0, 120);
+  const pageParam = Number(url.searchParams.get("page"));
+  const page = Number.isInteger(pageParam) && pageParam > 0 ? pageParam : 1;
   const triParam = url.searchParams.get("tri");
   // Défaut : à trier d'abord (sans statut, les plus récents en tête), puis par échéance.
   const tri: CurrentSort = triParam === "recents" ? "recents" : triParam === "echeance" ? "echeance" : "atrier";
@@ -2304,7 +2312,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   ]);
   const inFlight = await runInFlight(lastRun0);
   const lastRun = inFlight || lastRun0?.status !== "running" ? lastRun0 : await getLastRun();
-  const [items, sourceCounts, statusCounts] = lastSuccess
+  const [tous, sourceCounts, statusCounts] = lastSuccess
     ? await Promise.all([
         getCurrent(dbCategory, lastSuccess.id, {
           statusId,
@@ -2320,6 +2328,25 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
         countCurrentByStatus(lastSuccess.id, dbCategory),
       ])
     : [[], [], new Map<number, number>()];
+  // Page courante (PAGE_SIZE lignes) ; les comptes des onglets restent ceux du tout.
+  const pages = Math.max(1, Math.ceil(tous.length / PAGE_SIZE));
+  const pageCourante = Math.min(page, pages);
+  const items = tous.slice((pageCourante - 1) * PAGE_SIZE, pageCourante * PAGE_SIZE);
+  const withPage = (p: number) => {
+    const s = new URLSearchParams(url.searchParams);
+    if (p <= 1) s.delete("page");
+    else s.set("page", String(p));
+    const qs = s.toString();
+    return qs ? `/?${qs}` : "/";
+  };
+  const pagination =
+    pages > 1
+      ? `<nav class="pagination" aria-label="Pages">
+      <span>Avis ${(pageCourante - 1) * PAGE_SIZE + 1}–${Math.min(pageCourante * PAGE_SIZE, tous.length)} sur ${tous.length}</span>
+      ${pageCourante > 1 ? `<a href="${esc(withPage(pageCourante - 1))}">← Page précédente</a>` : ""}
+      ${pageCourante < pages ? `<a href="${esc(withPage(pageCourante + 1))}">Page suivante →</a>` : ""}
+    </nav>`
+      : "";
   // Compte par source pour la catégorie affichée (avant les autres filtres).
   const countFor = (id: string) => sourceCounts.find((c) => c.source === id && c.category === dbCategory)?.count ?? 0;
   const countStatut = (id: number) => statusCounts.get(Number(id)) ?? 0;
@@ -2332,6 +2359,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const withCat = (c: string) => {
     const p = new URLSearchParams(url.searchParams);
     p.set("cat", c);
+    p.delete("page");
     return `/?${p.toString()}`;
   };
 
@@ -2342,10 +2370,10 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
   const tabs = `
   <nav>
     <a href="${esc(withCat("pertinents"))}" class="${cat === "pertinents" ? "active" : ""}">Avis pertinents (${
-      cat === "pertinents" ? items.length : (lastSuccess?.relevant_count ?? "…")
+      cat === "pertinents" ? tous.length : (lastSuccess?.relevant_count ?? "…")
     })</a>${badgeATrier}
     <a href="${esc(withCat("travaux"))}" class="${cat === "travaux" ? "active" : ""}">Travaux — hors scope (${
-      cat === "travaux" ? items.length : (lastSuccess?.travaux_count ?? "…")
+      cat === "travaux" ? tous.length : (lastSuccess?.travaux_count ?? "…")
     })</a>
   </nav>`;
 
@@ -2417,6 +2445,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     ${filtres}
     <div id="liste-erreur" class="banner error" aria-live="polite" hidden></div>
     ${table}
+    ${pagination}
     <footer>Mise à jour automatique le matin et à midi. Les avis sans statut viennent en tête : donnez-leur un statut depuis la liste, les avis abandonnés sortent de la vue. Cliquez sur un avis pour ouvrir sa fiche (statut, commentaires, texte) ; « Annonce ↗ » ouvre le site source. « Nouveau » = apparu depuis votre visite précédente.</footer>
     <script>${DASHBOARD_JS}</script>
   </main>`;
