@@ -2774,12 +2774,38 @@ await startLive().catch((err) => {
   console.error(`live: démarrage Skip impossible — commentaires non réactifs : ${err}`);
 });
 
+// Compression des réponses HTML et JSON (le tableau de bord « travaux » pèse
+// plusieurs centaines de Ko en clair, ses lignes se répètent : gzip divise
+// par dix). Rien n'est touché pour les flux SSE (text/event-stream, jamais
+// mis en mémoire), les redirections et les petites réponses.
+const COMPRESS_MIN_BYTES = 1024;
+async function compress(req: Request, res: Response): Promise<Response> {
+  const accept = req.headers.get("accept-encoding") ?? "";
+  const type = res.headers.get("content-type") ?? "";
+  if (
+    !/\bgzip\b/.test(accept) ||
+    res.status !== 200 ||
+    res.headers.has("content-encoding") ||
+    !(type.startsWith("text/html") || type.startsWith("application/json")) ||
+    res.body === null
+  ) {
+    return res;
+  }
+  const buf = new Uint8Array(await res.arrayBuffer());
+  const headers = new Headers(res.headers);
+  headers.set("Vary", "Accept-Encoding");
+  if (buf.byteLength < COMPRESS_MIN_BYTES) return new Response(buf, { status: res.status, headers });
+  headers.set("Content-Encoding", "gzip");
+  headers.delete("Content-Length");
+  return new Response(Bun.gzipSync(buf), { status: res.status, headers });
+}
+
 const server = Bun.serve({
   port: Number(Bun.env.PORT ?? 8080),
   hostname: "0.0.0.0",
   async fetch(req) {
     try {
-      return await handle(req);
+      return await compress(req, await handle(req));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`request error: ${msg}`);

@@ -173,6 +173,14 @@ if (!TEST_URL) {
     expect(q.text).toContain('class="objet" href="/avis/CSL_1?retour=%2F%3Fq%3Dpapi"');
 
     expect((await get("/?tri=recents")).text).toContain('value="recents" selected');
+    // Pages HTML compressées quand le navigateur l'accepte ; pas les flux ni les redirections.
+    const gz = await fetch(`${BASE}/`, { headers: { cookie, "accept-encoding": "gzip" }, redirect: "manual", decompress: false } as RequestInit);
+    expect(gz.headers.get("content-encoding")).toBe("gzip");
+    expect(gz.headers.get("vary")).toBe("Accept-Encoding");
+    expect(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await gz.arrayBuffer())))).toContain("Avis pertinents");
+    const clair = await fetch(`${BASE}/`, { headers: { cookie, "accept-encoding": "identity" }, redirect: "manual" });
+    expect(clair.headers.get("content-encoding")).toBeNull();
+    expect((await fetch(`${BASE}/connexion`, { headers: { "accept-encoding": "gzip" }, redirect: "manual", decompress: false } as RequestInit)).headers.get("content-encoding")).toBe("gzip");
     expect((await get("/?tri=x")).text).toContain('value="atrier" selected');
     expect((await get("/?tri=echeance")).text).toContain('value="echeance" selected');
     // Tri par défaut : les avis sans statut d'abord ; compte par statut dans le filtre ; abandonnés masqués par défaut.
