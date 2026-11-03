@@ -396,4 +396,45 @@ if (!TEST_URL) {
       expect(names).toContain("announcements_first_seen_run");
     });
   });
+
+  describe("source en panne : report des avis ouverts (carryOverSource)", () => {
+    test("les avis ouverts de la source restent en cours, lus il y a peu ; pas les clos, pas les autres sources, pas les anciens", async () => {
+      await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
+      const r1 = await db.startRun();
+      await db.upsertAnnouncements(r1, [
+        avis("MO-ouvert", { source: "marchesonline" }),
+        avis("MO-clos", { source: "marchesonline", deadline: "01/01/2020 à 12h00" }),
+        avis("MO-sans-date", { source: "marchesonline", deadline: "" }),
+        avis("MO-ancien", { source: "marchesonline" }),
+        avis("CSL-ouvert", { source: "achatpublic" }),
+        avis("B-ouvert"),
+      ]);
+      await db.finishRun(r1, { status: "success", totalFetched: 6, relevant: 6, travaux: 0, excluded: 0 });
+      // La colonne est renseignée à l'upsert ; un avis lu il y a plus de 60 jours n'est plus reporté.
+      const [lu] = (await control`SELECT last_seen_at FROM announcements WHERE idweb = 'MO-ouvert'`) as Array<{ last_seen_at: Date | null }>;
+      expect(lu!.last_seen_at).not.toBeNull();
+      await control`UPDATE announcements SET last_seen_at = now() - interval '90 days' WHERE idweb = 'MO-ancien'`;
+
+      // Run 2 : Marchés Online en panne, achatpublic et BOAMP relus.
+      const r2 = await db.startRun();
+      await db.upsertAnnouncements(r2, [avis("CSL-ouvert", { source: "achatpublic" }), avis("B-ouvert")]);
+      expect(await db.carryOverSource(r2, "marchesonline")).toBe(1);
+      await db.finishRun(r2, { status: "success", totalFetched: 3, relevant: 3, travaux: 0, excluded: 0 });
+
+      const current = (await db.getCurrent("relevant", r2)).map((a) => a.idweb).sort();
+      expect(current).toEqual(["B-ouvert", "CSL-ouvert", "MO-ouvert"]);
+      // Reporté sans relecture : last_seen_at inchangé (celui du run 1).
+      const [apres] = (await control`SELECT last_seen_at, last_seen_run_id FROM announcements WHERE idweb = 'MO-ouvert'`) as Array<{ last_seen_at: Date; last_seen_run_id: string }>;
+      expect(Number(apres!.last_seen_run_id)).toBe(r2);
+      expect(new Date(apres!.last_seen_at).getTime()).toBe(new Date(lu!.last_seen_at!).getTime());
+      // Idempotent : un second report du même run ne touche plus rien.
+      expect(await db.carryOverSource(r2, "marchesonline")).toBe(0);
+      // Le run suivant, source revenue : l'avis est relu normalement et sa date de lecture avance.
+      const r3 = await db.startRun();
+      await db.upsertAnnouncements(r3, [avis("MO-ouvert", { source: "marchesonline" })]);
+      const [relu] = (await control`SELECT last_seen_at FROM announcements WHERE idweb = 'MO-ouvert'`) as Array<{ last_seen_at: Date }>;
+      expect(new Date(relu!.last_seen_at).getTime()).toBeGreaterThan(new Date(lu!.last_seen_at!).getTime());
+      await db.finishRun(r3, { status: "success", totalFetched: 1, relevant: 1, travaux: 0, excluded: 0 });
+    });
+  });
 }

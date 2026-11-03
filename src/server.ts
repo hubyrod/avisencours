@@ -57,7 +57,7 @@ import {
   type KeywordRow,
 } from "./db.ts";
 import { startLive, isLiveReady, liveAdapterState, commentStream, runStream } from "./live.ts";
-import { frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
+import { frDate, frDateTime, statusAttributionLine, statusTooltip } from "./attribution.ts";
 import { matchPath } from "./router.ts";
 import {
   type AuthUser,
@@ -1908,12 +1908,15 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
   const structure: TexteStructure | null = description.length === 1 ? structurerTexte(description[0]!) : null;
   const familleLabel = a.famille && a.famille !== "mobilité" ? (FAMILLE_LABELS[a.famille as Famille] ?? a.famille) : null;
 
+  const dernierRun = await getLastSuccessfulRun();
+  const nonRevu = nonRevuDepuis(a, dernierRun ? new Date(dernierRun.started_at) : null);
   const faits: Array<[string, string | null]> = [
     ["Acheteur", a.acheteur],
     ["Département", a.department],
     ["Publié le", a.published_at],
     ["Type d'avis", a.type_avis],
     ["Procédure", a.procedure],
+    ["Dernière lecture", nonRevu ? `${frDate(nonRevu)} — sa source n'a pas répondu depuis, l'avis est conservé tel quel` : null],
     ...precisions,
   ];
   const faitsRows = faits
@@ -2144,7 +2147,19 @@ type RowContext = {
   statuts: StatusRow[];
   // Liste courante (chemin + filtres), pour revenir au même endroit.
   retour: string;
+  // Début du run affiché : un avis lu bien avant (source en panne, reporté
+  // par carryOverSource) est signalé « non revu depuis le … ».
+  runStartedAt: Date | null;
 };
+
+// Avis conservé sans relecture : sa dernière lecture précède le run affiché
+// de plus d'un jour (le run quotidien relit tout ce qui est joignable).
+const NON_REVU_MS = 36 * 3_600_000;
+function nonRevuDepuis(a: StoredAnnouncement, runStartedAt: Date | null): Date | null {
+  if (!a.last_seen_at || !runStartedAt) return null;
+  const lu = new Date(a.last_seen_at);
+  return runStartedAt.getTime() - lu.getTime() > NON_REVU_MS ? lu : null;
+}
 
 function announcementRow(a: StoredAnnouncement, ctx: RowContext): string {
   const isNew = ctx.prevSeen !== null && !!a.first_seen_at && new Date(a.first_seen_at).getTime() > ctx.prevSeen.getTime();
@@ -2165,6 +2180,7 @@ function announcementRow(a: StoredAnnouncement, ctx: RowContext): string {
   // Statut modifiable depuis la liste : un select par ligne. Sans JavaScript
   // le bouton « OK » poste le formulaire (handleSetStatus redirige vers `retour`).
   const fiche = `/avis/${encodeURIComponent(a.idweb)}?retour=${encodeURIComponent(ctx.retour)}`;
+  const nonRevu = nonRevuDepuis(a, ctx.runStartedAt);
   const statusControl = ctx.statuts.length
     ? `<form method="post" action="/avis/${encodeURIComponent(a.idweb)}/statut" data-live="statut" class="statut-form">
         <input type="hidden" name="retour" value="${esc(ctx.retour)}">
@@ -2192,6 +2208,8 @@ function announcementRow(a: StoredAnnouncement, ctx: RowContext): string {
         a.type_avis ? ` · ${esc(a.type_avis)}` : ""
       }${
         a.published_at ? ` · publié le ${esc(a.published_at)}` : ""
+      }${
+        nonRevu ? ` · <span class="non-revu" title="Sa source n'a pas répondu lors des dernières mises à jour : l'avis est conservé tel qu'il a été lu">non revu depuis le ${esc(frDate(nonRevu))}</span>` : ""
       } · ${liensPublications(a)} · <a class="comments-link" href="${fiche}#commentaires">${
         (a.comment_count ?? 0) > 0 ? `${a.comment_count} commentaire${(a.comment_count ?? 0) > 1 ? "s" : ""}` : "Commenter"
       }</a></div>
@@ -2231,6 +2249,7 @@ const DASHBOARD_CSS = `
     td a.objet:visited { color: var(--encre-2); }
     td a.lien-annonce, td a.comments-link { font-weight: 500; }
     .reason { color: var(--encre-2); font-size: 12px; margin-top: 2px; font-style: italic; }
+    .non-revu { color: var(--ambre); font-weight: 500; }
     .statut-form { display: flex; align-items: center; gap: 6px; margin: 0; }
     .statut-select { padding: 4px 6px; border: 1px solid var(--ligne-forte); border-left-width: 4px; border-radius: 6px; font-family: inherit; font-size: 12.5px; background: var(--carte); color: var(--encre); max-width: 190px; }
     .statut-form .ok { background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; font-family: inherit; }
@@ -2366,7 +2385,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
         }</p>`
       : `<table>
           <thead><tr><th>Échéance</th><th>Objet</th><th>Statut</th></tr></thead>
-          <tbody>${items.map((a) => announcementRow(a, { prevSeen, statuts, retour })).join("")}</tbody>
+          <tbody>${items.map((a) => announcementRow(a, { prevSeen, statuts, retour, runStartedAt: lastSuccess ? new Date(lastSuccess.started_at) : null })).join("")}</tbody>
         </table>`;
 
   const body = `

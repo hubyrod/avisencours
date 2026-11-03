@@ -77,6 +77,9 @@ export type PipelineResult = {
   // Non bloquant : classifieur LLM demandé mais indisponible, ou coupe-circuit
   // ouvert en cours de route. À remonter (email d'alerte, page configuration).
   warning?: string;
+  // Sources secondaires en panne ce run (leurs avis n'ont pas été relus) :
+  // run.ts reporte leurs avis encore ouverts sur le run (carryOverSource).
+  failedSources: Source[];
 };
 
 type CachedItem = Announcement & { matchedQueries: string[] };
@@ -129,7 +132,7 @@ async function scrapeOne(
   codeDepartement: string[] | undefined,
   log: (msg: string) => void,
   progress?: ProgressTracker,
-): Promise<{ items: CachedItem[]; warning?: string }> {
+): Promise<{ items: CachedItem[]; warning?: string; failed?: Source }> {
   const items: CachedItem[] = [];
   log(`${src.name}: lecture des avis en cours…`);
   progress?.start(src.id);
@@ -148,7 +151,7 @@ async function scrapeOne(
     const warning = `${src.name} indisponible — ${errMessage(err)} — ses avis ne sont pas mis à jour ce run`;
     log(warning);
     progress?.fail(src.id, `indisponible : ${errMessage(err).slice(0, 120)}`);
-    return { items, warning };
+    return { items, warning, failed: src.id };
   }
 }
 
@@ -159,7 +162,7 @@ async function loadAll(
   cachePath: string,
   useCache: boolean,
   log: (msg: string) => void,
-): Promise<{ items: CachedItem[]; warning?: string }> {
+): Promise<{ items: CachedItem[]; warning?: string; failedSources: Source[] }> {
   const progress = opts.progress;
   if (useCache) {
     const f = Bun.file(cachePath);
@@ -175,6 +178,7 @@ async function loadAll(
           source: it.source ?? "boamp",
           famille: it.famille ?? "mobilité",
         })),
+        failedSources: [],
       };
     }
   }
@@ -230,7 +234,8 @@ async function loadAll(
   await Bun.write(cachePath, JSON.stringify(items, null, 2));
   log(`cached ${items.length} unique avis (${boamp.length} BOAMP, ${items.length - boamp.length} sources secondaires) -> ${cachePath}`);
   const warnings = secondary.map((s) => s.warning).filter((w): w is string => Boolean(w));
-  return { items, warning: warnings.join(" ; ") || undefined };
+  const failedSources = secondary.map((s) => s.failed).filter((f): f is Source => Boolean(f));
+  return { items, warning: warnings.join(" ; ") || undefined, failedSources };
 }
 
 function resolveMode(
@@ -350,5 +355,5 @@ export async function runPipeline(opts: PipelineOptions = {}): Promise<PipelineR
     else excluded.push(enriched);
   }
 
-  return { mode, relevant, travaux, excluded, llm: ctx?.stats, warning };
+  return { mode, relevant, travaux, excluded, llm: ctx?.stats, warning, failedSources: loaded.failedSources };
 }

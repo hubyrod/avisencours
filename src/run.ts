@@ -5,6 +5,7 @@ import {
   startRun,
   finishRun,
   upsertAnnouncements,
+  carryOverSource,
   regrouperDoublons,
   countByCategory,
   attachPublications,
@@ -160,7 +161,7 @@ async function main() {
     // = repli sur defaults.ts (BOAMP : la requête par défaut).
     const boampKeywords = keywords.filter((k) => k.liste === "boamp");
     const { boamp: _boamp, ...searches } = searchesByListe(keywords);
-    const { relevant, travaux, excluded, llm, warning } = await runPipeline({
+    const { relevant, travaux, excluded, llm, warning, failedSources } = await runPipeline({
       maxPages: boampMaxPages,
       marchesOnlineMaxPages,
       llmMaxPricePerM,
@@ -179,6 +180,12 @@ async function main() {
 
     const all = [...relevant, ...travaux, ...excluded];
     await upsertAnnouncements(runId, all);
+    // Source en panne : ses avis encore ouverts restent « en cours » (reportés
+    // sur ce run, sans relecture) plutôt que de disparaître du tableau de bord.
+    for (const source of failedSources) {
+      const n = await carryOverSource(runId, source);
+      console.error(`${source} en panne — ${n} avis ouvert(s) conservé(s) sans relecture`);
+    }
     // Même appel d'offres sur plusieurs plateformes : une seule ligne comptée.
     const dbl = await regrouperDoublons(runId);
     console.error(`doublons: ${dbl.groupes} groupe(s), ${dbl.doublons} publication(s) rattachée(s)`);

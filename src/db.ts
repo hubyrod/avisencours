@@ -98,6 +98,13 @@ export async function migrate(): Promise<void> {
   // tout l'historique, sans index chaque page balayait tout.
   await sql`CREATE INDEX IF NOT EXISTS announcements_last_seen_run ON announcements (last_seen_run_id, category)`;
   await sql`CREATE INDEX IF NOT EXISTS announcements_first_seen_run ON announcements (first_seen_run_id)`;
+  // Dernière lecture réelle de l'avis sur sa source. Distincte de
+  // last_seen_run_id : une source en panne voit ses avis ouverts reportés
+  // sur le run (carryOverSource) sans avoir été relus.
+  await sql`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS last_seen_at timestamptz`;
+  await sql`
+    UPDATE announcements a SET last_seen_at = r.started_at
+    FROM runs r WHERE a.last_seen_at IS NULL AND r.id = a.last_seen_run_id`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
@@ -405,6 +412,7 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
     famille: it.famille,
     first_seen_run_id: runId,
     last_seen_run_id: runId,
+    last_seen_at: new Date(),
   }));
   await sql.begin(async (tx) => {
     for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
@@ -427,9 +435,28 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
           raw = EXCLUDED.raw,
           source = EXCLUDED.source,
           famille = EXCLUDED.famille,
-          last_seen_run_id = EXCLUDED.last_seen_run_id`;
+          last_seen_run_id = EXCLUDED.last_seen_run_id,
+          last_seen_at = EXCLUDED.last_seen_at`;
     }
   });
+}
+
+// Source en panne ce run : ses avis encore ouverts (date limite à venir, lus
+// il y a moins de CARRY_OVER_MAX_DAYS) sont reportés sur le run pour rester
+// « en cours » au lieu de disparaître du tableau de bord ; last_seen_at ne
+// bouge pas, les pages signalent « non revu depuis le … ». Une source
+// désactivée (réglage) n'est pas reportée : c'est un choix, pas une panne.
+export const CARRY_OVER_MAX_DAYS = 60;
+
+export async function carryOverSource(runId: number, source: Source): Promise<number> {
+  const rows = (await db()`
+    UPDATE announcements SET last_seen_run_id = ${runId}
+    WHERE source = ${source}
+      AND last_seen_run_id IS DISTINCT FROM ${runId}
+      AND deadline >= now()
+      AND last_seen_at >= now() - make_interval(days => ${CARRY_OVER_MAX_DAYS})
+    RETURNING idweb`) as Array<{ idweb: string }>;
+  return rows.length;
 }
 
 // Verdicts LLM mémorisés (src/classify-llm.ts) : un par avis, celui du
@@ -450,7 +477,7 @@ export async function loadLlmMemo(): Promise<Map<string, LlmMemoEntry>> {
 export async function loadKnownAnnouncements(): Promise<KnownLookup> {
   const rows = (await db()`
     SELECT a.idweb, a.url, a.published_at, a.deadline_text, a.objet, a.department, a.acheteur, a.type_avis, a.procedure,
-      a.raw, a.source, a.famille, r.started_at AS last_seen_at
+      a.raw, a.source, a.famille, COALESCE(a.last_seen_at, r.started_at) AS last_seen_at
     FROM announcements a
     LEFT JOIN runs r ON r.id = a.last_seen_run_id
     WHERE a.source <> 'boamp'`) as Array<{
@@ -498,6 +525,9 @@ export type StoredAnnouncement = {
   famille?: string | null;
   first_seen_run_id: number | null;
   first_seen_at?: Date;
+  last_seen_run_id?: number | null;
+  // Dernière lecture réelle sur la source (null pour les lignes antérieures à la colonne).
+  last_seen_at?: Date | null;
   doublon_de?: string | null;
   // Principal + doublons (getCurrent) : toutes les plateformes où l'appel est paru.
   publications?: PublicationLien[];

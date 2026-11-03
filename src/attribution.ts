@@ -3,6 +3,10 @@
 // badge), pour que les deux affichages ne divergent jamais. Testée dans
 // attribution.test.ts ; l'échappement HTML reste à la charge de l'appelant.
 
+export function frDate(d: Date): string {
+  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric", timeZone: "Europe/Paris" });
+}
+
 export function frDateTime(d: Date): string {
   return d.toLocaleString("fr-FR", {
     day: "numeric",
