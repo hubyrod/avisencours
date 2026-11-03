@@ -13,7 +13,7 @@ import { classifyLLM, type LlmContext, type LlmMemoEntry } from "./classify-llm.
 import { classifyHybrid } from "./classify-hybrid.ts";
 import { applyScopeRules, type Liste, type ScopeRules } from "./rules.ts";
 import { Breaker, defaultModelChain, llmConfigured, llmStatsSummary, newLlmStats, type LlmStats } from "./llm.ts";
-import { errMessage } from "./http.ts";
+import { errMessage, type FetchLike } from "./http.ts";
 import { mapConcurrent } from "./concurrent.ts";
 import type { KnownLookup } from "./known.ts";
 
@@ -69,6 +69,13 @@ export type PipelineOptions = {
   // renvoie une liste, la source n'est pas lue depuis ce serveur. Marchés
   // Online bloque l'adresse de l'hébergeur ; GitHub Actions la lit à sa place.
   relais?: (id: Source) => Promise<{ items: Announcement[]; fetchedAt: Date } | null>;
+  // BOAMP bloquant (défaut, CLI) : son échec fait échouer le run. Le job
+  // quotidien passe false : l'échec devient un avertissement, la source est
+  // dans failedSources et run.ts conserve ses avis ouverts (carryOverSource)
+  // plutôt que de perdre la journée entière sur une erreur passagère.
+  boampBlocking?: boolean;
+  // Tests : faux portail injecté dans scrapeAll.
+  fetchImpl?: FetchLike;
 };
 
 export type PipelineResult = {
@@ -94,6 +101,7 @@ async function scrapeBoamp(
   codeDepartement: string[] | undefined,
   log: (msg: string) => void,
   progress?: ProgressTracker,
+  fetchImpl?: FetchLike,
 ): Promise<CachedItem[]> {
   progress?.start("boamp");
   const params = buildDefaultParams(query);
@@ -104,6 +112,7 @@ async function scrapeBoamp(
   const items = await scrapeAll(params, {
     maxPages,
     pageSize: 100,
+    fetchImpl,
     onPage: (n, batch, totalPages) => {
       log(`  BOAMP page ${n}/${totalPages}: ${batch.length} items`);
       progress?.advance("boamp", n, totalPages);
@@ -258,18 +267,32 @@ async function loadAll(
   for (const s of SOURCES) {
     if (s.id !== "boamp" && !sources.some((x) => x.id === s.id)) progress?.skip(s.id, "désactivée");
   }
-  // Toutes les sources en même temps ; BOAMP reste bloquant (son échec fait
-  // échouer le run), les autres se replient en avertissement dans scrapeOne.
+  // Toutes les sources en même temps. BOAMP est bloquant par défaut (CLI :
+  // son échec fait échouer le run) ; le job quotidien le passe non bloquant
+  // (boampBlocking: false) et il se replie alors comme les autres.
+  const boampName = sourceLabel("boamp");
+  const lireBoamp = async (): Promise<{ items: CachedItem[]; warning?: string; failed?: Source }> => {
+    try {
+      return { items: await scrapeBoamp(query, maxPages, opts.codeDepartement, log, progress, opts.fetchImpl) };
+    } catch (err) {
+      if (opts.boampBlocking ?? true) throw err;
+      const warning = `${boampName} indisponible — ${errMessage(err)} — ses avis ne sont pas mis à jour ce run`;
+      log(warning);
+      progress?.fail("boamp", `indisponible : ${errMessage(err).slice(0, 120)}`);
+      return { items: [], warning, failed: "boamp" };
+    }
+  };
   const [boamp, ...secondary] = await Promise.all([
-    scrapeBoamp(query, maxPages, opts.codeDepartement, log, progress),
+    lireBoamp(),
     ...sources.map((src) => scrapeOne(src, opts.codeDepartement, log, progress)),
   ]);
-  const ids = new Set(boamp.map((it) => it.idweb));
-  const items = [...boamp, ...secondary.flatMap((s) => s.items).filter((it) => !ids.has(it.idweb))];
+  const ids = new Set(boamp.items.map((it) => it.idweb));
+  const items = [...boamp.items, ...secondary.flatMap((s) => s.items).filter((it) => !ids.has(it.idweb))];
   await Bun.write(cachePath, JSON.stringify(items, null, 2));
-  log(`cached ${items.length} unique avis (${boamp.length} BOAMP, ${items.length - boamp.length} sources secondaires) -> ${cachePath}`);
-  const warnings = secondary.map((s) => s.warning).filter((w): w is string => Boolean(w));
-  const failedSources = secondary.map((s) => s.failed).filter((f): f is Source => Boolean(f));
+  log(`cached ${items.length} unique avis (${boamp.items.length} BOAMP, ${items.length - boamp.items.length} sources secondaires) -> ${cachePath}`);
+  const lectures = [boamp, ...secondary];
+  const warnings = lectures.map((s) => s.warning).filter((w): w is string => Boolean(w));
+  const failedSources = lectures.map((s) => s.failed).filter((f): f is Source => Boolean(f));
   return { items, warning: warnings.join(" ; ") || undefined, failedSources };
 }
 

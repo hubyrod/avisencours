@@ -187,6 +187,9 @@ async function main() {
       // Liste déposée par src/relais.ts (GitHub Actions, 03:00 UTC) : reprise
       // si elle a moins de 20 h, sinon lecture directe comme avant.
       relais: (id) => loadRelais(id, RELAIS_MAX_AGE_MS),
+      // Une erreur BOAMP passagère ne doit plus coûter la journée : avertissement
+      // + avis ouverts conservés (carryOverSource) au lieu d'un run en échec.
+      boampBlocking: false,
     });
 
     const all = [...relevant, ...travaux, ...excluded];
