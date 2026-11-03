@@ -2277,6 +2277,7 @@ const DASHBOARD_CSS = `
     .filtres label { display: flex; align-items: center; gap: 6px; }
     .filtres button { background: var(--carte); border: 1px solid var(--ligne-forte); border-radius: 6px; padding: 4px 12px; font-size: 13px; cursor: pointer; font-family: inherit; color: var(--encre); }
     .filtres button:hover { border-color: var(--panneau); }
+    .filtres .reinit { font-size: 13px; }
     .empty { color: var(--encre-2); padding: 32px; text-align: center; background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; font-size: 13.5px; }
     @media (max-width: 640px) { .deadline { width: 88px; } .jdate { white-space: normal; } .badge-statut { padding: 2px 5px; } .badge-statut .lbl { display: none; } }
 `;
@@ -2367,6 +2368,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
     p.delete("page");
     return `/?${p.toString()}`;
   };
+  const sansFiltres = cat === "pertinents" ? "/" : "/?cat=travaux";
 
   const badgeATrier =
     cat === "pertinents" && defaut && aTrier > 0
@@ -2388,7 +2390,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
       : `
   <form class="filtres" method="get" action="/">
     <input type="hidden" name="cat" value="${cat}">
-    <input type="search" name="q" value="${esc(q)}" placeholder="Rechercher (objet, acheteur)" aria-label="Rechercher dans les avis" maxlength="120">
+    <input type="search" id="f-q" name="q" value="${esc(q)}" placeholder="Rechercher (objet, acheteur, département)" aria-label="Rechercher dans les avis" maxlength="120" title="Sans égard aux accents ni aux majuscules ; chaque mot tapé doit figurer dans l'avis">
     <label for="f-statut">Statut</label>
     <select id="f-statut" name="statut">
       <option value="">Tous</option>
@@ -2424,6 +2426,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
       facettes.rejetMasques > 0 ? ` (${facettes.rejetMasques})` : ""
     }</label>
     <button type="submit" id="f-bouton">Filtrer</button>
+    ${filtresActifs ? `<a class="reinit" href="${sansFiltres}" title="Revenir à la liste complète">Réinitialiser</a>` : ""}
   </form>`;
 
   const table =
@@ -2432,7 +2435,7 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
           filtresActifs
             ? nouveaux && prevSeen === null
               ? "Première visite : rien n'est encore « nouveau depuis votre dernière visite ». Revenez après la prochaine mise à jour."
-              : "Aucun avis ne correspond à ces filtres."
+              : `Aucun avis ne correspond à ces filtres. <a href="${sansFiltres}">Réinitialiser les filtres</a>`
             : "Aucun avis en cours dans cette catégorie."
         }</p>`
       : `<table>
@@ -2462,7 +2465,10 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
 
 // Script du tableau de bord, progressif : sans lui, les filtres passent par le
 // bouton « Filtrer » et les statuts par le bouton « OK » de chaque ligne.
-// - filtres : tout changement de sélecteur ou de case recharge la liste ;
+// - filtres : tout changement de sélecteur ou de case recharge la liste ; le
+//   champ de recherche aussi, après une pause de frappe, sur Entrée et quand
+//   on l'efface — et retrouve le curseur après le rechargement, pour que
+//   taper « mobilité lyon » d'une traite ne perde rien ;
 // - statut : le select poste en fetch (JSON), la couleur suit, l'erreur
 //   restaure la valeur et s'affiche au-dessus de la liste.
 // DOM manipulé sans innerHTML.
@@ -2476,6 +2482,28 @@ const DASHBOARD_JS = String.raw`
       const t = e.target;
       if (t && (t.tagName === "SELECT" || (t.tagName === "INPUT" && t.type === "checkbox"))) filtres.requestSubmit();
     });
+    const champ = document.getElementById("f-q");
+    if (champ) {
+      const CLE = "avis.recherche.focus";
+      let envoye = champ.value;
+      let minuterie = null;
+      const soumettre = () => {
+        minuterie = null;
+        if (champ.value.trim() === envoye.trim()) return;
+        envoye = champ.value;
+        try { sessionStorage.setItem(CLE, "1"); } catch (e) {}
+        filtres.requestSubmit();
+      };
+      champ.addEventListener("input", () => { clearTimeout(minuterie); minuterie = setTimeout(soumettre, 600); });
+      champ.addEventListener("search", () => { clearTimeout(minuterie); soumettre(); });
+      let reprendre = false;
+      try { reprendre = sessionStorage.getItem(CLE) === "1"; sessionStorage.removeItem(CLE); } catch (e) {}
+      if (reprendre) {
+        champ.focus();
+        const fin = champ.value.length;
+        try { champ.setSelectionRange(fin, fin); } catch (e) {}
+      }
+    }
   }
   const erreur = document.getElementById("liste-erreur");
   const montrer = (msg) => { if (erreur) { erreur.textContent = msg; erreur.hidden = false; } };

@@ -176,6 +176,10 @@ if (!TEST_URL) {
     expect((await get("/?q=MOBILIT%C3%89")).text).toContain("Plan de mobilité BOAMP");
     expect((await get("/?q=boamp+plan")).text).toContain("Plan de mobilité BOAMP");
     expect((await get("/?q=boamp+papi")).text).toContain("Aucun avis ne correspond");
+    // « Réinitialiser » seulement quand un filtre est posé ; il ramène à l'onglet nu.
+    expect((await get("/")).text).not.toContain('class="reinit"');
+    expect((await get("/?q=papi")).text).toContain('<a class="reinit" href="/"');
+    expect((await get("/?cat=travaux&q=papi")).text).toContain('<a class="reinit" href="/?cat=travaux"');
     // Les comptes suivent les filtres : onglets et listes déroulantes disent ce que la vue donnerait.
     const compte = (await get("/?source=achatpublic")).text;
     expect(compte).toContain("Avis pertinents (1)");
