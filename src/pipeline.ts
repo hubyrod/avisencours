@@ -65,6 +65,10 @@ export type PipelineOptions = {
   known?: KnownLookup;
   // Verdicts LLM des runs précédents par idweb (src/classify-llm.ts, memoized).
   llmMemo?: ReadonlyMap<string, LlmMemoEntry>;
+  // Lecture relayée d'une source (table relais, src/relais.ts) : si elle
+  // renvoie une liste, la source n'est pas lue depuis ce serveur. Marchés
+  // Online bloque l'adresse de l'hébergeur ; GitHub Actions la lit à sa place.
+  relais?: (id: Source) => Promise<{ items: Announcement[]; fetchedAt: Date } | null>;
 };
 
 export type PipelineResult = {
@@ -125,7 +129,31 @@ async function scrapeBoamp(
 // jour-là. Chaque source est lue sur son propre site : elles tournent toutes
 // en parallèle (avec BOAMP), la durée de lecture est celle de la plus lente.
 type OnPage = (done: number, total: number | null) => void;
-type SecondarySource = { id: Source; name: string; run: (onPage: OnPage) => Promise<Announcement[]> };
+// `note` : précision ajoutée au jalon une fois la source lue (ex. « via relais »).
+type SecondarySource = { id: Source; name: string; run: (onPage: OnPage) => Promise<Announcement[]>; note?: () => string | undefined };
+
+// Enveloppe une lecture par la liste relayée si elle existe (fraîche), sinon
+// lecture directe. Le jalon et le journal disent laquelle a servi.
+function withRelais(src: SecondarySource, relais: PipelineOptions["relais"], log: (msg: string) => void): SecondarySource {
+  if (!relais) return src;
+  let note: string | undefined;
+  return {
+    ...src,
+    note: () => note,
+    run: async (onPage) => {
+      const r = await relais(src.id).catch((err) => {
+        log(`${src.name}: relais illisible (${errMessage(err)}) — lecture directe`);
+        return null;
+      });
+      if (!r) return src.run(onPage);
+      const heure = r.fetchedAt.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris" });
+      note = `via relais, lu à ${heure}`;
+      log(`${src.name}: ${r.items.length} avis repris du relais (lu à ${heure})`);
+      onPage(1, 1);
+      return r.items;
+    },
+  };
+}
 
 async function scrapeOne(
   src: SecondarySource,
@@ -138,7 +166,8 @@ async function scrapeOne(
   progress?.start(src.id);
   try {
     const found = (await src.run((done, total) => progress?.advance(src.id, done, total))).filter(keep);
-    progress?.finish(src.id, `${found.length} avis retenu${found.length > 1 ? "s" : ""}`);
+    const note = src.note?.();
+    progress?.finish(src.id, `${found.length} avis retenu${found.length > 1 ? "s" : ""}${note ? ` — ${note}` : ""}`);
     for (const it of found) {
       // Filtre départements : ne s'applique qu'aux avis dont on connaît le code
       // (une consultation « France entière » ou un pays étranger passe).
@@ -207,18 +236,24 @@ async function loadAll(
     }
   }
   if (enabled("marchesonline")) {
-    sources.push({
-      id: "marchesonline",
-      name: sourceLabel("marchesonline"),
-      run: (onPage) =>
-        scrapeMarchesOnline({
-          searches: opts.searches?.marchesonline ?? DEFAULT_LISTES.marchesonline,
-          maxPagesPerKeyword: opts.marchesOnlineMaxPages,
-          log,
-          onPage,
-          known,
-        }),
-    });
+    sources.push(
+      withRelais(
+        {
+          id: "marchesonline",
+          name: sourceLabel("marchesonline"),
+          run: (onPage) =>
+            scrapeMarchesOnline({
+              searches: opts.searches?.marchesonline ?? DEFAULT_LISTES.marchesonline,
+              maxPagesPerKeyword: opts.marchesOnlineMaxPages,
+              log,
+              onPage,
+              known,
+            }),
+        },
+        opts.relais,
+        log,
+      ),
+    );
   }
   for (const s of SOURCES) {
     if (s.id !== "boamp" && !sources.some((x) => x.id === s.id)) progress?.skip(s.id, "désactivée");

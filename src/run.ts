@@ -22,6 +22,7 @@ import {
   terminateRunLockHolders,
   loadLlmMemo,
   loadKnownAnnouncements,
+  loadRelais,
 } from "./db.ts";
 import {
   buildQueryFromKeywords,
@@ -45,6 +46,8 @@ import { alertDecision, hasLlmIssue } from "./alertes.ts";
 import type { LlmStats } from "./llm.ts";
 import { SOURCES } from "./sources.ts";
 import { ProgressTracker } from "./progress.ts";
+
+const RELAIS_MAX_AGE_MS = 20 * 3_600_000;
 
 function frDate(d: Date): string {
   return d.toLocaleDateString("fr-FR", {
@@ -181,6 +184,9 @@ async function main() {
       progress,
       known,
       llmMemo,
+      // Liste déposée par src/relais.ts (GitHub Actions, 03:00 UTC) : reprise
+      // si elle a moins de 20 h, sinon lecture directe comme avant.
+      relais: (id) => loadRelais(id, RELAIS_MAX_AGE_MS),
     });
 
     const all = [...relevant, ...travaux, ...excluded];

@@ -397,6 +397,29 @@ if (!TEST_URL) {
     });
   });
 
+  describe("relais d'une source (saveRelais / loadRelais)", () => {
+    test("aller-retour jsonb, une ligne par source, périmé au-delà de l'âge demandé", async () => {
+      const items = [avis("MO-1", { source: "marchesonline" }), avis("MO-2", { source: "marchesonline", deadline: null })].map(
+        ({ matchedQueries: _m, category: _c, ...a }) => a,
+      );
+      await db.saveRelais("marchesonline", items, "2 avis en 3 s");
+      const r = await db.loadRelais("marchesonline", 3_600_000);
+      expect(r?.items).toEqual(items);
+      expect(r?.detail).toBe("2 avis en 3 s");
+      expect(Date.now() - r!.fetchedAt.getTime()).toBeLessThan(60_000);
+      // Écrase la lecture précédente.
+      await db.saveRelais("marchesonline", items.slice(0, 1), null);
+      expect((await db.loadRelais("marchesonline", 3_600_000))?.items.length).toBe(1);
+      expect((await control`SELECT count(*)::int AS n FROM relais`)[0]).toEqual({ n: 1 });
+      // Trop vieux pour l'âge demandé : rien ; autre source : rien.
+      await control`UPDATE relais SET fetched_at = now() - interval '21 hours'`;
+      expect(await db.loadRelais("marchesonline", 20 * 3_600_000)).toBeNull();
+      expect(await db.loadRelais("marchesonline", 22 * 3_600_000)).not.toBeNull();
+      expect(await db.loadRelais("achatpublic", 22 * 3_600_000)).toBeNull();
+      await control`TRUNCATE relais`;
+    });
+  });
+
   describe("source en panne : report des avis ouverts (carryOverSource)", () => {
     test("les avis ouverts de la source restent en cours, lus il y a peu ; pas les clos, pas les autres sources, pas les anciens", async () => {
       await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;

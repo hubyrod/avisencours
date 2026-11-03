@@ -7,7 +7,7 @@ import { DEFAULT_SCOPE, LISTES, type Champ, type Liste, type RuleScope } from ".
 import type { LlmStats } from "./llm.ts";
 import type { LlmMemoEntry } from "./classify-llm.ts";
 import type { Category } from "./classify.ts";
-import type { Source } from "./scraper.ts";
+import type { Announcement, Source } from "./scraper.ts";
 import type { Famille } from "./familles.ts";
 import type { KnownAnnouncement, KnownLookup } from "./known.ts";
 
@@ -105,6 +105,16 @@ export async function migrate(): Promise<void> {
   await sql`
     UPDATE announcements a SET last_seen_at = r.started_at
     FROM runs r WHERE a.last_seen_at IS NULL AND r.id = a.last_seen_run_id`;
+  // Lecture relayée d'une source (src/relais.ts, lancée hors du serveur —
+  // GitHub Actions — quand le site bloque l'adresse de l'hébergeur) : la
+  // dernière liste d'avis par source, reprise par le run si assez récente.
+  await sql`
+    CREATE TABLE IF NOT EXISTS relais (
+      source     text PRIMARY KEY,
+      items      jsonb NOT NULL,
+      fetched_at timestamptz NOT NULL DEFAULT now(),
+      detail     text
+    )`;
   await sql`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash   text PRIMARY KEY,
@@ -439,6 +449,31 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
           last_seen_at = EXCLUDED.last_seen_at`;
     }
   });
+}
+
+// --- Relais d'une source -----------------------------------------------------------
+// Liste d'avis d'une source lue ailleurs (src/relais.ts) et déposée ici ;
+// run.ts la reprend à la place de la lecture directe si elle a moins de
+// maxAgeMs. Une seule ligne par source (la dernière lecture écrase).
+export type Relais = { items: Announcement[]; fetchedAt: Date; detail: string | null };
+
+export async function saveRelais(source: Source, items: readonly Announcement[], detail: string | null = null): Promise<void> {
+  await db()`
+    INSERT INTO relais (source, items, fetched_at, detail)
+    VALUES (${source}, ${JSON.stringify(items)}::text::jsonb, now(), ${detail})
+    ON CONFLICT (source) DO UPDATE SET items = EXCLUDED.items, fetched_at = now(), detail = EXCLUDED.detail`;
+}
+
+export async function loadRelais(source: Source, maxAgeMs: number): Promise<Relais | null> {
+  const rows = (await db()`
+    SELECT items, fetched_at, detail FROM relais
+    WHERE source = ${source} AND fetched_at >= now() - make_interval(secs => ${maxAgeMs / 1000})`) as Array<{
+    items: unknown; fetched_at: Date; detail: string | null;
+  }>;
+  const r = rows[0];
+  if (!r) return null;
+  const items = typeof r.items === "string" ? (JSON.parse(r.items) as unknown) : r.items;
+  return { items: Array.isArray(items) ? (items as Announcement[]) : [], fetchedAt: new Date(r.fetched_at), detail: r.detail };
 }
 
 // Source en panne ce run : ses avis encore ouverts (date limite à venir, lus

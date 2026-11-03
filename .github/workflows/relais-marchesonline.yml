@@ -1,0 +1,39 @@
+name: Relais Marchés Online
+
+# Marchés Online (Cloudflare) renvoie 403 à l'adresse de Clever Cloud depuis le
+# 2026-10-10. Ce job lit la source depuis les runners GitHub et dépose la liste
+# dans la table `relais` de la base de production (src/relais.ts) ; le run
+# quotidien de 04:30 UTC la reprend si elle a moins de 20 h. Non bloquant pour
+# la veille : sans dépôt frais, le run lit le site directement comme avant.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relais-marchesonline
+  cancel-in-progress: false
+
+jobs:
+  relais:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Cache dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-cache-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-cache-
+      - run: bun install --frozen-lockfile
+      - name: Lire Marchés Online et déposer la liste
+        env:
+          POSTGRESQL_ADDON_URI: ${{ secrets.POSTGRESQL_ADDON_URI }}
+        run: bun run src/relais.ts marchesonline
