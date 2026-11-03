@@ -17,6 +17,7 @@ import {
   listScopeRules,
   listSettings,
   getLastRun,
+  getLastSuccessfulRun,
   heartbeatStale,
   terminateRunLockHolders,
   loadLlmMemo,
@@ -40,6 +41,7 @@ import {
   digestSubject,
 } from "./email.ts";
 import { cleanupAuth, getDigestUserEmails } from "./auth.ts";
+import { alertDecision, hasLlmIssue } from "./alertes.ts";
 import type { LlmStats } from "./llm.ts";
 import { SOURCES } from "./sources.ts";
 import { ProgressTracker } from "./progress.ts";
@@ -96,6 +98,9 @@ async function main() {
     }
   }
 
+  // Avertissement du dernier run réussi : l'alerte « mise à jour partielle »
+  // ne part que si la situation se dégrade (src/alertes.ts).
+  const previousWarning = (await getLastSuccessfulRun())?.warning ?? null;
   const runId = await startRun();
   console.error(`run #${runId} started`);
 
@@ -210,13 +215,20 @@ async function main() {
 
     await cleanupAuth();
 
-    // Avertissement non bloquant (coupe-circuit, clé absente) : email d'alerte
-    // même si le run est un succès — sinon la dégradation passe inaperçue.
+    // Avertissement non bloquant (coupe-circuit, clé absente, source en panne) :
+    // email d'alerte même si le run est un succès — sinon la dégradation passe
+    // inaperçue. Mais une panne qui dure n'est signalée qu'une fois : le digest
+    // quotidien garde l'avertissement en pied de page.
     if (warning) {
-      const subject = /LLM|OPENROUTER|coupe-circuit/i.test(warning)
-        ? "⚠️ Avis en cours — classification LLM interrompue"
-        : "⚠️ Avis en cours — mise à jour partielle";
-      await sendAlert(subject, renderWarningHtml(warning, llm, frDate(new Date())));
+      const decision = alertDecision(previousWarning, warning);
+      if (decision.send) {
+        const subject = decision.llm || (decision.nouvelles.length === 0 && hasLlmIssue(warning))
+          ? "⚠️ Avis en cours — classification LLM interrompue"
+          : "⚠️ Avis en cours — mise à jour partielle";
+        await sendAlert(subject, renderWarningHtml(warning, llm, frDate(new Date())));
+      } else {
+        console.error(`avertissement inchangé depuis le dernier run réussi — pas de nouvel email d'alerte`);
+      }
     }
 
     // Run manuel (« Relancer maintenant ») : pas de digest. Les nouveautés
