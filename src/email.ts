@@ -172,8 +172,10 @@ export function digestSubject(d: DigestData): string {
 }
 
 export function renderDigestHtml(d: DigestData): string {
+  // Vers les derniers repérés : le tri par défaut du tableau de bord met les
+  // avis à trier en tête, pas les nouveaux de l'email.
   const dashboardLink = d.dashboardUrl
-    ? `<p><a href="${esc(d.dashboardUrl)}" style="color:#1a5fb4;">Voir tous les avis sur le tableau de bord →</a></p>`
+    ? `<p><a href="${esc(d.dashboardUrl.replace(/\/+$/, ""))}/?tri=recents" style="color:#1a5fb4;">Voir les derniers avis repérés sur le tableau de bord →</a></p>`
     : "";
   const upcoming = upcomingToShow(d.upcoming);
   const abandonnes = d.upcoming.length - upcoming.length;

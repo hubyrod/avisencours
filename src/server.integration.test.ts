@@ -227,6 +227,7 @@ if (!TEST_URL) {
     expect(defaut).not.toContain('name="abandonnes" value="1" checked');
     expect((await get("/?abandonnes=1")).text).toContain('name="abandonnes" value="1" checked');
     expect((await get("/?nouveaux=1")).text).toContain("Première visite");
+    expect((await get("/")).text).toContain("Nouveaux depuis ma visite précédente</label>");
   });
 
   test("« Nouveau » = apparu depuis ma visite précédente", async () => {
@@ -236,6 +237,7 @@ if (!TEST_URL) {
     expect(home.text).toMatch(/CSL_1[\s\S]*?<span class="badge">Nouveau/);
     expect(home.text).not.toMatch(/B1[^\n]*\n[^\n]*Nouveau/);
     const nouveaux = await get("/?nouveaux=1");
+    expect(nouveaux.text).toMatch(/Nouveaux depuis ma visite du \d+ [^<]+ \d\d:\d\d<\/label>/);
     expect(nouveaux.text).toContain("Étude PAPI achatpublic");
     expect(nouveaux.text).not.toContain("Plan de mobilité BOAMP");
   });

@@ -94,8 +94,9 @@ describe("renderDigestHtml", () => {
     expect(tous).toContain("ont été abandonnés");
     expect(renderDigestHtml({ ...d, untriaged: 0 })).not.toContain("sans statut");
   });
-  test("inclut le lien tableau de bord", () => {
-    expect(renderDigestHtml(digest(2))).toContain("https://dashboard.example");
+  test("inclut le lien tableau de bord, vers les derniers repérés", () => {
+    expect(renderDigestHtml(digest(2))).toContain('href="https://dashboard.example/?tri=recents"');
+    expect(renderDigestHtml({ ...digest(2), dashboardUrl: "https://dashboard.example/" })).toContain('href="https://dashboard.example/?tri=recents"');
   });
 });
 

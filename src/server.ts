@@ -2248,6 +2248,11 @@ function banner(lastRun: RunRow | null, lastSuccess: RunRow | null, inFlight: bo
 // à rendre sur mobile sans rien apporter à la lecture.
 const PAGE_SIZE = 100;
 
+// « 2 nov. 18:40 » : repère de la case « Nouveaux depuis ma visite du … ».
+function frDateCourte(d: Date): string {
+  return d.toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris" });
+}
+
 const DASHBOARD_CSS = `
     tbody tr:hover td { background: #f7faf8; }
     .pagination { display: flex; align-items: center; gap: 14px; margin: 12px 0 0; font-size: 13px; color: var(--encre-2); }
@@ -2421,7 +2426,11 @@ async function dashboard(req: Request, url: URL, user: AuthUser): Promise<Respon
       <option value="echeance"${tri === "echeance" ? " selected" : ""}>Échéance la plus proche</option>
       <option value="recents"${tri === "recents" ? " selected" : ""}>Repérés le plus récemment</option>
     </select>
-    <label title="Avis apparus depuis votre visite précédente"><input type="checkbox" name="nouveaux" value="1"${nouveaux ? " checked" : ""}> Nouveaux depuis ma dernière visite</label>
+    <label title="${
+      prevSeen ? `Avis apparus depuis votre visite précédente, terminée le ${esc(frDateTime(prevSeen))}` : "Première visite : rien n'est encore nouveau pour vous"
+    }"><input type="checkbox" name="nouveaux" value="1"${nouveaux ? " checked" : ""}> Nouveaux depuis ma visite${
+      prevSeen ? ` du ${esc(frDateCourte(prevSeen))}` : " précédente"
+    }</label>
     <label title="Les avis au statut « abandonné » sont masqués par défaut"><input type="checkbox" name="abandonnes" value="1"${abandonnes ? " checked" : ""}> Afficher les avis abandonnés${
       facettes.rejetMasques > 0 ? ` (${facettes.rejetMasques})` : ""
     }</label>
