@@ -397,6 +397,33 @@ if (!TEST_URL) {
     });
   });
 
+  describe("tri « à trier d'abord » et comptes par statut (getCurrent / countCurrentByStatus)", () => {
+    test("sans statut en tête (récents d'abord), puis par échéance ; comptes avec le défaut implicite", async () => {
+      await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [
+        avis("T-sans-ancien", { deadline: "31/12/2030 à 12h00" }),
+        avis("T-sans-recent", { deadline: "31/12/2031 à 12h00" }),
+        avis("T-statue-tard", { deadline: "30/06/2031 à 12h00" }),
+        avis("T-statue-tot", { deadline: "30/06/2030 à 12h00" }),
+      ]);
+      await control`UPDATE announcements SET first_seen_at = now() - interval '2 days' WHERE idweb = 'T-sans-ancien'`;
+      await db.finishRun(run, { status: "success", totalFetched: 4, relevant: 4, travaux: 0, excluded: 0 });
+      const statuts = await db.listStatuses(false);
+      const autre = statuts.find((s) => s.id !== statuts[0]!.id && !s.is_rejet) ?? statuts[1]!;
+      const [u] = (await control`INSERT INTO users (email) VALUES ('t@example.org') RETURNING id`) as Array<{ id: number }>;
+      await db.addStatusEvent("T-statue-tard", autre.id, Number(u!.id));
+      await db.addStatusEvent("T-statue-tot", autre.id, Number(u!.id));
+      const ordre = (await db.getCurrent("relevant", run, { sort: "atrier" })).map((a) => a.idweb);
+      expect(ordre).toEqual(["T-sans-recent", "T-sans-ancien", "T-statue-tot", "T-statue-tard"]);
+      const counts = await db.countCurrentByStatus(run, "relevant");
+      expect(counts.get(Number(statuts[0]!.id))).toBe(2);
+      expect(counts.get(Number(autre.id))).toBe(2);
+      expect(await db.countCurrentByStatus(run, "travaux")).toEqual(new Map());
+      await control`TRUNCATE comments, status_events, announcements, runs, users RESTART IDENTITY CASCADE`;
+    });
+  });
+
   describe("statuts pour l'email (attachStatuses / countUntriaged)", () => {
     test("dernier événement par avis, statut par défaut sinon ; les sans-statut comptés", async () => {
       await control`TRUNCATE comments, status_events, announcements, runs RESTART IDENTITY CASCADE`;

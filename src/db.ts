@@ -659,7 +659,9 @@ export async function markDashboardVisit(userId: number): Promise<Date | null> {
   return v ? new Date(v) : null;
 }
 
-export type CurrentSort = "echeance" | "recents" | "nouveaute";
+// « atrier » (défaut du tableau de bord) : les avis sans aucun statut d'abord,
+// les plus récemment repérés en tête, puis les avis triés par échéance.
+export type CurrentSort = "atrier" | "echeance" | "recents" | "nouveaute";
 
 export type CurrentFilter = {
   statusId?: number | null;
@@ -733,17 +735,40 @@ export async function getCurrent(
     publications: normalizePublications(r.publications),
   })) as StoredAnnouncement[];
   const sort = filter?.sort ?? "echeance";
+  const vu = (a: StoredAnnouncement) => (a.first_seen_at ? new Date(a.first_seen_at).getTime() : 0);
+  const echeance = (a: StoredAnnouncement) => (a.deadline ? new Date(a.deadline).getTime() : Number.MAX_SAFE_INTEGER);
+  const parRecence = (x: StoredAnnouncement, y: StoredAnnouncement) =>
+    vu(y) - vu(x) || echeance(x) - echeance(y) || x.idweb.localeCompare(y.idweb);
   if (sort === "recents" || sort === "nouveaute") {
+    items.sort(parRecence);
+  } else if (sort === "atrier") {
+    // Sans événement de statut = status_set_at null (le statut affiché est le défaut implicite).
+    const aTrier = (a: StoredAnnouncement) => (a.status_set_at ? 1 : 0);
     items.sort((x, y) => {
-      const dx = x.first_seen_at ? new Date(x.first_seen_at).getTime() : 0;
-      const dy = y.first_seen_at ? new Date(y.first_seen_at).getTime() : 0;
-      if (dx !== dy) return dy - dx;
-      const ex = x.deadline ? new Date(x.deadline).getTime() : Number.MAX_SAFE_INTEGER;
-      const ey = y.deadline ? new Date(y.deadline).getTime() : Number.MAX_SAFE_INTEGER;
-      return ex - ey || x.idweb.localeCompare(y.idweb);
+      const t = aTrier(x) - aTrier(y);
+      if (t !== 0) return t;
+      return aTrier(x) === 0 ? parRecence(x, y) : echeance(x) - echeance(y) || x.idweb.localeCompare(y.idweb);
     });
   }
   return items;
+}
+
+// Avis en cours de la catégorie par statut courant (même définition que
+// getCurrent sans filtre) : les avis sans événement comptent pour le statut
+// par défaut, comme le filtre « statut » les retrouve.
+export async function countCurrentByStatus(runId: number, category: string): Promise<Map<number, number>> {
+  const defaultId = (await getDefaultStatus())?.id ?? null;
+  const rows = (await db()`
+    SELECT COALESCE(cur.status_id, ${defaultId}::bigint) AS status_id, count(*)::int AS count
+    FROM announcements a
+    LEFT JOIN LATERAL (
+      SELECT e.status_id FROM status_events e WHERE e.idweb = a.idweb
+      ORDER BY e.created_at DESC, e.id DESC LIMIT 1
+    ) cur ON true
+    WHERE a.last_seen_run_id = ${runId} AND a.doublon_de IS NULL AND a.category = ${category}
+      AND (a.deadline IS NULL OR a.deadline >= now())
+    GROUP BY 1`) as Array<{ status_id: number | null; count: number }>;
+  return new Map(rows.filter((r) => r.status_id !== null).map((r) => [Number(r.status_id), Number(r.count)]));
 }
 
 // Avis « en cours » (même définition que getCurrent, sans filtre) comptés par

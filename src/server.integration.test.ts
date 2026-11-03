@@ -173,7 +173,15 @@ if (!TEST_URL) {
     expect(q.text).toContain('class="objet" href="/avis/CSL_1?retour=%2F%3Fq%3Dpapi"');
 
     expect((await get("/?tri=recents")).text).toContain('value="recents" selected');
-    expect((await get("/?tri=x")).text).toContain('value="echeance" selected');
+    expect((await get("/?tri=x")).text).toContain('value="atrier" selected');
+    expect((await get("/?tri=echeance")).text).toContain('value="echeance" selected');
+    // Tri par défaut : les avis sans statut d'abord ; compte par statut dans le filtre ; abandonnés masqués par défaut.
+    const defaut = (await get("/")).text;
+    expect(defaut).toContain("à trier</a>");
+    expect(defaut).toMatch(/<option value="\d+">[^<]+ \(\d+\)<\/option>/);
+    expect(defaut).toContain("Afficher les avis abandonnés");
+    expect(defaut).not.toContain('name="abandonnes" value="1" checked');
+    expect((await get("/?abandonnes=1")).text).toContain('name="abandonnes" value="1" checked');
     expect((await get("/?nouveaux=1")).text).toContain("Première visite");
   });
 
