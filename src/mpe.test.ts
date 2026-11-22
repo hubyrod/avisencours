@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MPE_SITES, departementsFromLieux, parseFiche, parsePageState, parsePagination, parseRows, toAnnouncement } from "./mpe.ts";
+import { MPE_SITES, MpeBlockedError, departementsFromLieux, estBlocage, parseFiche, parsePageState, parsePagination, parseRows, scrapeMpe, toAnnouncement } from "./mpe.ts";
 
 const MAXIMILIEN = MPE_SITES.find((s) => s.source === "maximilien")!;
 const AMPA = MPE_SITES.find((s) => s.source === "ampa")!;
@@ -196,5 +196,137 @@ describe("MPE toAnnouncement", () => {
     expect(a.url).toBe("https://demat-ampa.fr/entreprise/consultation/932590?orgAcronyme=a2w");
     expect(a.source).toBe("ampa");
     expect(a.typeAvis).toBe("Consultation AMPA (demat-ampa.fr) (Services)");
+  });
+});
+
+// --- Parcours de la liste contre un site PRADO simulé -------------------------------
+// Le faux site reproduit ce qui a cassé en production : la liste arrive par 10,
+// chaque page porte un état différent (et différent d'un serveur à l'autre), et
+// un pare-feu refuse certaines requêtes d'après l'état qu'elles renvoient, en
+// servant sa page « Accès refusé » en 200 après redirection.
+const SIZE = "ctl0$CONTENU_PAGE$resultSearch$listePageSizeTop";
+const GOTO = "ctl0$CONTENU_PAGE$resultSearch$DefaultButtonTop";
+const NEXT = "ctl0$CONTENU_PAGE$resultSearch$PagerTop$ctl2";
+const REFUS = `<html><h1>Accès refusé</h1><p>La requête a été bloquée</p><p>Le système de détection d'intrusion a bloqué votre requête.</p></html>`;
+
+function fauxSite(opts: { rows: number; annonces?: number; bloque?: (etat: string, serveur: number) => boolean; serveurs?: number }) {
+  const ids = Array.from({ length: opts.rows }, (_, i) => String(1000 + i));
+  const etats: string[] = []; // états renvoyés par le scraper, dans l'ordre
+  const cibles: string[] = [];
+  let sessions = 0;
+  const ligne = (id: string) => `
+<div class="item_consultation list-group-item">
+  <input type="hidden" name="ctl0$CONTENU_PAGE$resultSearch$tableauResultSearch$ctl1$refCons" value="${id}" />
+  <input type="hidden" name="ctl0$CONTENU_PAGE$resultSearch$tableauResultSearch$ctl1$orgCons" value="org" />
+  <div class="cons_categorie"><span>Services</span></div>
+  <!-- BEGIN REFERENCE | INTITULE --><div><span data-toggle="tooltip" title="Plan de mobilité ${id}">x</span></div><!--END REFERENCE | INTITULE-->
+</div>`;
+  const pageHtml = (serveur: number, taille: number, page: number) => {
+    const pages = Math.max(1, Math.ceil(ids.length / taille));
+    return `<input type="hidden" name="PRADO_PAGESTATE" id="PRADO_PAGESTATE" value="s${serveur}-t${taille}-p${page}" />
+<span id="ctl0_CONTENU_PAGE_resultSearch_nombreElement">${opts.annonces ?? ids.length}</span>
+<input name="ctl0$CONTENU_PAGE$resultSearch$numPageTop" type="text" value="${page}" id="n" />
+<span id="ctl0_CONTENU_PAGE_resultSearch_nombrePageTop">${pages}</span>
+${ids.slice((page - 1) * taille, page * taille).map(ligne).join("")}`;
+  };
+  const client = {
+    fetch: async (url: string, init: RequestInit): Promise<Response> => {
+      if (url.includes("/entreprise/consultation/")) return new Response("Type d'annonce : Annonce de consultation Procédure : x");
+      const cookie = (init.headers as Record<string, string>).cookie ?? "";
+      if (init.method !== "POST") {
+        const serveur = sessions++ % (opts.serveurs ?? 1);
+        return new Response(pageHtml(serveur, 10, 1), { headers: { "set-cookie": `SERVERID=${serveur}; path=/` } });
+      }
+      // Sans cookie de session, le vrai site répond 400.
+      const m = cookie.match(/SERVERID=(\d+)/);
+      if (!m) return new Response("Bad Request", { status: 400 });
+      const serveur = Number(m[1]);
+      const f = new URLSearchParams(String(init.body));
+      const etat = f.get("PRADO_PAGESTATE") ?? "";
+      const cible = f.get("PRADO_POSTBACK_TARGET") ?? "";
+      etats.push(etat);
+      cibles.push(cible);
+      if (opts.bloque?.(etat, serveur)) return new Response(REFUS);
+      const e = etat.match(/^s(\d+)-t(\d+)-p(\d+)$/);
+      // Un état d'un autre serveur est illisible pour celui-ci.
+      if (!e || Number(e[1]) !== serveur) return new Response("Page state is corrupted.", { status: 400 });
+      const taille = Number(f.get(SIZE));
+      const num = Number(f.get("ctl0$CONTENU_PAGE$resultSearch$numPageTop"));
+      const page = cible === SIZE ? 1 : cible === GOTO ? num : cible === NEXT ? Number(e[3]) + 1 : NaN;
+      return new Response(pageHtml(serveur, taille, page));
+    },
+  };
+  return { client, etats, cibles, ids, sessions: () => sessions };
+}
+
+const SEARCHES = [{ famille: "mobilité" as const, marche: "services" as const, keywords: ["mobilité"] }];
+const lire = (site: ReturnType<typeof fauxSite>) => scrapeMpe({ site: MAXIMILIEN, searches: SEARCHES, client: site.client });
+
+describe("MPE scrapeMpe : parcours de la liste", () => {
+  test("toutes les consultations sont lues, y compris les rangs 11 à 20", async () => {
+    const site = fauxSite({ rows: 403 });
+    const items = await lire(site);
+    expect(items.length).toBe(403);
+    expect(items.map((i) => i.idweb)).toEqual(site.ids.map((id) => `MX-${id}`));
+    // Rangs 11–20 : sautés quand le premier « suivant » passait de 10 à 20 par page.
+    expect(items.slice(10, 20).map((i) => i.idweb)).toEqual(site.ids.slice(10, 20).map((id) => `MX-${id}`));
+  });
+
+  test("un seul état sert à demander toutes les pages (aucun enchaînement de « suivant »)", async () => {
+    const site = fauxSite({ rows: 403 });
+    await lire(site);
+    expect(site.etats[0]).toBe("s0-t10-p1");
+    expect(site.cibles[0]).toBe(SIZE);
+    // 20 pages demandées depuis l'état de la page 1 à 20 lignes.
+    expect(site.etats.slice(1)).toEqual(Array(20).fill("s0-t20-p1"));
+    expect(new Set(site.cibles.slice(1))).toEqual(new Set([GOTO]));
+    expect(site.cibles).not.toContain(NEXT);
+  });
+
+  test("liste tenant sur une page, liste vide", async () => {
+    expect((await lire(fauxSite({ rows: 7 }))).length).toBe(7);
+    expect(await lire(fauxSite({ rows: 0 }))).toEqual([]);
+  });
+
+  test("état de la page 1 refusé par le pare-feu sur un serveur : nouvelle session sur l'autre", async () => {
+    const site = fauxSite({ rows: 403, serveurs: 2, bloque: (etat) => etat === "s0-t20-p1" });
+    const logs: string[] = [];
+    const items = await scrapeMpe({ site: MAXIMILIEN, searches: SEARCHES, client: site.client, log: (m) => logs.push(m) });
+    expect(items.length).toBe(403);
+    expect(site.sessions()).toBe(2);
+    expect(logs.join("\n")).toContain("requête bloquée par le pare-feu du site — nouvelle session (2/3)");
+  });
+
+  test("refus sur une page en cours de route : l'état de la page précédente prend le relais", async () => {
+    let refus = 0;
+    const site = fauxSite({ rows: 403, bloque: (etat) => etat === "s0-t20-p1" && ++refus === 13 });
+    const items = await lire(site);
+    expect(items.length).toBe(403);
+    expect(site.sessions()).toBe(1);
+    expect(site.etats).toContain("s0-t20-p13");
+  });
+
+  test("pare-feu qui refuse tout : l'erreur le dit, sans parler de pagination", async () => {
+    const site = fauxSite({ rows: 403, bloque: () => true });
+    const err = await lire(site).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MpeBlockedError);
+    expect((err as Error).message).toBe("requête bloquée par le pare-feu du site");
+    expect((err as Error).message).not.toContain("pagination");
+    // Trois sessions essayées, une requête refusée chacune : le refus n'est pas rejoué.
+    expect(site.sessions()).toBe(3);
+    expect(site.etats.length).toBe(3);
+  });
+
+  test("liste incomplète : échec explicite plutôt que des avis qui disparaissent en silence", async () => {
+    const err = await lire(fauxSite({ rows: 393, annonces: 403 })).catch((e: unknown) => e);
+    expect((err as Error).message).toBe("liste incomplète (393 consultations lues sur 403 annoncées)");
+    // Quelques clôtures pendant la lecture restent tolérées.
+    expect((await lire(fauxSite({ rows: 400, annonces: 403 }))).length).toBe(400);
+  });
+
+  test("estBlocage : URL de redirection ou page de refus, pas une page de liste", () => {
+    expect(estBlocage("https://marches.maximilien.fr/forbidden/index.html?uid=abc", "")).toBe(true);
+    expect(estBlocage("", REFUS)).toBe(true);
+    expect(estBlocage("https://marches.maximilien.fr/?page=Entreprise.EntrepriseAdvancedSearch&AllCons", LIST)).toBe(false);
   });
 });

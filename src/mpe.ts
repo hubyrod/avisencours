@@ -3,9 +3,14 @@
 // même HTML, seule l'URL change (`MPE_SITES`). Tout est public : la liste des
 // consultations ouvertes (« ?page=Entreprise.EntrepriseAdvancedSearch&AllCons »,
 // 20 par page), les fiches (/entreprise/consultation/<id>?orgAcronyme=<org>).
-// La pagination est un « postback » : chaque page renvoie un PRADO_PAGESTATE
-// à renvoyer avec la cible « PagerTop$ctl2 » (page suivante) et le cookie de
-// session — sans cookie le serveur répond 400. Comme pour achatpublic, on lit
+// La pagination est un « postback » : un PRADO_PAGESTATE reçu est renvoyé avec
+// une cible et le cookie de session — sans cookie le serveur répond 400. La
+// liste arrive par 10 : un premier postback (cible « listePageSizeTop ») la
+// repasse à 20 par page, puis CHAQUE page est demandée depuis ce même état
+// (cible « DefaultButtonTop » = « aller à la page N »). On n'enchaîne plus les
+// « page suivante » : chaque état (~60 Ko, opaque) est une occasion pour le
+// pare-feu du site de bloquer la requête à tort (voir `estBlocage`), et le
+// premier « suivant » sautait les rangs 11 à 20. Comme pour achatpublic, on lit
 // toute la liste puis on filtre localement (nature « Services », mots-clés par
 // famille sur intitulé + objet) ; la fiche n'est lue que pour les consultations
 // retenues (CPV, type d'annonce).
@@ -31,7 +36,11 @@ export const MPE_SITES: readonly MpeSite[] = [
 const LIST_PATH = "/?page=Entreprise.EntrepriseAdvancedSearch&AllCons";
 const USER_AGENT = "avis-en-cours (veille marchés publics)";
 const PAGE_SIZE = "20";
-const NEXT_TARGET = "ctl0$CONTENU_PAGE$resultSearch$PagerTop$ctl2";
+const SIZE_TARGET = "ctl0$CONTENU_PAGE$resultSearch$listePageSizeTop";
+const GOTO_TARGET = "ctl0$CONTENU_PAGE$resultSearch$DefaultButtonTop";
+// Sessions essayées quand le pare-feu bloque : les deux serveurs du site
+// produisent des états différents, une nouvelle session peut tomber sur l'autre.
+const MAX_SESSIONS = 3;
 const MAX_DEPARTEMENTS = 15;
 
 export type MxRow = {
@@ -138,8 +147,28 @@ export function parseFiche(html: string): MxFiche {
 export type MaximilienClient = { fetch: (url: string, init: RequestInit) => Promise<Response> };
 const defaultClient: MaximilienClient = { fetch: (u, i) => fetch(u, i) };
 
+// Le pare-feu applicatif du site (« système de détection d'intrusion ») refuse
+// certaines requêtes d'après leur contenu : 303 vers /forbidden/index.html,
+// page « Accès refusé » servie en 200. Vu le 2026-11-22 sur Maximilien : l'état
+// de la page 20 était refusé à chaque envoi, et la page de refus, sans
+// pagination, était prise pour un retour à la page 1 (« pagination incohérente »).
+export function estBlocage(finalUrl: string, body: string): boolean {
+  return /\/forbidden\//.test(finalUrl) || /syst[eè]me de d[eé]tection d'intrusion a bloqu[eé]/i.test(body);
+}
+
+// Rejouer la même requête ne sert à rien (le refus tient à son contenu) :
+// l'erreur n'est pas réessayée par Session, c'est scrapeMpe qui change d'état
+// ou de session.
+export class MpeBlockedError extends Error {
+  constructor(readonly reference: string | null) {
+    super(`requête bloquée par le pare-feu du site${reference ? ` (réf. ${reference})` : ""}`);
+    this.name = "MpeBlockedError";
+  }
+}
+
 class Session {
-  private cookie = "";
+  // Un cookie par nom : le site renvoie SERVERID à chaque réponse.
+  private readonly cookies = new Map<string, string>();
   constructor(private readonly client: MaximilienClient) {}
 
   async request(url: string, init: RequestInit = {}): Promise<string> {
@@ -148,18 +177,26 @@ class Session {
       try {
         const res = await this.client.fetch(url, {
           ...init,
-          headers: { ...(init.headers as Record<string, string>), "user-agent": USER_AGENT, cookie: this.cookie },
+          headers: {
+            ...(init.headers as Record<string, string>),
+            "user-agent": USER_AGENT,
+            cookie: [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; "),
+          },
           redirect: "follow",
           signal: AbortSignal.timeout(45_000),
         });
         for (const sc of res.headers.getSetCookie()) {
-          const m = sc.match(/^[^=]+=[^;]+/);
-          if (m) this.cookie = this.cookie ? `${this.cookie}; ${m[0]}` : m[0];
+          const m = sc.match(/^([^=]+)=([^;]+)/);
+          if (m) this.cookies.set(m[1]!, m[2]!);
         }
         const body = await res.text();
+        if (estBlocage(res.url, body)) {
+          throw new MpeBlockedError(res.url.match(/[?&]uid=([^&]+)/)?.[1] ?? null);
+        }
         if (!res.ok) throw new Error(`MPE ${res.status} ${res.statusText} sur ${url.slice(0, 80)}`);
         return body;
       } catch (err) {
+        if (err instanceof MpeBlockedError) throw err;
         lastErr = err;
         if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt));
       }
@@ -184,18 +221,45 @@ export type MpeItem = Announcement & { matchedQueries: string[] };
 
 const CATEGORIE: Record<FamilleSearch["marche"], string> = { services: "Services", fournitures: "Fournitures" };
 
-export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
-  const { site } = opts;
-  const log = opts.log ?? (() => {});
-  const maxPages = opts.maxPages ?? 150;
-  const session = new Session(opts.client ?? defaultClient);
-  const listUrl = `${site.base}${LIST_PATH}`;
+type Retenue = { row: MxRow; famille: FamilleSearch["famille"]; keywords: string[] };
+type Liste = { matched: Map<string, Retenue>; count: number; pages: number; total: number | null };
 
-  let html = await session.request(listUrl);
+function postback(state: string, target: string, page: number): RequestInit {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      PRADO_PAGESTATE: state,
+      PRADO_POSTBACK_TARGET: target,
+      PRADO_POSTBACK_PARAMETER: "",
+      "ctl0$CONTENU_PAGE$resultSearch$listePageSizeTop": PAGE_SIZE,
+      "ctl0$CONTENU_PAGE$resultSearch$numPageTop": String(page),
+    }).toString(),
+  };
+}
+
+// Une lecture complète de la liste dans une session. Lève MpeBlockedError si
+// le pare-feu refuse une page avec les deux états disponibles.
+async function lireListe(opts: ScrapeMpeOptions, session: Session, maxPages: number): Promise<Liste> {
+  const listUrl = `${opts.site.base}${LIST_PATH}`;
+  const accueil = await session.request(listUrl);
+  const etatAccueil = parsePageState(accueil);
+  if (!etatAccueil) {
+    // Liste vide ou tenant sur une page sans pagination : rien à paginer.
+    if (parseRows(accueil).length === 0 && parsePagination(accueil).total !== 0) {
+      throw new Error("aucune consultation lue — structure de page changée ?");
+    }
+    throw new Error("PRADO_PAGESTATE introuvable (pagination impossible)");
+  }
+  // Page 1 à 20 lignes : son état sert ensuite à demander toutes les autres.
+  let html = await session.request(listUrl, postback(etatAccueil, SIZE_TARGET, 1));
+  const etat = parsePageState(html);
+  if (!etat) throw new Error("PRADO_PAGESTATE introuvable (pagination impossible)");
   let { page, pages, total } = parsePagination(html);
+  if (page !== 1) throw new Error(`pagination incohérente (page ${page} au lieu de 1/${pages})`);
+
   const seen = new Set<string>();
-  const matched = new Map<string, { row: MxRow; famille: FamilleSearch["famille"]; keywords: string[] }>();
-  let count = 0;
+  const matched = new Map<string, Retenue>();
   for (;;) {
     opts.onPage?.(page, pages);
     const rows = parseRows(html);
@@ -203,7 +267,6 @@ export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
     for (const row of rows) {
       if (seen.has(row.id)) continue;
       seen.add(row.id);
-      count++;
       for (const s of opts.searches) {
         if (row.categorie !== CATEGORIE[s.marche]) continue;
         const kws = matchKeywords(`${row.intitule} ${row.objet}`, s.keywords);
@@ -211,24 +274,48 @@ export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
       }
     }
     if (page >= pages || page >= maxPages) break;
-    const state = parsePageState(html);
-    if (!state) throw new Error("PRADO_PAGESTATE introuvable (page suivante impossible)");
-    html = await session.request(listUrl, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        PRADO_PAGESTATE: state,
-        PRADO_POSTBACK_TARGET: NEXT_TARGET,
-        PRADO_POSTBACK_PARAMETER: "",
-        "ctl0$CONTENU_PAGE$resultSearch$listePageSizeTop": PAGE_SIZE,
-        "ctl0$CONTENU_PAGE$resultSearch$numPageTop": String(page),
-      }).toString(),
-    });
+    const cible = page + 1;
+    // État de la page qu'on vient de lire : second choix si le pare-feu
+    // refuse l'état de la page 1 (les deux n'ont pas le même contenu).
+    const secours = parsePageState(html);
+    try {
+      html = await session.request(listUrl, postback(etat, GOTO_TARGET, cible));
+    } catch (err) {
+      if (!(err instanceof MpeBlockedError) || !secours || secours === etat) throw err;
+      html = await session.request(listUrl, postback(secours, GOTO_TARGET, cible));
+    }
     const next = parsePagination(html);
-    if (next.page !== page + 1) throw new Error(`pagination incohérente (page ${next.page} après ${page}/${pages})`);
+    if (next.page !== cible) throw new Error(`pagination incohérente (page ${next.page} au lieu de ${cible}/${pages})`);
     page = next.page;
     pages = next.pages;
   }
+  // Garde-fou : une liste lue en entier doit contenir (à quelques clôtures
+  // près pendant la lecture) autant de consultations qu'annoncé. Le saut des
+  // rangs 11–20 (393 lues sur 403) est resté invisible faute de ce contrôle.
+  if (total !== null && page >= pages && total - seen.size > Math.max(5, total * 0.02)) {
+    throw new Error(`liste incomplète (${seen.size} consultations lues sur ${total} annoncées)`);
+  }
+  return { matched, count: seen.size, pages: page, total };
+}
+
+export async function scrapeMpe(opts: ScrapeMpeOptions): Promise<MpeItem[]> {
+  const { site } = opts;
+  const log = opts.log ?? (() => {});
+  const maxPages = opts.maxPages ?? 150;
+  const client = opts.client ?? defaultClient;
+
+  let session = new Session(client);
+  let liste: Liste | null = null;
+  for (let essai = 1; liste === null; essai++) {
+    try {
+      liste = await lireListe(opts, session, maxPages);
+    } catch (err) {
+      if (!(err instanceof MpeBlockedError) || essai >= MAX_SESSIONS) throw err;
+      log(`  ${site.name}: ${err.message} — nouvelle session (${essai + 1}/${MAX_SESSIONS})`);
+      session = new Session(client);
+    }
+  }
+  const { matched, count, pages: page, total } = liste;
   log(`  ${site.name}: ${count} consultations sur ${page} page(s)${total !== null ? ` (annoncées : ${total})` : ""}, ${matched.size} retenue(s)`);
 
   const out: MpeItem[] = [];
