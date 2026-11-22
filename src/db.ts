@@ -13,6 +13,7 @@ import { sourceLabel } from "./sources.ts";
 import { incidentFromWarning, type Incident } from "./incidents.ts";
 import type { Famille } from "./familles.ts";
 import type { KnownAnnouncement, KnownLookup } from "./known.ts";
+import { changementsAvis, phraseSuppression, KINDS_EQUIPE, type AvisEtat, type HistoriqueEntry } from "./historique.ts";
 
 let client: SQL | null = null;
 
@@ -230,6 +231,49 @@ export async function migrate(): Promise<void> {
       action     text NOT NULL,
       detail     text NOT NULL
     )`;
+  // Historique des avis (src/historique.ts) : qui a changé quoi sur un appel
+  // d'offres, et ce que la veille a modifié d'elle-même. Lignes ajoutées
+  // seulement ; le nom de l'auteur est recopié (user_label) pour survivre à la
+  // suppression du compte. user_id NULL + user_label NULL sur une entrée
+  // d'équipe = auteur supprimé avant la création de ce journal.
+  // status_events reste la seule source du statut COURANT ; ce journal le
+  // double pour l'affichage (ancien → nouveau) et porte tout le reste.
+  await sql`
+    CREATE TABLE IF NOT EXISTS avis_events (
+      id              bigserial PRIMARY KEY,
+      created_at      timestamptz NOT NULL DEFAULT now(),
+      idweb           text NOT NULL REFERENCES announcements(idweb) ON DELETE CASCADE,
+      kind            text NOT NULL,
+      user_id         bigint REFERENCES users(id) ON DELETE SET NULL,
+      user_label      text,
+      run_id          bigint REFERENCES runs(id) ON DELETE SET NULL,
+      status_id       bigint REFERENCES statuses(id) ON DELETE RESTRICT,
+      from_status_id  bigint REFERENCES statuses(id) ON DELETE RESTRICT,
+      status_event_id bigint UNIQUE REFERENCES status_events(id) ON DELETE CASCADE,
+      avant           text,
+      apres           text,
+      detail          text
+    )`;
+  await sql`CREATE INDEX IF NOT EXISTS avis_events_idweb_idx ON avis_events (idweb, created_at DESC, id DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS avis_events_user_idx ON avis_events (user_id, id DESC)`;
+  // Reprise des changements de statut antérieurs au journal, dans l'ordre
+  // chronologique (la page « Activité » pagine sur l'id). L'ancien statut est
+  // l'événement précédent du même avis, sinon le statut par défaut. Rejouable :
+  // status_event_id est unique.
+  await sql`
+    INSERT INTO avis_events (created_at, idweb, kind, user_id, user_label, status_id, from_status_id, status_event_id)
+    SELECT t.created_at, t.idweb, 'statut', t.user_id, t.user_label, t.status_id, t.from_status_id, t.id
+    FROM (
+      SELECT e.id, e.created_at, e.idweb, e.user_id, e.status_id, COALESCE(NULLIF(u.name, ''), u.email) AS user_label,
+        COALESCE(
+          LAG(e.status_id) OVER (PARTITION BY e.idweb ORDER BY e.created_at, e.id),
+          (SELECT id FROM statuses WHERE archived = false ORDER BY position, id LIMIT 1)) AS from_status_id
+      FROM status_events e
+      LEFT JOIN users u ON u.id = e.user_id
+    ) t
+    WHERE NOT EXISTS (SELECT 1 FROM avis_events x WHERE x.status_event_id = t.id)
+    ORDER BY t.created_at, t.id
+    ON CONFLICT (status_event_id) DO NOTHING`;
   await sql`
     CREATE TABLE IF NOT EXISTS settings (
       key        text PRIMARY KEY,
@@ -429,8 +473,22 @@ export async function upsertAnnouncements(runId: number, items: ClassifiedItem[]
   }));
   await sql.begin(async (tx) => {
     for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
+      const lot = rows.slice(i, i + UPSERT_CHUNK);
+      // Historique : ce que ce run change sur des avis déjà connus (échéance,
+      // catégorie, rectificatif) est noté avant d'être écrasé.
+      const connus = (await tx`
+        SELECT idweb, deadline_text, category, type_avis FROM announcements
+        WHERE idweb IN ${tx(lot.map((r) => r.idweb))}`) as AvisEtat[];
+      const avant = new Map(connus.map((r) => [r.idweb, r]));
+      const changements = lot.flatMap((r) => {
+        const a = avant.get(r.idweb);
+        return a ? changementsAvis(a, r) : [];
+      });
+      if (changements.length > 0) {
+        await tx`INSERT INTO avis_events ${tx(changements.map((c) => ({ ...c, run_id: runId })))}`;
+      }
       await tx`
-        INSERT INTO announcements ${tx(rows.slice(i, i + UPSERT_CHUNK))}
+        INSERT INTO announcements ${tx(lot)}
         ON CONFLICT (idweb) DO UPDATE SET
           url = EXCLUDED.url,
           objet = EXCLUDED.objet,
@@ -838,15 +896,33 @@ export async function regrouperDoublons(runId: number): Promise<{ groupes: numbe
   const principalDe = new Map<string, string>();
   for (const g of groupes) for (const d of g.doublons) principalDe.set(d, g.principal);
   // Seules les lignes dont le rattachement change sont écrites, en une instruction.
-  const changes = rows
-    .map((r) => ({ idweb: r.idweb, avant: r.doublon_de ?? null, cible: principalDe.get(r.idweb) ?? null }))
-    .filter((c) => c.avant !== c.cible)
-    .map(({ idweb, cible }) => ({ idweb, cible }));
+  const mouvements = rows
+    .map((r) => ({ idweb: r.idweb, source: r.source, avant: r.doublon_de ?? null, cible: principalDe.get(r.idweb) ?? null }))
+    .filter((c) => c.avant !== c.cible);
+  const changes = mouvements.map(({ idweb, cible }) => ({ idweb, cible }));
   if (changes.length > 0) {
-    await sql`
-      UPDATE announcements a SET doublon_de = v.cible
-      FROM jsonb_to_recordset(${JSON.stringify(changes)}::text::jsonb) AS v(idweb text, cible text)
-      WHERE a.idweb = v.idweb`;
+    // Historique, sur l'avis principal (le seul qui a une fiche) : quelle
+    // publication l'a rejoint ou quitté.
+    const entrees = mouvements.flatMap((m) => {
+      const ligne = (principal: string, verbe: string) => ({
+        idweb: principal,
+        kind: "doublon",
+        run_id: runId,
+        apres: m.idweb,
+        detail: `Publication ${sourceLabel(m.source)} ${verbe}`,
+      });
+      return [
+        ...(m.avant ? [ligne(m.avant, "détachée de cet avis")] : []),
+        ...(m.cible ? [ligne(m.cible, "rattachée à cet avis")] : []),
+      ];
+    });
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE announcements a SET doublon_de = v.cible
+        FROM jsonb_to_recordset(${JSON.stringify(changes)}::text::jsonb) AS v(idweb text, cible text)
+        WHERE a.idweb = v.idweb`;
+      if (entrees.length > 0) await tx`INSERT INTO avis_events ${tx(entrees)}`;
+    });
   }
   return { groupes: groupes.length, doublons: principalDe.size };
 }
@@ -862,13 +938,29 @@ export async function addComment(idweb: string, userId: number, body: string): P
   await db()`INSERT INTO comments (idweb, user_id, body) VALUES (${idweb}, ${userId}, ${body})`;
 }
 
-// Authors may delete their own comments; admins may delete any.
+// Nom recopié dans l'historique : le nom, sinon l'email.
+async function userLabel(tx: SQL, userId: number | null): Promise<string | null> {
+  if (userId === null) return null;
+  const rows = await tx`SELECT COALESCE(NULLIF(name, ''), email) AS label FROM users WHERE id = ${userId}`;
+  return (rows[0]?.label as string | undefined) ?? null;
+}
+
+// Authors may delete their own comments; admins may delete any. La suppression
+// laisse une ligne dans l'historique de l'avis (qui, le commentaire de qui) —
+// sans le texte du commentaire.
 export async function deleteComment(id: number, userId: number, isAdmin: boolean): Promise<void> {
-  if (isAdmin) {
-    await db()`DELETE FROM comments WHERE id = ${id}`;
-  } else {
-    await db()`DELETE FROM comments WHERE id = ${id} AND user_id = ${userId}`;
-  }
+  await db().begin(async (tx) => {
+    const rows = isAdmin
+      ? await tx`DELETE FROM comments WHERE id = ${id} RETURNING idweb, user_id, created_at`
+      : await tx`DELETE FROM comments WHERE id = ${id} AND user_id = ${userId} RETURNING idweb, user_id, created_at`;
+    const c = rows[0];
+    if (!c) return;
+    const auteurId = c.user_id === null ? null : Number(c.user_id);
+    const detail = phraseSuppression(auteurId === userId, await userLabel(tx, auteurId), new Date(c.created_at));
+    await tx`
+      INSERT INTO avis_events (idweb, kind, user_id, user_label, detail)
+      VALUES (${c.idweb}, 'commentaire-supprime', ${userId}, ${await userLabel(tx, userId)}, ${detail})`;
+  });
 }
 
 // --- Statuts d'avis (liste gérée dans /admin ; historique en événements) ----------
@@ -926,8 +1018,95 @@ export async function moveStatus(id: number, dir: "up" | "down"): Promise<void> 
   });
 }
 
+// Un changement de statut = l'événement (statut courant, fil en direct) et sa
+// ligne d'historique (ancien → nouveau, nom de l'auteur recopié), ensemble.
 export async function addStatusEvent(idweb: string, statusId: number, userId: number): Promise<void> {
-  await db()`INSERT INTO status_events (idweb, status_id, user_id) VALUES (${idweb}, ${statusId}, ${userId})`;
+  await db().begin(async (tx) => {
+    const prev = await tx`
+      SELECT status_id FROM status_events WHERE idweb = ${idweb} ORDER BY created_at DESC, id DESC LIMIT 1`;
+    const defaut = await tx`SELECT id FROM statuses WHERE archived = false ORDER BY position, id LIMIT 1`;
+    const from = prev[0]?.status_id ?? defaut[0]?.id ?? null;
+    const [e] = await tx`
+      INSERT INTO status_events (idweb, status_id, user_id) VALUES (${idweb}, ${statusId}, ${userId})
+      RETURNING id`;
+    // La date est recopiée en SQL : passée par JavaScript, elle perdrait ses
+    // microsecondes et l'ordre avec les entrées voisines.
+    await tx`
+      INSERT INTO avis_events (created_at, idweb, kind, user_id, user_label, status_id, from_status_id, status_event_id)
+      SELECT created_at, idweb, 'statut', user_id, ${await userLabel(tx, userId)}, status_id, ${from}, id
+      FROM status_events WHERE id = ${e.id}`;
+  });
+}
+
+// --- Historique (lecture) -----------------------------------------------------------
+
+function toEntry(r: Record<string, unknown>): HistoriqueEntry {
+  return {
+    id: Number(r.id),
+    created_at: new Date(r.created_at as string | Date),
+    idweb: r.idweb as string,
+    kind: r.kind as string,
+    user_id: r.user_id === null ? null : Number(r.user_id),
+    user_label: (r.user_label as string | null) ?? null,
+    status_label: (r.status_label as string | null) ?? null,
+    status_color: (r.status_color as string | null) ?? null,
+    from_status_label: (r.from_status_label as string | null) ?? null,
+    from_status_color: (r.from_status_color as string | null) ?? null,
+    avant: (r.avant as string | null) ?? null,
+    apres: (r.apres as string | null) ?? null,
+    detail: (r.detail as string | null) ?? null,
+  };
+}
+
+// Historique d'un avis et de ses doublons (leurs entrées d'avant le
+// regroupement appartiennent au même appel d'offres), du plus récent au plus ancien.
+export async function listAvisHistory(idweb: string): Promise<HistoriqueEntry[]> {
+  const rows = await db()`
+    SELECT e.*, s.label AS status_label, s.color AS status_color, f.label AS from_status_label, f.color AS from_status_color
+    FROM avis_events e
+    LEFT JOIN statuses s ON s.id = e.status_id
+    LEFT JOIN statuses f ON f.id = e.from_status_id
+    WHERE e.idweb = ${idweb} OR e.idweb IN (SELECT idweb FROM announcements WHERE doublon_de = ${idweb})
+    ORDER BY e.created_at DESC, e.id DESC`;
+  return (rows as Array<Record<string, unknown>>).map(toEntry);
+}
+
+export type ActivityEntry = HistoriqueEntry & { fiche: string; objet: string; acheteur: string | null };
+export type ActivityFilter = { type: "equipe" | "veille"; userId: number | null; before: number | null; limit: number };
+
+// Activité sur tous les avis, du plus récent au plus ancien (pagination par
+// curseur sur l'id). Un doublon est présenté sous son avis principal.
+export async function listActivity(f: ActivityFilter): Promise<ActivityEntry[]> {
+  const equipe = [...KINDS_EQUIPE];
+  const rows = await db()`
+    SELECT e.*, s.label AS status_label, s.color AS status_color, f.label AS from_status_label, f.color AS from_status_color,
+      p.idweb AS fiche, p.objet, p.acheteur
+    FROM avis_events e
+    JOIN announcements a ON a.idweb = e.idweb
+    JOIN announcements p ON p.idweb = COALESCE(a.doublon_de, a.idweb)
+    LEFT JOIN statuses s ON s.id = e.status_id
+    LEFT JOIN statuses f ON f.id = e.from_status_id
+    WHERE (e.kind IN ${db()(equipe)}) = ${f.type === "equipe"}
+      AND (${f.userId}::bigint IS NULL OR e.user_id = ${f.userId})
+      AND (${f.before}::bigint IS NULL OR e.id < ${f.before})
+    ORDER BY e.id DESC
+    LIMIT ${f.limit}`;
+  return (rows as Array<Record<string, unknown>>).map((r) => ({
+    ...toEntry(r),
+    fiche: r.fiche as string,
+    objet: r.objet as string,
+    acheteur: (r.acheteur as string | null) ?? null,
+  }));
+}
+
+// Personnes ayant au moins une entrée (filtre « Qui » de la page Activité).
+export async function listActivityAuthors(): Promise<Array<{ id: number; label: string }>> {
+  const rows = await db()`
+    SELECT u.id, COALESCE(NULLIF(u.name, ''), u.email) AS label
+    FROM users u
+    WHERE EXISTS (SELECT 1 FROM avis_events e WHERE e.user_id = u.id)
+    ORDER BY 2`;
+  return (rows as Array<{ id: string; label: string }>).map((r) => ({ id: Number(r.id), label: r.label }));
 }
 
 export type CurrentStatusEvent = {

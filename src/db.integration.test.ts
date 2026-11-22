@@ -548,4 +548,151 @@ if (!TEST_URL) {
       await db.finishRun(r3, { status: "success", totalFetched: 1, relevant: 1, travaux: 0, excluded: 0 });
     });
   });
+
+  describe("historique des avis (avis_events)", () => {
+    const RAZ = () => control`TRUNCATE comments, status_events, announcements, runs, users RESTART IDENTITY CASCADE`;
+    const journal = async (idweb: string) =>
+      (await db.listAvisHistory(idweb)).map((e) => ({ kind: e.kind, qui: e.user_label, de: e.from_status_label, vers: e.status_label, avant: e.avant, apres: e.apres, detail: e.detail }));
+
+    test("changement de statut : événement et entrée d'historique ensemble, ancien → nouveau", async () => {
+      await RAZ();
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [avis("H-1")]);
+      const statuts = await db.listStatuses(false);
+      const [defaut, a, b] = statuts;
+      const [u] = (await control`INSERT INTO users (email, name) VALUES ('marie@example.org', 'Marie') RETURNING id`) as Array<{ id: number }>;
+      await db.addStatusEvent("H-1", a!.id === defaut!.id ? b!.id : a!.id, Number(u!.id));
+      await db.addStatusEvent("H-1", b!.id, Number(u!.id));
+      const [n] = (await control`SELECT count(*)::int AS n FROM status_events WHERE idweb = 'H-1'`) as Array<{ n: number }>;
+      expect(n!.n).toBe(2);
+      // Du plus récent au plus ancien ; le premier changement part du statut par défaut.
+      expect((await journal("H-1")).map((e) => [e.kind, e.qui, e.de, e.vers])).toEqual([
+        ["statut", "Marie", a!.label, b!.label],
+        ["statut", "Marie", defaut!.label, a!.label],
+      ]);
+      // Le nom survit à la suppression du compte.
+      await control`DELETE FROM users WHERE id = ${u!.id}`;
+      const [apres] = await db.listAvisHistory("H-1");
+      expect(apres!.user_id).toBeNull();
+      expect(apres!.user_label).toBe("Marie");
+    });
+
+    test("migrate reprend les anciens événements de statut, une seule fois", async () => {
+      await RAZ();
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [avis("H-2")]);
+      const [defaut, a, b] = await db.listStatuses(false);
+      const [u] = (await control`INSERT INTO users (email) VALUES ('ancien@example.org') RETURNING id`) as Array<{ id: number }>;
+      // Événements écrits avant le journal : status_events seul, dont un d'un compte supprimé.
+      await control`INSERT INTO status_events (idweb, status_id, user_id, created_at) VALUES ('H-2', ${a!.id}, ${u!.id}, now() - interval '2 days')`;
+      await control`INSERT INTO status_events (idweb, status_id, user_id, created_at) VALUES ('H-2', ${b!.id}, NULL, now() - interval '1 day')`;
+      expect(await journal("H-2")).toEqual([]);
+      await db.migrate();
+      await db.migrate();
+      expect((await journal("H-2")).map((e) => [e.qui, e.de, e.vers])).toEqual([
+        [null, a!.label, b!.label],
+        ["ancien@example.org", defaut!.label, a!.label],
+      ]);
+      // La date de l'entrée est celle de l'événement d'origine.
+      const [h] = (await control`
+        SELECT count(*)::int AS n FROM avis_events h JOIN status_events e ON e.id = h.status_event_id WHERE h.created_at = e.created_at`) as Array<{ n: number }>;
+      expect(h!.n).toBe(2);
+    });
+
+    test("suppression d'un commentaire : qui, le commentaire de qui, sans le texte", async () => {
+      await RAZ();
+      const run = await db.startRun();
+      await db.upsertAnnouncements(run, [avis("H-3")]);
+      const [marie] = (await control`INSERT INTO users (email, name) VALUES ('marie@example.org', 'Marie') RETURNING id`) as Array<{ id: number }>;
+      const [paul] = (await control`INSERT INTO users (email, name, is_admin) VALUES ('paul@example.org', 'Paul', true) RETURNING id`) as Array<{ id: number }>;
+      await db.addComment("H-3", Number(marie!.id), "texte confidentiel");
+      await db.addComment("H-3", Number(marie!.id), "second");
+      const ids = (await control`SELECT id FROM comments ORDER BY id`) as Array<{ id: number }>;
+      // Un autre utilisateur, non admin, ne supprime rien et ne laisse aucune trace.
+      await db.deleteComment(Number(ids[0]!.id), 9999, false);
+      expect(await journal("H-3")).toEqual([]);
+      await db.deleteComment(Number(ids[0]!.id), Number(paul!.id), true);
+      await db.deleteComment(Number(ids[1]!.id), Number(marie!.id), false);
+      const lignes = await journal("H-3");
+      expect(lignes.map((e) => [e.kind, e.qui])).toEqual([
+        ["commentaire-supprime", "Marie"],
+        ["commentaire-supprime", "Paul"],
+      ]);
+      expect(lignes[0]!.detail).toMatch(/^a supprimé son commentaire du \d+ \S+ \d{4}$/);
+      expect(lignes[1]!.detail).toMatch(/^a supprimé un commentaire de Marie du /);
+      expect(JSON.stringify(lignes)).not.toContain("confidentiel");
+      expect(((await control`SELECT count(*)::int AS n FROM comments`) as Array<{ n: number }>)[0]!.n).toBe(0);
+    });
+
+    test("la veille : échéance, reclassement et rectificatif notés au run suivant, rien si rien ne change", async () => {
+      await RAZ();
+      const r1 = await db.startRun();
+      await db.upsertAnnouncements(r1, [avis("H-4"), avis("H-5")]);
+      // Un avis nouveau n'a pas d'historique.
+      expect(await journal("H-4")).toEqual([]);
+      const r2 = await db.startRun();
+      await db.upsertAnnouncements(r2, [
+        avis("H-4", { deadline: "15/01/2031 à 17h00", category: "excluded", reason: "transport scolaire", typeAvis: "Avis - rectificatif" }),
+        avis("H-5"),
+      ]);
+      expect((await journal("H-4")).map((e) => [e.kind, e.avant, e.apres, e.detail]).sort()).toEqual([
+        ["categorie", "pertinent", "exclu", "transport scolaire"],
+        ["echeance", "31/12/2030 à 12h00", "15/01/2031 à 17h00", null],
+        ["rectificatif", null, null, null],
+      ]);
+      expect(await journal("H-5")).toEqual([]);
+      const [r] = (await control`SELECT DISTINCT run_id FROM avis_events WHERE idweb = 'H-4'`) as Array<{ run_id: string }>;
+      expect(Number(r!.run_id)).toBe(r2);
+      // Le même contenu relu au run suivant n'ajoute rien.
+      const r3 = await db.startRun();
+      await db.upsertAnnouncements(r3, [avis("H-4", { deadline: "15/01/2031 à 17h00", category: "excluded", reason: "transport scolaire", typeAvis: "Avis - rectificatif" })]);
+      expect((await journal("H-4")).length).toBe(3);
+    });
+
+    test("doublons : l'entrée est portée par l'avis principal, dont l'historique inclut celui du doublon", async () => {
+      await RAZ();
+      const objet = "Élaboration du plan de mobilité de l'agglomération";
+      const jour = "31/12/2030 à 12h00";
+      const r1 = await db.startRun();
+      await db.upsertAnnouncements(r1, [avis("H-B", { objet, acheteur: "Grand Annecy", department: "74", deadline: jour })]);
+      await db.regrouperDoublons(r1);
+      const [u] = (await control`INSERT INTO users (email, name) VALUES ('marie@example.org', 'Marie') RETURNING id`) as Array<{ id: number }>;
+      const r2 = await db.startRun();
+      await db.upsertAnnouncements(r2, [
+        avis("H-B", { objet, acheteur: "Grand Annecy", department: "74", deadline: jour }),
+        avis("MO-H", { objet, acheteur: "Grand Annecy", department: "74", deadline: jour, source: "marchesonline" }),
+      ]);
+      expect(await db.regrouperDoublons(r2)).toEqual({ groupes: 1, doublons: 1 });
+      // Un statut posé sur le doublon (avant regroupement, ou par une requête directe) reste visible sur le principal.
+      const [, autre] = await db.listStatuses(false);
+      await db.addStatusEvent("MO-H", autre!.id, Number(u!.id));
+      const lignes = await journal("H-B");
+      expect(lignes.map((e) => e.kind)).toEqual(["statut", "doublon"]);
+      expect(lignes[1]).toMatchObject({ apres: "MO-H", detail: "Publication Marchés Online (Le Moniteur) rattachée à cet avis" });
+      // Regroupement inchangé au run suivant : pas de nouvelle entrée.
+      await db.regrouperDoublons(r2);
+      expect((await journal("H-B")).length).toBe(2);
+    });
+
+    test("page Activité : équipe ou veille, par personne, curseur, doublon présenté sous son principal", async () => {
+      // Suite du test précédent : 1 entrée d'équipe (sur MO-H, doublon de H-B) et 1 de la veille.
+      const [u] = (await control`SELECT id FROM users WHERE email = 'marie@example.org'`) as Array<{ id: number }>;
+      const [, autre, encore] = await db.listStatuses(false);
+      await db.addStatusEvent("H-B", encore!.id, Number(u!.id));
+      const equipe = await db.listActivity({ type: "equipe", userId: null, before: null, limit: 10 });
+      expect(equipe.map((e) => [e.idweb, e.fiche, e.status_label])).toEqual([
+        ["H-B", "H-B", encore!.label],
+        ["MO-H", "H-B", autre!.label],
+      ]);
+      expect(equipe[0]!.objet).toBe("Élaboration du plan de mobilité de l'agglomération");
+      const veille = await db.listActivity({ type: "veille", userId: null, before: null, limit: 10 });
+      expect(veille.map((e) => e.kind)).toEqual(["doublon"]);
+      expect((await db.listActivity({ type: "equipe", userId: 9999, before: null, limit: 10 })).length).toBe(0);
+      expect((await db.listActivity({ type: "equipe", userId: Number(u!.id), before: null, limit: 10 })).length).toBe(2);
+      const page2 = await db.listActivity({ type: "equipe", userId: null, before: equipe[0]!.id, limit: 10 });
+      expect(page2.map((e) => e.idweb)).toEqual(["MO-H"]);
+      expect(await db.listActivityAuthors()).toEqual([{ id: Number(u!.id), label: "Marie" }]);
+      await RAZ();
+    });
+  });
 }

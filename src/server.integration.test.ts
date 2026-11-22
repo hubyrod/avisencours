@@ -277,6 +277,76 @@ if (!TEST_URL) {
     expect((await get("/avis/B1?retour=https%3A%2F%2Fevil")).text).toContain('<a href="/">← Retour aux avis</a>');
   });
 
+  test("statut depuis la liste avec JavaScript : FormData en fetch, JSON en retour", async () => {
+    const [s] = (await control`SELECT id FROM statuses WHERE label = 'gagné'`) as Array<{ id: string }>;
+    const envoyer = (champs: Record<string, string>) => {
+      const body = new FormData();
+      for (const [k, v] of Object.entries(champs)) body.set(k, v);
+      return fetch(`${BASE}/avis/B1/statut`, {
+        method: "POST",
+        headers: { cookie, origin: BASE, accept: "application/json" },
+        body,
+        redirect: "manual",
+      });
+    };
+    // Ce que le navigateur envoie : multipart, le statut choisi et le retour.
+    const ok = await envoyer({ statut: s!.id, retour: "/" });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ ok: true });
+    const ev = (await control`SELECT status_id FROM status_events WHERE idweb = 'B1' ORDER BY id DESC LIMIT 1`) as Array<{ status_id: string }>;
+    expect(ev[0]!.status_id).toBe(s!.id);
+    // Statut absent (le défaut d'origine : select désactivé avant l'envoi) :
+    // requête invalide, dite comme telle, et rien n'est écrit.
+    const avant = (await control`SELECT count(*)::int AS n FROM status_events`) as Array<{ n: number }>;
+    const vide = await envoyer({ retour: "/" });
+    expect(vide.status).toBe(400);
+    expect(await vide.json()).toEqual({ error: "Requête invalide." });
+    const apres = (await control`SELECT count(*)::int AS n FROM status_events`) as Array<{ n: number }>;
+    expect(apres[0]!.n).toBe(avant[0]!.n);
+    // La page embarque bien le script corrigé : formulaire lu avant de désactiver le select.
+    const js = (await get("/")).text;
+    const lu = js.indexOf("new env.FormData(f)");
+    expect(lu).toBeGreaterThan(-1);
+    // (Bun réécrit `true` en `!0` dans le source d'une fonction.)
+    expect(js.slice(lu)).toMatch(/select\.disabled = (true|!0)/);
+    expect(js.slice(0, lu)).not.toMatch(/select\.disabled = (true|!0)/);
+  });
+
+  test("historique : la fiche et la page Activité disent qui a changé le statut, de quoi vers quoi", async () => {
+    // Les deux tests précédents ont passé B1 de « à évaluer » à « répondu », puis à « gagné ».
+    const fiche = (await get("/avis/B1")).text;
+    const carte = fiche.slice(fiche.indexOf('id="historique"'));
+    expect(carte).toContain("<h2>Historique</h2>");
+    expect(carte).toMatch(/class="qui">admin@example\.org<\/span><span>a changé le statut<\/span>.*?répondu<\/span><span class="fleche"[^>]*>→<\/span>.*?gagné<\/span>/s);
+    expect(carte).toMatch(/à évaluer<\/span><span class="fleche"[^>]*>→<\/span>.*?répondu<\/span>/s);
+    expect(carte).toContain("Avis repéré sur BOAMP");
+    // Fragment relu par la page à chaque changement du fil.
+    const fragment = await get("/avis/B1/historique/fragment");
+    expect(fragment.status).toBe(200);
+    expect(fragment.text).toContain("a changé le statut");
+    expect(fragment.text).not.toContain("<html");
+    expect((await get("/avis/INCONNU/historique/fragment")).status).toBe(404);
+
+    // Un statut posté sur un doublon s'applique à l'avis principal.
+    const [s] = (await control`SELECT id FROM statuses WHERE label = 'perdu'`) as Array<{ id: string }>;
+    expect((await post("/avis/MO-B1/statut", { statut: s!.id, retour: "/" })).status).toBe(303);
+    const ev = (await control`SELECT idweb FROM status_events ORDER BY id DESC LIMIT 1`) as Array<{ idweb: string }>;
+    expect(ev[0]!.idweb).toBe("B1");
+
+    // Page Activité : lien dans l'en-tête, entrées de l'équipe avec l'avis concerné, filtre par personne.
+    expect((await get("/")).text).toContain('<a href="/activite">Activité</a>');
+    const activite = await get("/activite");
+    expect(activite.status).toBe(200);
+    expect(activite.text).toContain("Aujourd'hui");
+    expect(activite.text).toMatch(/gagné<\/span><span class="fleche"[^>]*>→<\/span>.*?perdu<\/span>/s);
+    expect(activite.text).toMatch(/<a href="\/avis\/B1\?retour=%2Factivite">[^<]+<\/a>/);
+    const [moi] = (await control`SELECT id FROM users WHERE email = 'admin@example.org'`) as Array<{ id: string }>;
+    expect(activite.text).toContain(`<option value="${moi!.id}">admin@example.org</option>`);
+    expect((await get(`/activite?qui=${moi!.id}`)).text).toContain("a changé le statut");
+    expect((await get("/activite?qui=999999")).text).toContain("Aucune action de cette personne");
+    expect((await get("/activite?type=veille")).text).toContain("La veille n'a encore modifié aucun avis");
+  });
+
   test("page configuration : onglet Résultats par défaut, onglet Moteur avec sources et LLM", async () => {
     const page = await get("/configuration");
     expect(page.status).toBe(200);

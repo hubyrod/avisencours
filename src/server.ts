@@ -3,6 +3,8 @@ import { SOURCES, isSource, sourceDisabledBy, sourceLabel, sourceSettingKey, typ
 import { decouperRaw, structurerTexte, type TexteStructure } from "./avis-texte.ts";
 import { errMessage } from "./http.ts";
 import { formatCounter, formatDuration, progressPercent, summarizeProgress, type RunProgress } from "./progress.ts";
+import { brancherStatut } from "./statut-client.ts";
+import { grouperParJour, heureParis, phraseHistorique, type HistoriqueEntry } from "./historique.ts";
 import {
   migrate,
   getLastRun,
@@ -35,6 +37,10 @@ import {
   setStatusRejet,
   moveStatus,
   addStatusEvent,
+  listAvisHistory,
+  listActivity,
+  listActivityAuthors,
+  type ActivityEntry,
   getCurrentStatusEvent,
   listKeywords,
   addKeyword,
@@ -247,6 +253,26 @@ const BASE_CSS = `
     .statut-attrib { color: var(--encre-2); font-size: 12.5px; margin: 8px 0 0; }
     .evt-statut { border-top: 1px solid var(--ligne); padding: 8px 0; font-size: 12.5px; color: var(--encre-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .evt-statut .quand { font-family: var(--fonte-mono); font-size: 11.5px; }
+    .histo { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+    .histo li { display: grid; grid-template-columns: 172px minmax(0, 1fr); gap: 2px 14px; padding: 8px 0; border-top: 1px solid var(--ligne); align-items: baseline; }
+    .histo li:first-child { border-top: 0; }
+    .histo .quand { font-family: var(--fonte-mono); font-size: 11.5px; color: var(--encre-2); white-space: nowrap; }
+    .histo .fait { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; line-height: 1.5; }
+    .histo .qui { font-weight: 600; }
+    .histo li.veille .fait { color: var(--encre-2); }
+    .histo .fleche { color: var(--encre-2); }
+    .histo .precision, .histo .sur { grid-column: 2; color: var(--encre-2); font-size: 12px; }
+    .histo .precision { font-style: italic; }
+    .histo .sur a { color: var(--vert); text-decoration: none; font-weight: 500; }
+    .histo .sur a:hover { text-decoration: underline; }
+    .tag-veille { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--encre-2); border: 1px solid var(--ligne-forte); border-radius: 4px; padding: 0 5px; }
+    .histo-suite > summary { cursor: pointer; color: var(--vert); font-size: 13px; padding: 8px 0 2px; border-top: 1px solid var(--ligne); }
+    .histo-suite[open] > summary { margin-bottom: 2px; }
+    .histo-vide { color: var(--encre-2); font-size: 13px; margin: 0; }
+    .activite h3.jour { font-size: 13px; margin: 22px 0 8px; color: var(--encre-2); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+    .activite .jour-carte { background: var(--carte); border: 1px solid var(--ligne); border-radius: 8px; padding: 6px 20px; }
+    .activite .histo li { grid-template-columns: 52px minmax(0, 1fr); }
+    @media (max-width: 640px) { .histo li { grid-template-columns: minmax(0, 1fr); } .histo .precision, .histo .sur { grid-column: 1; } }
     footer { color: var(--encre-2); font-size: 12px; margin-top: 20px; }
     @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
     @media (max-width: 640px) {
@@ -279,6 +305,7 @@ function whoStrip(user: AuthUser): string {
   return `
   <div class="who">
     <span>Connecté&nbsp;: ${esc(user.name || user.email)}</span>
+    <a href="/activite">Activité</a>
     <a href="/profil">Mon profil</a>
     ${user.isAdmin || user.canConfigure ? '<a href="/configuration">Configuration</a>' : ""}
     ${user.isAdmin ? '<a href="/admin">Administration</a>' : ""}
@@ -1655,7 +1682,9 @@ const CLIENT_JS = `
   };
 
   const fmt = (ts) => {
-    const d = new Date(ts.replace(" ", "T"));
+    // Postgres écrit « 2026-11-22 18:43:20.15+01 » : sans les minutes du
+    // décalage, la date est invalide pour le navigateur et s'affichait brute.
+    const d = new Date(ts.replace(" ", "T").replace(/([+-][0-9][0-9])$/, "$1:00"));
     if (isNaN(d)) return ts;
     return d.toLocaleString("fr-FR", {
       day: "numeric", month: "long", year: "numeric",
@@ -1743,10 +1772,33 @@ const CLIENT_JS = `
     }
   }
 
+  // Historique : rendu par le serveur ; chaque changement du fil (statut,
+  // commentaire supprimé) n'est qu'un signal pour le relire.
+  const histo = document.getElementById("historique");
+  let histoEnCours = false, histoARefaire = false;
+  async function relireHistorique() {
+    if (!histo || !CFG.historique) return;
+    if (histoEnCours) { histoARefaire = true; return; }
+    histoEnCours = true;
+    try {
+      const res = await fetch(CFG.historique);
+      if (res.ok) {
+        const suite = histo.querySelector("details");
+        const ouvert = !!(suite && suite.open);
+        histo.innerHTML = await res.text();
+        const nouvelle = histo.querySelector("details");
+        if (nouvelle && ouvert) nouvelle.open = true;
+      }
+    } catch (e) {}
+    histoEnCours = false;
+    if (histoARefaire) { histoARefaire = false; relireHistorique(); }
+  }
+
   let gotInit = false;
   const apply = (e) => {
     let entries;
     try { entries = JSON.parse(e.data); } catch { return; }
+    if (e.type === "update") relireHistorique();
     let seen = false;
     for (const [k, values] of entries) {
       if (k === CFG.idweb) { render(values[0] || []); seen = true; }
@@ -1876,6 +1928,7 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
     getCurrentStatusEvent(idweb),
     getDefaultStatus(),
   ]);
+  const historique = await listAvisHistory(idweb);
   const activeId = currentEvent?.status_id ?? (defaultStatus ? Number(defaultStatus.id) : null);
   const attribution = esc(
     statusAttributionLine(
@@ -2010,6 +2063,7 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
             </form>
             <noscript><p style="color:#78716c;">Les commentaires nécessitent JavaScript.</p></noscript>
           </div>
+          <div class="bloc" id="historique">${renderHistorique(historique, a)}</div>
         </div>
       </div>
       <script type="application/json" id="cfg">${jsonBlob({
@@ -2017,6 +2071,7 @@ async function avisPage(user: AuthUser, idweb: string, retourParam: string | nul
         admin: user.isAdmin,
         idweb,
         flux: `/avis/${encodeURIComponent(idweb)}/commentaires/flux`,
+        historique: `/avis/${encodeURIComponent(idweb)}/historique/fragment`,
         defaut: defaultStatus ? String(defaultStatus.id) : null,
       })}</script>
       <script>${CLIENT_JS}</script>
@@ -2059,6 +2114,8 @@ async function handleSetStatus(
   const idweb = params.idweb ?? "";
   const a = await getAnnouncement(idweb);
   if (!a) return Response.json({ error: "Avis introuvable." }, { status: 404 });
+  // Un doublon n'a pas de fiche : son statut est celui de l'avis principal.
+  const cible = a.doublon_de ?? idweb;
 
   if (!rateLimit(`statut:${user.id}`, 30, 600_000)) {
     return Response.json({ error: MSG_RATE_LIMITED }, { status: 429 });
@@ -2067,7 +2124,9 @@ async function handleSetStatus(
   // Formulaire classique (sans JavaScript, depuis la liste) : on revient sur la liste.
   const wantsJson = (req.headers.get("accept") ?? "").includes("application/json");
   const done = () => (wantsJson ? Response.json({ ok: true }) : redirect(safeRetour(retour), 303));
-  const statusId = Number(statut);
+  // Number("") vaut 0 : un champ absent doit être une requête invalide, pas un
+  // « statut inconnu » qui fait chercher du côté de la liste des statuts.
+  const statusId = /^\d+$/.test(statut.trim()) ? Number(statut) : NaN;
   if (!Number.isInteger(statusId)) return Response.json({ error: "Requête invalide." }, { status: 400 });
   const s = await getStatus(statusId);
   if (!s || s.archived) {
@@ -2076,11 +2135,148 @@ async function handleSetStatus(
   // Re-clic sur le statut déjà affiché (dernier événement, sinon le défaut) :
   // pas de nouvel événement, le fil resterait sinon pollué de doublons.
   const current =
-    (await getCurrentStatusEvent(idweb))?.status_id ?? Number((await getDefaultStatus())?.id ?? NaN);
+    (await getCurrentStatusEvent(cible))?.status_id ?? Number((await getDefaultStatus())?.id ?? NaN);
   if (current === statusId) return done();
-  await addStatusEvent(idweb, statusId, user.id);
+  await addStatusEvent(cible, statusId, user.id);
   return done();
 }
+
+// --- Historique d'un avis et page « Activité » (src/historique.ts) ------------------
+
+const pastille = (p: { label: string; color: string }) =>
+  `<span class="badge-statut"><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.label)}</span>`;
+
+// Une ligne : quand · qui a fait quoi (· sur quel avis, page Activité).
+function histoLigne(e: HistoriqueEntry, quand: string, avis?: { href: string; objet: string; acheteur: string | null }): string {
+  const p = phraseHistorique(e);
+  const statuts = p.vers ? `${p.de ? `${pastille(p.de)}<span class="fleche" aria-label="vers">→</span>` : ""}${pastille(p.vers)}` : "";
+  const fait = p.veille
+    ? `<span class="tag-veille">Veille</span><span>${esc(p.texte)}</span>`
+    : `<span class="qui">${esc(p.qui)}</span><span>${esc(p.texte)}</span>${statuts}`;
+  return `<li${p.veille ? ' class="veille"' : ""}>
+      <time class="quand" datetime="${e.created_at.toISOString()}">${esc(quand)}</time>
+      <span class="fait">${fait}</span>
+      ${p.precision ? `<span class="precision">${esc(p.precision)}</span>` : ""}
+      ${avis ? `<span class="sur"><a href="${esc(avis.href)}">${esc(avis.objet)}</a>${avis.acheteur ? ` — ${esc(avis.acheteur)}` : ""}</span>` : ""}
+    </li>`;
+}
+
+const HISTO_VISIBLES = 8;
+
+// Carte « Historique » de la fiche : les plus récentes d'abord, le reste
+// replié ; la dernière ligne est l'arrivée de l'avis dans la veille.
+function renderHistorique(entries: HistoriqueEntry[], a: StoredAnnouncement): string {
+  const lignes = entries.map((e) => histoLigne(e, frDateTime(e.created_at)));
+  if (a.first_seen_at) {
+    const d = new Date(a.first_seen_at);
+    lignes.push(`<li class="veille">
+      <time class="quand" datetime="${d.toISOString()}">${esc(frDateTime(d))}</time>
+      <span class="fait"><span class="tag-veille">Veille</span><span>Avis repéré sur ${esc(sourceLabel(a.source))}</span></span>
+    </li>`);
+  }
+  const visibles = lignes.slice(0, HISTO_VISIBLES);
+  const suite = lignes.slice(HISTO_VISIBLES);
+  return `<h2>Historique</h2>
+    ${lignes.length === 0 ? '<p class="histo-vide">Aucune modification pour l\'instant.</p>' : `<ul class="histo">${visibles.join("")}</ul>`}
+    ${suite.length > 0 ? `<details class="histo-suite"><summary>Tout l'historique (${lignes.length})</summary><ul class="histo">${suite.join("")}</ul></details>` : ""}`;
+}
+
+async function handleHistoryFragment(idweb: string): Promise<Response> {
+  const a = await getAnnouncement(idweb);
+  if (!a) return html("", 404);
+  return html(renderHistorique(await listAvisHistory(idweb), a));
+}
+
+const ACTIVITE_PAGE = 50;
+
+async function activityPage(user: AuthUser, url: URL): Promise<Response> {
+  const type = url.searchParams.get("type") === "veille" ? "veille" : "equipe";
+  const quiParam = url.searchParams.get("qui") ?? "";
+  const userId = type === "equipe" && /^\d+$/.test(quiParam) ? Number(quiParam) : null;
+  const avantParam = url.searchParams.get("avant") ?? "";
+  const before = /^\d+$/.test(avantParam) ? Number(avantParam) : null;
+  const [lues, auteurs] = await Promise.all([
+    listActivity({ type, userId, before, limit: ACTIVITE_PAGE + 1 }),
+    listActivityAuthors(),
+  ]);
+  const entries: ActivityEntry[] = lues.slice(0, ACTIVITE_PAGE);
+  const lien = (extra: Record<string, string>) => {
+    const q = new URLSearchParams();
+    if (type === "veille") q.set("type", "veille");
+    if (userId !== null) q.set("qui", String(userId));
+    for (const [k, v] of Object.entries(extra)) q.set(k, v);
+    const qs = q.toString();
+    return `/activite${qs ? `?${qs}` : ""}`;
+  };
+  const ici = lien(before !== null ? { avant: String(before) } : {});
+  const jours = grouperParJour(entries)
+    .map(
+      (j) => `<h3 class="jour">${esc(j.jour)}</h3>
+      <div class="jour-carte"><ul class="histo">${j.entries
+        .map((e) =>
+          histoLigne(e, heureParis(e.created_at), {
+            href: `/avis/${encodeURIComponent(e.fiche)}?retour=${encodeURIComponent(ici)}`,
+            objet: e.objet,
+            acheteur: e.acheteur,
+          }),
+        )
+        .join("")}</ul></div>`,
+    )
+    .join("");
+  const vide =
+    type === "veille"
+      ? "La veille n'a encore modifié aucun avis déjà connu."
+      : userId !== null
+        ? "Aucune action de cette personne pour l'instant."
+        : "Aucune action pour l'instant. Les changements de statut apparaîtront ici.";
+  const dernier = entries[entries.length - 1];
+  return html(
+    layout(
+      "Activité — Avis en cours",
+      whoStrip(user),
+      `<style>${DASHBOARD_CSS}</style>
+    <main class="activite">
+      <h2 class="titre-page">Activité</h2>
+      <p class="retour"><a href="/">← Retour aux avis</a></p>
+      <form class="filtres" method="get" action="/activite" style="margin-top:14px;">
+        <label>Afficher
+          <select name="type">
+            <option value="equipe"${type === "equipe" ? " selected" : ""}>Actions de l'équipe</option>
+            <option value="veille"${type === "veille" ? " selected" : ""}>Changements faits par la veille</option>
+          </select>
+        </label>
+        ${
+          type === "equipe"
+            ? `<label>Qui
+          <select name="qui">
+            <option value="">Toute l'équipe</option>
+            ${auteurs.map((u) => `<option value="${u.id}"${u.id === userId ? " selected" : ""}>${esc(u.label)}</option>`).join("")}
+          </select>
+        </label>`
+            : ""
+        }
+        <button type="submit" id="f-bouton">Filtrer</button>
+        ${before !== null ? `<a class="reinit" href="${esc(lien({}))}">Revenir aux plus récents</a>` : ""}
+      </form>
+      ${entries.length === 0 ? `<p class="histo-vide">${esc(vide)}</p>` : jours}
+      ${lues.length > ACTIVITE_PAGE && dernier ? `<p class="pagination"><a href="${esc(lien({ avant: String(dernier.id) }))}">Plus anciens →</a></p>` : ""}
+      <script>${ACTIVITE_JS}</script>
+    </main>`,
+    ),
+  );
+}
+
+// Comme sur le tableau de bord : un changement de filtre recharge la liste, le
+// bouton « Filtrer » ne reste que sans JavaScript.
+const ACTIVITE_JS = `
+(function () {
+  const f = document.querySelector("form.filtres");
+  if (!f) return;
+  const b = document.getElementById("f-bouton");
+  if (b) b.hidden = true;
+  f.querySelectorAll("select").forEach((s) => s.addEventListener("change", () => f.submit()));
+})();
+`;
 
 async function handleDeleteComment(req: Request, _url: URL, user: AuthUser): Promise<Response> {
   const { id = "" } = await form(req);
@@ -2532,35 +2728,14 @@ const DASHBOARD_JS = String.raw`
     }
   }
   const erreur = document.getElementById("liste-erreur");
-  const montrer = (msg) => { if (erreur) { erreur.textContent = msg; erreur.hidden = false; } };
-  document.querySelectorAll('form[data-live="statut"]').forEach((f) => {
-    const select = f.querySelector("select");
-    const ok = f.querySelector("button.ok");
-    if (!select) return;
-    if (ok) ok.hidden = true;
-    let precedent = select.value;
-    const couleur = () => {
-      const opt = select.options[select.selectedIndex];
-      select.style.borderLeftColor = (opt && opt.dataset.color) || "#626d66";
-    };
-    select.addEventListener("change", async () => {
-      select.disabled = true;
-      try {
-        const res = await fetch(f.action, { method: "POST", body: new FormData(f), headers: { Accept: "application/json" } });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || "Erreur " + res.status);
-        precedent = select.value;
-        couleur();
-        select.title = "Défini par vous à l'instant";
-        if (erreur) erreur.hidden = true;
-      } catch (err) {
-        select.value = precedent;
-        montrer("Le statut n'a pas pu être enregistré : " + (err && err.message ? err.message : "erreur réseau") + ".");
-      } finally {
-        select.disabled = false;
-      }
-    });
-  });
+  const montrer = (msg) => {
+    if (!erreur) return;
+    erreur.textContent = msg || "";
+    erreur.hidden = !msg;
+  };
+  const brancherStatut = ${brancherStatut.toString()};
+  const env = { fetch: (u, i) => fetch(u, i), FormData: FormData, montrer: montrer };
+  document.querySelectorAll('form[data-live="statut"]').forEach((f) => brancherStatut(f, env));
 })();
 `;
 
@@ -2764,6 +2939,8 @@ const routes: Array<{ method: string; path: string; access: Access; handler: Han
       return runStream(req, params.id ?? "");
     } },
   { method: "GET", path: "/mise-a-jour/:id/fragment", access: "user", handler: (_req, _url, _user, params) => handleRunFragment(params.id ?? "") },
+  { method: "GET", path: "/avis/:idweb/historique/fragment", access: "user", handler: (_req, _url, _user, params) => handleHistoryFragment(params.idweb ?? "") },
+  { method: "GET", path: "/activite", access: "user", handler: async (_req, url, user) => activityPage(user!, url) },
   { method: "POST", path: "/avis/:idweb/statut", access: "user", handler: (req, url, user, params) => handleSetStatus(req, url, user!, params) },
   { method: "GET", path: "/configuration", access: "config", handler: (req, url, user) => handleConfigHome(req, url, user!) },
   { method: "POST", path: "/configuration/mots-cles/ajouter", access: "config", handler: (req, url, user) => handleKeywordAdd(req, url, user!) },
